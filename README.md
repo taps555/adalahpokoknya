@@ -48,23 +48,9 @@ npx prisma migrate deploy
 npx prisma db push
 ```
 
-## 6. (Opsional) Bawa data lama dari laptop sebelumnya
 
-Di laptop lama, export dulu:
 
-```bash
-pg_dump -U postgres -d nama_db_lama > backup.sql
-```
-
-Di laptop baru, restore:
-
-```bash
-psql -U postgres -d nama_db_baru < backup.sql
-```
-
-Kalau tidak butuh data lama, skip langkah ini — cukup `db push` / `migrate deploy`, lalu upload ulang file HSPK/AHSP dari awal.
-
-## 7. Jalankan server
+## 6. Jalankan server
 
 ```bash
 node server.js
@@ -78,7 +64,7 @@ npm run dev
 
 Server akan jalan di `http://localhost:4000`.
 
-## 8. Kalau ada perubahan schema baru (mis. menambah model `RabItem`)
+## 7. Kalau ada perubahan schema baru (mis. menambah model `RabItem`)
 
 Setelah edit `schema.prisma`:
 
