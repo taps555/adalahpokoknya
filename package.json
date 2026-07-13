@@ -1,0 +1,27 @@
+{
+  "name": "hspk-ahsp-importer",
+  "version": "1.0.0",
+  "description": "Import HSPK (Harga Satuan Pokok Kegiatan) & AHSP (Analisa Harga Satuan Pekerjaan) dari file PDF/Excel ke PostgreSQL via Prisma. Dibuat supaya saat harga satuan berubah tiap tahun, tinggal upload file baru tanpa ubah kode.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4",
+    "prisma": "^5.20.0"
+  }
+}

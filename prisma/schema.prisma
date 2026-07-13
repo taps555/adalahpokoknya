@@ -1,0 +1,156 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ResourceType {
+  BAHAN // material
+  UPAH  // tenaga kerja / labor
+  ALAT  // peralatan / equipment
+}
+
+enum UploadStatus {
+  PROCESSING
+  SUCCESS
+  PARTIAL // berhasil sebagian, ada baris yang gagal di-parse (lihat UploadIssue)
+  FAILED
+}
+
+enum FileKind {
+  PDF
+  XLSX
+  CSV
+}
+
+/// Daftar harga satuan dasar: bahan, upah (tenaga kerja), dan alat.
+/// Ini adalah bagian "HARGA SATUAN BAHAN, UPAH DAN ALAT" di dokumen HSPK.
+model PriceItem {
+  id        String       @id @default(cuid())
+  type      ResourceType
+  name      String
+  unit      String
+  price     Decimal      @db.Decimal(18, 4)
+  period    Int // tahun berlaku, misal 2026
+  source    String? // nama file asal
+  batchId   String?
+  batch     UploadBatch? @relation(fields: [batchId], references: [id])
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  usages JobComponent[]
+
+  // satu nama+satuan+tipe hanya boleh punya 1 harga per periode
+  @@unique([type, name, unit, period], name: "uniq_price_item")
+  @@index([period])
+  @@index([name])
+}
+
+/// Satu jenis pekerjaan AHSP (mis. "Pemasangan 1 m2 Dinding Bata Merah").
+/// Koefisien tenaga kerja/bahan/alat-nya ada di JobComponent.
+model JobType {
+  id          String       @id @default(cuid())
+  name        String // "Jenis Pekerjaan"
+  paymentUnit String // "Satuan Pembayaran", misal m2, m3, kg, buah
+  category    String? // "A. PEKERJAAN PERSIAPAN", dst
+  reference   String? // referensi SNI / Permen PUPR
+  period      Int
+  source      String?
+  batchId     String?
+  batch       UploadBatch? @relation(fields: [batchId], references: [id])
+  overhead Float? // Menambahkan kolom overhead, boleh kosong (null)
+  needsReview Boolean      @default(false) // true kalau ada baris yang gagal di-parse saat import
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  components JobComponent[]
+
+  @@unique([name, paymentUnit, period], name: "uniq_job_type")
+  @@index([period])
+  @@index([category])
+}
+
+/// Baris koefisien pada AHSP: berapa banyak PriceItem tertentu dibutuhkan
+/// untuk 1 satuan pekerjaan. Contoh: Semen PC 50 Kg, koefisien 6.18 zak.
+model JobComponent {
+  id          String       @id @default(cuid())
+  jobTypeId   String
+  jobType     JobType      @relation(fields: [jobTypeId], references: [id], onDelete: Cascade)
+  priceItemId String
+  priceItem   PriceItem    @relation(fields: [priceItemId], references: [id])
+  section     ResourceType // A = UPAH, B = BAHAN, C = ALAT
+  coefficient Decimal      @db.Decimal(14, 6)
+
+  @@index([jobTypeId])
+  @@index([priceItemId])
+}
+
+/// Riwayat setiap file yang di-upload (PDF/Excel) beserta ringkasan hasil
+/// import-nya. Berguna untuk audit trail & untuk melihat baris yang gagal.
+model UploadBatch {
+  id             String       @id @default(cuid())
+  filename       String
+  fileKind       FileKind
+  period         Int
+  status         UploadStatus @default(PROCESSING)
+  priceItemCount Int          @default(0)
+  jobTypeCount   Int          @default(0)
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+  finishedAt     DateTime?
+
+  priceItems PriceItem[]
+  jobTypes   JobType[]
+  issues     UploadIssue[]
+}
+
+/// Baris mentah yang gagal di-parse otomatis (harga #REF!, format aneh, dll)
+/// supaya bisa direview & dikoreksi manual lewat UI/endpoint, bukan hilang begitu saja.
+model UploadIssue {
+  id        String      @id @default(cuid())
+  batchId   String
+  batch     UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  context   String? // nama job / section saat error terjadi, kalau ada
+  rawLine   String // teks baris asli
+  reason    String // kenapa gagal di-parse
+  resolved  Boolean     @default(false)
+  createdAt DateTime    @default(now())
+}
+
+// =========================================================
+// Tambahan: Client & Project
+// Bagian "Input Data Dasar" + "Pemilihan Data HSPK/AHSP"
+// =========================================================
+
+/// Client/pemilik proyek. Satu client bisa punya banyak proyek.
+model Client {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  projects Project[]
+
+  @@index([name])
+}
+
+/// Proyek yang dibuat user. hspkPeriod menunjuk ke tahun data
+/// HSPK/AHSP (PriceItem.period / JobType.period) yang dipakai sebagai
+/// acuan harga untuk proyek ini — dipilih dari data yang sudah ada,
+/// bukan upload ulang.
+model Project {
+  id         String   @id @default(cuid())
+  name       String
+  location   String
+  hspkPeriod Int
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([hspkPeriod])
+}
