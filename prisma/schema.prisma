@@ -20,6 +20,11 @@ enum UploadStatus {
   FAILED
 }
 
+enum Discipline {
+  SIPIL
+  INTERIOR
+}
+
 enum FileKind {
   PDF
   XLSX
@@ -34,6 +39,8 @@ model PriceItem {
   name      String
   unit      String
   price     Decimal      @db.Decimal(18, 4)
+  discipline Discipline?
+  grade      String?      // "A" | "B" | "C"
   period    Int // tahun berlaku, misal 2026
   source    String? // nama file asal
   batchId   String?
@@ -44,7 +51,7 @@ model PriceItem {
   usages JobComponent[]
 
   // satu nama+satuan+tipe hanya boleh punya 1 harga per periode
-  @@unique([type, name, unit, period], name: "uniq_price_item")
+  @@unique([type, name, unit, period, discipline, grade], name: "uniq_price_item")
   @@index([period])
   @@index([name])
 }
@@ -60,6 +67,8 @@ model JobType {
   period      Int
   source      String?
   batchId     String?
+  discipline Discipline?
+  grade      String?
   batch       UploadBatch? @relation(fields: [batchId], references: [id])
   overhead Float? // Menambahkan kolom overhead, boleh kosong (null)
   needsReview Boolean      @default(false) // true kalau ada baris yang gagal di-parse saat import
@@ -68,7 +77,7 @@ model JobType {
 
   components JobComponent[]
 
-  @@unique([name, paymentUnit, period], name: "uniq_job_type")
+  @@unique([name, paymentUnit, period, discipline, grade], name: "uniq_job_type")
   @@index([period])
   @@index([category])
 }
@@ -136,21 +145,100 @@ model Client {
 
   @@index([name])
 }
-
-/// Proyek yang dibuat user. hspkPeriod menunjuk ke tahun data
-/// HSPK/AHSP (PriceItem.period / JobType.period) yang dipakai sebagai
-/// acuan harga untuk proyek ini — dipilih dari data yang sudah ada,
-/// bukan upload ulang.
 model Project {
   id         String   @id @default(cuid())
   name       String
   location   String
   hspkPeriod Int
+  discipline Discipline   // <-- TAMBAH, wajib diisi
+  grade      String?      // <-- TAMBAH
   clientId   String
   client     Client   @relation(fields: [clientId], references: [id])
+  rabItems   RabItem[]
+
+  rabGroups RabGroup[]
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([clientId])
   @@index([hspkPeriod])
 }
+
+model RabItem {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name        String
+  paymentUnit String
+  category    String?
+  reference   String?
+  overhead    Float?
+  discipline  Discipline?   // <-- TAMBAH
+  grade       String?       // <-- TAMBAH (opsional, biar lengkap)
+
+  volume         Decimal  @db.Decimal(14, 4)
+
+  rapUnitPrice   Decimal  @db.Decimal(18, 4)  // otomatis, dari kalkulasi HSPK
+  rapTotalPrice  Decimal  @db.Decimal(18, 4)  // rapUnitPrice * volume
+
+  rabUnitPrice   Decimal  @db.Decimal(18, 4)  // MANUAL, diisi estimator
+  rabTotalPrice  Decimal  @db.Decimal(18, 4)  // rabUnitPrice * volume
+
+  sourceJobTypeId String?
+  groupId         String?
+  group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  components RabItemComponent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+model RabItemComponent {
+  id        String       @id @default(cuid())
+  rabItemId String
+  rabItem   RabItem      @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  name        String
+  unit        String
+  section     ResourceType
+  coefficient Decimal      @db.Decimal(14, 6)
+  unitPrice   Decimal      @db.Decimal(18, 4)
+  lineTotal   Decimal      @db.Decimal(18, 4)
+}
+
+
+model RabGroup {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name      String   // "PERSIAPAN LAPANGAN" / "PEKERJAAN PERSIAPAN"
+  reference String?  // "1" / "1.1" dst, opsional buat penomoran otomatis
+  order     Int      @default(0) // urutan tampil
+
+  parentId  String?
+  parent    RabGroup?  @relation("GroupChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children  RabGroup[] @relation("GroupChildren")
+
+  items     RabItem[]
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([parentId])
+}
+
+model DisciplineGrade {
+  id         String     @id @default(cuid())
+  discipline Discipline
+  grade      String
+  order      Int        @default(0)
+
+  @@unique([discipline, grade])
+}
+
+

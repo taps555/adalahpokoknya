@@ -8,23 +8,20 @@ const router = express.Router();
 
 /** GET /api/jobs?period=2026&q=beton&category=... */
 router.get('/jobs', async (req, res) => {
-  const { period, q, category } = req.query;
+  const { period, q, category, discipline, grade } = req.query;
   const where = {};
   if (period) where.period = parseInt(period, 10);
   if (category) where.category = { contains: category, mode: 'insensitive' };
   if (q) where.name = { contains: q, mode: 'insensitive' };
+  if (discipline) where.discipline = discipline;
+  if (grade) where.grade = grade;
 
   const jobs = await prisma.jobType.findMany({
     where,
     orderBy: [{ category: 'asc' }, { name: 'asc' }],
     select: {
-      id: true,
-      name: true,
-      paymentUnit: true,
-      category: true,
-      period: true,
-      needsReview: true,
-      reference: true,
+      id: true, name: true, paymentUnit: true, category: true,
+      period: true, needsReview: true, reference: true, discipline: true, grade: true,
     },
   });
   res.json(jobs);

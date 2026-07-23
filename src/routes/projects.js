@@ -10,7 +10,7 @@ const prisma = require('../lib/prisma');
 // - clientName dipakai kalau user pilih "Client Baru"
 router.post('/', async (req, res, next) => {
   try {
-    const { name, location, hspkPeriod, clientId, clientName } = req.body;
+    const { name, location, hspkPeriod, discipline, grade, clientId, clientName } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Nama proyek wajib diisi' });
@@ -21,14 +21,21 @@ router.post('/', async (req, res, next) => {
     if (!hspkPeriod) {
       return res.status(400).json({ error: 'Periode data HSPK/AHSP wajib dipilih' });
     }
+    if (!discipline) {
+      return res.status(400).json({ error: 'Disiplin wajib dipilih' });
+    }
 
-    // pastikan periode yang dipilih memang punya data di DB
+    // pastikan periode+disiplin+grade yang dipilih memang punya data di DB
     const periodExists = await prisma.jobType.findFirst({
-      where: { period: Number(hspkPeriod) },
+      where: {
+        period: Number(hspkPeriod),
+        discipline,
+        ...(grade ? { grade } : {}),
+      },
     });
     if (!periodExists) {
       return res.status(400).json({
-        error: `Data HSPK/AHSP untuk periode ${hspkPeriod} tidak ditemukan di database`,
+        error: `Data HSPK/AHSP untuk periode ${hspkPeriod} - ${discipline}${grade ? ' - ' + grade : ''} tidak ditemukan di database`,
       });
     }
 
@@ -51,6 +58,8 @@ router.post('/', async (req, res, next) => {
         name: name.trim(),
         location: location.trim(),
         hspkPeriod: Number(hspkPeriod),
+        discipline,
+        grade: grade || null,
         clientId: finalClientId,
       },
       include: { client: true },

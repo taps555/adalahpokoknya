@@ -1,31 +1,43 @@
-'use strict';
+//excelParser.js
 
-const XLSX = require('xlsx');
-const { parseHspkText } = require('./textStateParser');
-const { parseAhspSheet, looksLikeAhspSheet } = require('./ahspSheetParser');
+"use strict";
+
+const XLSX = require("xlsx");
+const DEBUG = process.env.HSPK_DEBUG === "1";
+const { parseHspkText } = require("./textStateParser");
+const { parseAhspSheet, looksLikeAhspSheet } = require("./ahspSheetParser");
 
 const HEADER_ALIASES = {
-  name: ['uraian', 'nama', 'nama bahan', 'nama barang', 'jenis', 'upah - material - alat', 'upah-material-alat'],
-  unit: ['satuan', 'sat', 'sat.'],
-  price: ['harga', 'harga satuan', 'harga satuan (rp)', 'harga satuan(rp)'],
-  coefficient: ['koefisien', 'koef'],
+  name: [
+    "uraian",
+    "nama",
+    "nama bahan",
+    "nama barang",
+    "jenis",
+    "upah - material - alat",
+    "upah-material-alat",
+  ],
+  unit: ["satuan", "sat", "sat."],
+  price: ["harga", "harga satuan", "harga satuan (rp)", "harga satuan(rp)"],
+  coefficient: ["koefisien", "koef"],
 };
 
 // kolom yang meski ke-detect sebagai "mengandung nama", jangan dipakai
 // (mis. kolom "Kode" berisi L.01/L.02 yang bisa salah kena alias longgar)
-const IGNORED_HEADER_LABELS = new Set(['kode', 'no']);
+const IGNORED_HEADER_LABELS = new Set(["kode", "no"]);
 
-const SPECIAL_FORMAT_SHEETS = [/biaya operasi alat berat/i];   // <-- TAMBAH INI
-function isSpecialFormatSheet(sheetName) {                      // <-- TAMBAH INI
-  return SPECIAL_FORMAT_SHEETS.some((p) => p.test(sheetName || '')); // <-- TAMBAH INI
-}                                                                 // <-- TAMBAH INI
+const SPECIAL_FORMAT_SHEETS = [/biaya operasi alat berat/i]; // <-- TAMBAH INI
+function isSpecialFormatSheet(sheetName) {
+  // <-- TAMBAH INI
+  return SPECIAL_FORMAT_SHEETS.some((p) => p.test(sheetName || "")); // <-- TAMBAH INI
+} // <-- TAMBAH INI
 
 function normalizeHeader(cell) {
-  return String(cell || '')
+  return String(cell || "")
     .toLowerCase()
     .trim()
-    .replace(/\s+/g, ' ');
-} 
+    .replace(/\s+/g, " ");
+}
 
 function detectColumnMap(headerRow) {
   const map = {};
@@ -46,7 +58,9 @@ function isUsableColumnMap(map) {
   // daftar harga dasar -> jangan dipakai sebagai structured price sheet
   if (map.coefficient !== undefined) return false;
   // minimal butuh name + unit + price supaya layak dipakai sebagai fast-path
-  return map.name !== undefined && map.unit !== undefined && map.price !== undefined;
+  return (
+    map.name !== undefined && map.unit !== undefined && map.price !== undefined
+  );
 }
 /**
  * Coba baca satu sheet sebagai tabel harga dasar (bahan/upah/alat) dengan
@@ -54,18 +68,18 @@ function isUsableColumnMap(map) {
  * TIDAK cocok dengan fast-path ini dan akan di-skip di sini.
  */
 function tryStructuredPriceSheet(sheet) {
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   for (let i = 0; i < Math.min(rows.length, 15); i++) {
     const map = detectColumnMap(rows[i]);
     if (isUsableColumnMap(map)) {
       const items = [];
       for (let r = i + 1; r < rows.length; r++) {
         const row = rows[r];
-        const name = String(row[map.name] || '').trim();
-        const unit = String(row[map.unit] || '').trim();
+        const name = String(row[map.name] || "").trim();
+        const unit = String(row[map.unit] || "").trim();
         const priceRaw = row[map.price];
         if (!name || !unit) continue;
-        const price = parseFloat(String(priceRaw).replace(/[^\d.-]/g, ''));
+        const price = parseFloat(String(priceRaw).replace(/[^\d.-]/g, ""));
         if (!Number.isFinite(price)) continue;
         items.push({ name, unit, price });
       }
@@ -81,13 +95,13 @@ function tryStructuredPriceSheet(sheet) {
  * (mis. hasil copy-paste dari PDF ke Excel, pakai label "Jenis Pekerjaan =").
  */
 function sheetToLines(sheet) {
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   return rows
     .map((row) =>
       row
-        .map((c) => String(c ?? '').trim())
+        .map((c) => String(c ?? "").trim())
         .filter(Boolean)
-        .join(' ')
+        .join(" "),
     )
     .filter((line) => line.length > 0);
 }
@@ -97,29 +111,36 @@ function sheetToLines(sheet) {
  * @returns {{materials, jobs, issues}}
  */
 function parseExcelBuffer(fileBuffer) {
-  const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+  const workbook = XLSX.read(fileBuffer, { type: "buffer" });
 
- const materials = [];
+  const materials = [];
   const jobs = [];
   const issues = [];
   const allLines = [];
-  const fallbackSheets = new Set();      // <-- TAMBAH
-  const specialSheets = [];              // <-- TAMBAH
+  const fallbackSheets = new Set(); // <-- TAMBAH
+  const specialSheets = []; // <-- TAMBAH
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
 
-    if (isSpecialFormatSheet(sheetName)) {   
-      specialSheets.push(sheetName);         
-      continue;                              
-    }                                        
+    if (isSpecialFormatSheet(sheetName)) {
+      specialSheets.push(sheetName);
+      continue;
+    }
 
     // 1) PRIORITASKAN AHSP DULU! (Pindahkan blok ini ke atas)
     const _isAhsp = looksLikeAhspSheet(sheet);
-    console.log(`[ROUTE] "${sheetName}" -> isAhsp=${_isAhsp}`);
-    if (!_isAhsp) {
-      const _rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }).slice(0, 15);
-      console.log(`[DUMP first 15 rows] "${sheetName}"`, JSON.stringify(_rows));
+    if (DEBUG) {
+      console.log(`[ROUTE] "${sheetName}" -> isAhsp=${_isAhsp}`);
+      if (!_isAhsp) {
+        const _rows = XLSX.utils
+          .sheet_to_json(sheet, { header: 1, defval: "" })
+          .slice(0, 15);
+        console.log(
+          `[DUMP first 15 rows] "${sheetName}"`,
+          JSON.stringify(_rows),
+        );
+      }
     }
     if (_isAhsp) {
       const result = parseAhspSheet(sheet, sheetName);
@@ -136,16 +157,17 @@ function parseExcelBuffer(fileBuffer) {
     }
 
     // 3) FALLBACK TERAKHIR
-    fallbackSheets.add(sheetName);              
+    fallbackSheets.add(sheetName);
     allLines.push(...sheetToLines(sheet));
   }
 
-  console.log('[FALLBACK SHEETS]', [...fallbackSheets]);              // <-- TAMBAH
-  console.log('[SPECIAL FORMAT SHEETS - dilewati]', specialSheets);   // <-- TAMBAH
-  
+  if (DEBUG) {
+    console.log("[FALLBACK SHEETS]", [...fallbackSheets]);
+    console.log("[SPECIAL FORMAT SHEETS - dilewati]", specialSheets);
+  }
 
   const fallbackResult = allLines.length
-    ? parseHspkText(allLines.join('\n'))
+    ? parseHspkText(allLines.join("\n"))
     : { materials: [], jobs: [], issues: [] };
 
   return {

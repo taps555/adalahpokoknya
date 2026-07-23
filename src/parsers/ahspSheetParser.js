@@ -1,13 +1,18 @@
-'use strict';
+"use strict";
 
-const XLSX = require('xlsx');
+const XLSX = require("xlsx");
 
 // ---- deteksi header kolom tabel item (No/Uraian/Kode/Sat./Koefisien/...) ----
 const ITEM_HEADER_ALIASES = {
-  name: ['uraian'],
-  unit: ['sat', 'sat.', 'satuan'],
-  coefficient: ['koefisien', 'koef'],
-  price: ['harga satuan', 'harga satuan (rp)', 'harga  satuan', 'harga  satuan (rp)'],
+  name: ["uraian"],
+  unit: ["sat", "sat.", "satuan"],
+  coefficient: ["koefisien", "koef"],
+  price: [
+    "harga satuan",
+    "harga satuan (rp)",
+    "harga  satuan",
+    "harga  satuan (rp)",
+  ],
 };
 
 // Baris job baru: kolom nomor berpola "2.2.1.1.1" / "2.2.1.1.1a" + ada harga di kolom kanan
@@ -21,34 +26,42 @@ const RE_CLOSE_CODE = /^F$/i;
 const RE_CLOSE_TEXT = /harga satuan pekerjaan/i;
 
 function norm(cell) {
-  return String(cell ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+  return String(cell ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 function cellStr(cell) {
-  return String(cell ?? '').trim();
+  return String(cell ?? "").trim();
 }
 
 // >>> SISIPKAN PATCH B DI SINI <
 function firstNonEmptyIdx(row, maxScan = 6) {
   for (let i = 0; i < Math.min(row.length, maxScan); i++) {
-    if (cellStr(row[i]) !== '') return i;
+    if (cellStr(row[i]) !== "") return i;
   }
   return -1;
 }
 
 function normCode(cell) {
-  return cellStr(cell).replace(/\s+/g, '').replace(/,/g, '.').replace(/\.{2,}/g, '.');
+  return cellStr(cell)
+    .replace(/\s+/g, "")
+    .replace(/,/g, ".")
+    .replace(/\.{2,}/g, ".");
 }
 
 function extractPaymentUnit(name) {
   if (!name) return null;
-  const m = name.match(/\b(?:\d+([.,]\d+)?|per)\s+(m'|m2|m3|m1|m|kg|ls|unit|buah|titik|oh|batang|zak|lembar|liter|ton|set|bh|psg|ttk)\b/i);
+  const m = name.match(
+    /\b(?:\d+([.,]\d+)?|per)\s+(m'|m2|m3|m1|m|kg|ls|unit|buah|titik|oh|batang|zak|lembar|liter|ton|set|bh|psg|ttk)\b/i,
+  );
   return m ? m[2] : null;
 }
 
 function toNumber(cell) {
-  if (cell === '' || cell == null) return null;
-  const cleaned = String(cell).replace(/[^\d.-]/g, '');
+  if (cell === "" || cell == null) return null;
+  const cleaned = String(cell).replace(/[^\d.-]/g, "");
   if (!cleaned) return null;
   const n = parseFloat(cleaned);
   return Number.isFinite(n) ? n : null;
@@ -62,8 +75,12 @@ function detectItemHeaderMap(row) {
       if (aliases.includes(n) && map[key] === undefined) map[key] = idx;
     }
   });
-  return map.name !== undefined && map.unit !== undefined &&
-    map.coefficient !== undefined && map.price !== undefined ? map : null;
+  return map.name !== undefined &&
+    map.unit !== undefined &&
+    map.coefficient !== undefined &&
+    map.price !== undefined
+    ? map
+    : null;
 }
 
 function sectionFromRow(row) {
@@ -72,9 +89,9 @@ function sectionFromRow(row) {
   const code = cellStr(row[idx]);
   const label = norm(row[idx + 1]);
   if (!RE_SECTION_CODE.test(code)) return null;
-  if (/tenaga/.test(label) || code.toUpperCase() === 'A') return 'UPAH';
-  if (/bahan/.test(label) || code.toUpperCase() === 'B') return 'BAHAN';
-  if (/peralatan/.test(label) || code.toUpperCase() === 'C') return 'ALAT';
+  if (/tenaga/.test(label) || code.toUpperCase() === "A") return "UPAH";
+  if (/bahan/.test(label) || code.toUpperCase() === "B") return "BAHAN";
+  if (/peralatan/.test(label) || code.toUpperCase() === "C") return "ALAT";
   return null;
 }
 
@@ -106,7 +123,7 @@ function isCloseRow(row) {
  * @returns {{jobs: Array, issues: Array}}
  */
 function parseAhspSheet(sheet, sheetName) {
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
 
   const jobs = [];
   const issues = [];
@@ -118,7 +135,7 @@ function parseAhspSheet(sheet, sheetName) {
   function pushIssue(reason, row) {
     issues.push({
       context: currentJob ? currentJob.name : `(${sheetName})`,
-      rawLine: row.map(cellStr).join(' | '),
+      rawLine: row.map(cellStr).join(" | "),
       reason,
     });
   }
@@ -130,7 +147,7 @@ function parseAhspSheet(sheet, sheetName) {
   }
 
   for (const row of rows) {
-    if (row.every((c) => cellStr(c) === '')) continue; // baris kosong
+    if (row.every((c) => cellStr(c) === "")) continue; // baris kosong
 
     // 1. Deteksi Header Paling Awal
     // 1. Deteksi Header Paling Awal
@@ -142,31 +159,37 @@ function parseAhspSheet(sheet, sheetName) {
 
     // 1b. Header berulang tapi tidak lengkap (kolom kosong) -> skip, jangan remap
     const _idxH = firstNonEmptyIdx(row);
-    if (_idxH !== -1 && norm(row[_idxH]) === 'no' && /uraian/.test(norm(row[_idxH + 1]))) {
+    if (
+      _idxH !== -1 &&
+      norm(row[_idxH]) === "no" &&
+      /uraian/.test(norm(row[_idxH + 1]))
+    ) {
       continue;
     }
 
     // 2. Baris job baru
     if (isJobHeaderRow(row) && !RE_CLOSE_CODE.test(cellStr(row[0]))) {
       finalizeJob();
-      
+
       const idx = firstNonEmptyIdx(row);
       const kodePekerjaan = normCode(row[idx]);
       const namaPekerjaan = cellStr(row[idx + 1]);
-      console.log('[JOB ROW DUMP]', JSON.stringify(row));
 
       currentJob = {
         name: namaPekerjaan || `${sheetName} (perlu ditinjau)`,
         paymentUnit: extractPaymentUnit(namaPekerjaan),
         category: sheetName,
-        reference: kodePekerjaan !== '' ? kodePekerjaan : null,
-        overhead: 0.1, 
+        reference: kodePekerjaan !== "" ? kodePekerjaan : null,
+        overhead: 0.1,
         labor: [],
         material: [],
         equipment: [],
-        isSpecialFormat: /analisa biaya operasi alat berat|duktivitas/i.test(namaPekerjaan),
+        isSpecialFormat:
+          /analisa biaya operasi alat berat|duktivitas|biaya dengan depresiasi|harga satuan dasar|cara perhitungan/i.test(
+            namaPekerjaan,
+          ),
       };
-      
+
       continue; // Lanjut ke baris berikutnya
     }
     if (!currentJob) continue;
@@ -186,22 +209,41 @@ function parseAhspSheet(sheet, sheetName) {
       continue;
     }
 
+    // TAMBAH baris ini setelah currentJob ada, sebelum proses section/item:
+    if (currentJob && !currentJob.isSpecialFormat) {
+      const rowText = norm(row.join(" "));
+      if (/biaya dengan depresiasi|koefisien alat/.test(rowText)) {
+        currentJob.isSpecialFormat = true;
+        currentJob.labor = [];
+        currentJob.material = [];
+        currentJob.equipment = [];
+      }
+    }
+
+    // taruh sebelum blok proses item (section 6), sejajar cek label overhead:
+    const idxE = firstNonEmptyIdx(row);
+    if (idxE !== -1 && /^E\.?$/i.test(cellStr(row[idxE]))) {
+      continue; // baris overhead "E", tanpa/dengan label teks
+    }
+
     // 5. Filter baris subtotal / jumlah harga / biaya umum (Agar tidak dianggap error)
-    const label = norm(`${row[0] ?? ''} ${row[1] ?? ''}`);
+    const label = norm(row.slice(0, 4).map(cellStr).join(" "));
     if (
-      label.includes('jumlah harga') || 
-      label.includes('jumlah') ||
-      label.includes('subtotal') ||
-      label.includes('total') ||
-      label.includes('biaya umum') ||
-      label.includes('keuntungan') ||
-      label.includes('pajak')
+      label.includes("jumlah harga") ||
+      label.includes("jumlah") ||
+      label.includes("subtotal") ||
+      label.includes("total") ||
+      label.includes("biaya umum") ||
+      label.includes("keuntungan") ||
+      label.includes("pajak")
     ) {
       // Tangkap persentase overhead jika ada di baris biaya umum
       if (/biaya umum/.test(label)) {
-        const overheadCell = row.find(c => String(c).includes('%'));
+        const overheadCell = row.find((c) => String(c).includes("%"));
         if (overheadCell) {
-          const cleanNumber = parseFloat(String(overheadCell).replace('%', '').trim());
+          const cleanNumber = parseFloat(
+            String(overheadCell).replace("%", "").trim(),
+          );
           if (!isNaN(cleanNumber)) {
             currentJob.overhead = cleanNumber / 100;
           }
@@ -222,42 +264,67 @@ function parseAhspSheet(sheet, sheetName) {
         continue;
       }
 
-      if (!name || !unit) {
-        pushIssue(`Baris item tidak lengkap pada section ${currentSection}`, row);
+      if (!name) {
+        pushIssue(`Baris item tanpa nama pada section ${currentSection}`, row);
+        continue;
+      }
+      if (!unit) {
+        const notUsed =
+          (coefficient == null || coefficient === 0) &&
+          (price == null || price === 0);
+        if (notUsed) continue; // placeholder, item tidak dipakai job ini
+        pushIssue(
+          `Baris item tidak lengkap pada section ${currentSection}`,
+          row,
+        );
         continue;
       }
       if (coefficient == null || price == null) {
-        pushIssue(`Nilai kosong/#REF! pada item di section ${currentSection}`, row);
+        pushIssue(
+          `Nilai kosong/#REF! pada item di section ${currentSection}`,
+          row,
+        );
       }
-      
+
       const item = { name, unit, coefficient, price };
       const bucket =
-        currentSection === 'UPAH' ? currentJob.labor :
-        currentSection === 'BAHAN' ? currentJob.material :
-        currentJob.equipment;
-      
+        currentSection === "UPAH"
+          ? currentJob.labor
+          : currentSection === "BAHAN"
+            ? currentJob.material
+            : currentJob.equipment;
+
       bucket.push(item);
       continue;
     }
 
     const _idx = firstNonEmptyIdx(row);
-   if (_idx !== -1 && /^\d+(\.\d+)*\.?$/.test(normCode(row[_idx])) && !row.slice(_idx + 1).some((c) => toNumber(c) !== null && toNumber(c) > 100))  {
+    if (
+      _idx !== -1 &&
+      /^\d+(\.\d+)*\.?$/.test(normCode(row[_idx])) &&
+      !row
+        .slice(_idx + 1)
+        .some((c) => toNumber(c) !== null && toNumber(c) > 100)
+    ) {
       continue; // judul sub-kelompok, bukan error
     }
 
-
-const NOISE_WORDS = ['revisi', 'baru', 'lama', 'update'];
-    if (_idx !== -1 && row.filter((c) => cellStr(c) !== '').length === 1 && NOISE_WORDS.includes(norm(row[_idx]))) {
+    const NOISE_WORDS = ["revisi", "baru", "lama", "update"];
+    if (
+      _idx !== -1 &&
+      row.filter((c) => cellStr(c) !== "").length === 1 &&
+      NOISE_WORDS.includes(norm(row[_idx]))
+    ) {
       continue;
     }
 
-    pushIssue('Baris tidak dikenali di dalam blok pekerjaan', row);
+    pushIssue("Baris tidak dikenali di dalam blok pekerjaan", row);
   }
 
   finalizeJob();
 
   for (const job of jobs) {
-    if (!job.paymentUnit) job.paymentUnit = '-';
+    if (!job.paymentUnit) job.paymentUnit = "-";
   }
 
   return { jobs, issues };
@@ -268,7 +335,7 @@ const NOISE_WORDS = ['revisi', 'baru', 'lama', 'update'];
  * Cek beberapa baris pertama, cari pola nomor job atau kata "TENAGA KERJA".
  */
 function looksLikeAhspSheet(sheet) {
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   for (let i = 0; i < Math.min(rows.length, 60); i++) {
     const row = rows[i];
     if (isJobHeaderRow(row)) return true;

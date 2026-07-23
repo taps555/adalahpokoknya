@@ -33,6 +33,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Field "period" (tahun HSPK) wajib diisi, contoh: 2026.' });
     }
 
+    const { discipline, grade } = req.body;
+    if (!discipline || !['SIPIL', 'INTERIOR'].includes(discipline)) {
+      return res.status(400).json({ error: 'Field "discipline" wajib diisi: SIPIL atau INTERIOR.' });
+    }
+    if (!grade) {
+      return res.status(400).json({ error: 'Field "grade" wajib diisi, contoh: A, B, atau C.' });
+    }
+
     const fileKind = detectFileKind(req.file.originalname, req.file.mimetype);
     if (!fileKind) {
       return res.status(400).json({ error: 'Ekstensi file tidak dikenali. Gunakan .pdf, .xlsx, atau .xls.' });
@@ -45,9 +53,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 
     if (parsed.materials.length === 0 && parsed.jobs.length === 0) {
       return res.status(422).json({
-        error:
-          'Tidak ada data harga maupun AHSP yang berhasil dikenali dari file ini. ' +
-          'Pastikan formatnya mirip dokumen HSPK/AHSP standar, atau cek endpoint review untuk detail.',
+        error: 'Tidak ada data harga maupun AHSP yang berhasil dikenali dari file ini.',
         issuesSample: parsed.issues.slice(0, 20),
       });
     }
@@ -55,6 +61,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const result = await importParsedData({
       parsed,
       period,
+      discipline,
+      grade,
       filename: req.file.originalname,
       fileKind,
     });

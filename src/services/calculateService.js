@@ -56,6 +56,8 @@ async function calculateJobPrice(jobTypeId) {
       period: jobType.period,
       needsReview: jobType.needsReview,
       overhead: overheadPercentage, 
+      discipline: jobType.discipline,   // <-- TAMBAH
+      grade: jobType.grade,             // <-- TAMBAH
     },
     breakdown,
     subtotal,
