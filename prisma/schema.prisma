@@ -68,9 +68,13 @@ model JobType {
   source      String?
   batchId     String?
   discipline Discipline?
+  
   grade      String?
   batch       UploadBatch? @relation(fields: [batchId], references: [id])
   overhead Float? // Menambahkan kolom overhead, boleh kosong (null)
+
+  bvItems BvItem[]
+  
   needsReview Boolean      @default(false) // true kalau ada baris yang gagal di-parse saat import
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
@@ -155,6 +159,7 @@ model Project {
   clientId   String
   client     Client   @relation(fields: [clientId], references: [id])
   rabItems   RabItem[]
+  bvItems BvItem[]
 
   rabGroups RabGroup[]
   createdAt  DateTime @default(now())
@@ -162,6 +167,7 @@ model Project {
 
   @@index([clientId])
   @@index([hspkPeriod])
+
 }
 
 model RabItem {
@@ -188,6 +194,8 @@ model RabItem {
   sourceJobTypeId String?
   groupId         String?
   group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  bvItem BvItem? 
 
   components RabItemComponent[]
 
@@ -226,6 +234,8 @@ model RabGroup {
 
   items     RabItem[]
 
+  bvItems BvItem[]
+
   createdAt DateTime @default(now())
 
   @@index([projectId])
@@ -239,6 +249,55 @@ model DisciplineGrade {
   order      Int        @default(0)
 
   @@unique([discipline, grade])
+}
+
+model BvItem {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  groupId   String?
+  group     RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  sourceJobTypeId String?
+  sourceJobType   JobType? @relation(fields: [sourceJobTypeId], references: [id])
+
+  name        String?
+  keterangan  String?
+  paymentUnit String?
+
+  totalVolume Decimal @db.Decimal(14, 4)
+
+  ecommerceLink   String?
+  linkedRabItemId String?  @unique
+  linkedRabItem   RabItem? @relation(fields: [linkedRabItemId], references: [id], onDelete: SetNull)
+
+  breakdowns BvBreakdown[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([groupId])
+}
+
+model BvBreakdown {
+  id       String @id @default(cuid())
+  bvItemId String
+  bvItem   BvItem @relation(fields: [bvItemId], references: [id], onDelete: Cascade)
+
+  keterangan String?
+  panjang    Decimal? @db.Decimal(10, 4)
+  lebar      Decimal? @db.Decimal(10, 4)
+  tinggi     Decimal? @db.Decimal(10, 4)
+  diameter   Decimal? @db.Decimal(10, 4)
+  berat      Decimal? @db.Decimal(10, 4)
+  jumlahSisi Decimal? @db.Decimal(10, 4)
+  jumlahBh   Decimal? @db.Decimal(10, 4)
+  waste      Decimal? @db.Decimal(6, 4) @default(0)
+
+  subTotal Decimal @db.Decimal(14, 4)
+
+  @@index([bvItemId])
 }
 
 

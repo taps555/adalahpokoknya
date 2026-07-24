@@ -16,6 +16,8 @@ const rabGrub = require("./routes/crudGrub/rabGrub.routes");
 
 const exportExcel = require("./routes/exportToFile/rabExport.routes");
 
+const bv = require("./routes/crudGrub/bv.routes");
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -34,6 +36,9 @@ app.use("/api", rabGrub);
 
 //export to file excel
 app.use("/api", exportExcel);
+
+//bv
+app.use("/api", bv);
 
 app.use((err, req, res, next) => {
   if (err) {
