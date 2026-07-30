@@ -10,18 +10,36 @@ function calcBreakdownSubtotal({
   panjang,
   lebar,
   tinggi,
+  luas,
+  keliling,
+  diameter,
+  berat,
   jumlahSisi,
   jumlahBh,
   waste,
 }) {
-  const p = panjang != null ? Number(panjang) : 1;
-  const l = lebar != null ? Number(lebar) : 1;
-  const t = tinggi != null ? Number(tinggi) : 1;
-  const j =
-    (jumlahSisi != null ? Number(jumlahSisi) : null) ??
-    (jumlahBh != null ? Number(jumlahBh) : 1);
-  const w = waste != null ? Number(waste) / 100 : 0;
-  return p * l * t * j * (1 + w);
+  const w = waste != null && waste !== "" ? Number(waste) / 100 : 0;
+
+  const s = jumlahSisi != null && jumlahSisi !== "" ? Number(jumlahSisi) : 1;
+  const b = jumlahBh != null && jumlahBh !== "" ? Number(jumlahBh) : 1;
+  const totalJumlah = s * b;
+
+  const p = panjang != null && panjang !== "" ? Number(panjang) : 1;
+  const t = tinggi != null && tinggi !== "" ? Number(tinggi) : 1;
+
+  if (berat != null && berat !== "") {
+    return p * t * Number(berat) * totalJumlah * (1 + w);
+  }
+
+  if (luas != null && luas !== "") return Number(luas) * totalJumlah * (1 + w);
+  if (keliling != null && keliling !== "")
+    return Number(keliling) * totalJumlah * (1 + w);
+  if (diameter != null && diameter !== "")
+    return Number(diameter) * totalJumlah * (1 + w);
+
+  const l = lebar != null && lebar !== "" ? Number(lebar) : 1;
+
+  return p * l * t * totalJumlah * (1 + w);
 }
 
 function buildBreakdownRows(breakdowns) {
@@ -32,11 +50,13 @@ function buildBreakdownRows(breakdowns) {
       panjang: b.panjang ?? null,
       lebar: b.lebar ?? null,
       tinggi: b.tinggi ?? null,
+      luas: b.luas ?? null,
+      keliling: b.keliling ?? null,
       diameter: b.diameter ?? null,
-      berat: b.berat ?? null,
+      berat: b.berat ?? null, // <- tetap disimpan, cuma gak dipakai di calcBreakdownSubtotal
       jumlahSisi: b.jumlahSisi ?? null,
       jumlahBh: b.jumlahBh ?? null,
-      waste: b.waste ?? 0,
+      waste: b.waste ?? null,
       subTotal,
     };
   });
@@ -58,12 +78,17 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
       groupId,
       ecommerceLink,
       breakdowns,
+      parentBvItemId,
+      isHeaderOnly,
     } = req.body;
 
-    if (!Array.isArray(breakdowns) || breakdowns.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Minimal harus ada 1 baris breakdown dimensi." });
+    if (
+      !isHeaderOnly &&
+      (!Array.isArray(breakdowns) || breakdowns.length === 0)
+    ) {
+      return res.status(400).json({
+        error: "Minimal harus ada 1 baris breakdown dimensi (kecuali header).",
+      });
     }
 
     const project = await prisma.project.findUnique({
@@ -80,10 +105,24 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
         return res
           .status(404)
           .json({ error: "Group/Sub-Group tidak ditemukan." });
-      if (group.projectId !== projectId) {
+      if (group.projectId !== projectId)
         return res
           .status(400)
           .json({ error: "Group bukan milik project ini." });
+    }
+
+    let finalGroupId = groupId || null;
+    let parent = null;
+
+    if (parentBvItemId) {
+      parent = await prisma.bvItem.findUnique({
+        where: { id: parentBvItemId },
+      });
+      if (!parent)
+        return res.status(404).json({ error: "Item induk tidak ditemukan." });
+
+      if (!groupId) {
+        finalGroupId = parent.groupId;
       }
     }
 
@@ -100,31 +139,41 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
           .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
       finalName = jobType.name;
       finalUnit = jobType.paymentUnit;
-    } else {
+    } else if (!isHeaderOnly) {
       if (!name || !paymentUnit) {
         return res.status(400).json({
           error:
-            'Field "name" dan "paymentUnit" wajib diisi untuk item custom (tanpa sourceJobTypeId).',
+            'Field "name" dan "paymentUnit" wajib diisi untuk item custom.',
         });
       }
+    } else if (!name) {
+      return res
+        .status(400)
+        .json({ error: 'Field "name" wajib diisi untuk header.' });
     }
 
-    const breakdownRows = buildBreakdownRows(breakdowns);
+    const breakdownRows = isHeaderOnly ? [] : buildBreakdownRows(breakdowns);
     const totalVolume = breakdownRows.reduce((sum, b) => sum + b.subTotal, 0);
 
     const bvItem = await prisma.bvItem.create({
       data: {
         projectId,
-        groupId: groupId || null,
+        groupId: finalGroupId,
+        parentBvItemId: parentBvItemId || null,
+        isHeaderOnly: !!isHeaderOnly,
         sourceJobTypeId: sourceJobTypeId || null,
         name: finalName,
         keterangan: keterangan || null,
-        paymentUnit: finalUnit,
+        paymentUnit: isHeaderOnly ? finalUnit || null : finalUnit,
         ecommerceLink: ecommerceLink || null,
         totalVolume,
         breakdowns: { create: breakdownRows },
       },
-      include: { breakdowns: true, sourceJobType: true },
+      include: {
+        breakdowns: true,
+        sourceJobType: true,
+        children: { include: { breakdowns: true } },
+      },
     });
 
     res
@@ -137,29 +186,45 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
-
 /** GET /projects/:projectId/bv-items */
 router.get("/projects/:projectId/bv-items", async (req, res) => {
   try {
     const { projectId } = req.params;
     const items = await prisma.bvItem.findMany({
-      where: { projectId },
-      include: { breakdowns: true, linkedRabItem: true, sourceJobType: true },
+      where: { projectId, parentBvItemId: null },
+      include: {
+        breakdowns: true,
+        linkedRabItem: true,
+        sourceJobType: true,
+        children: {
+          include: {
+            breakdowns: true,
+            linkedRabItem: true,
+            sourceJobType: true,
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
       orderBy: { createdAt: "asc" },
     });
 
-    const result = items.map((it) => {
+    function withStatus(it) {
       let status = "BELUM_DILINK";
       if (it.linkedRabItem) {
-        status =
-          Number(it.totalVolume) === Number(it.linkedRabItem.volume)
-            ? "SUDAH_SINKRON"
-            : "BELUM_SINKRON";
+        const same =
+          Number(it.totalVolume) === Number(it.linkedRabItem.volume) &&
+          it.name === it.linkedRabItem.name &&
+          it.paymentUnit === it.linkedRabItem.paymentUnit;
+        status = same ? "SUDAH_SINKRON" : "BELUM_SINKRON";
       }
-      return { ...it, linkStatus: status };
-    });
+      return {
+        ...it,
+        linkStatus: it.isHeaderOnly ? null : status,
+        children: (it.children || []).map(withStatus),
+      };
+    }
 
-    res.json(result);
+    res.json(items.map(withStatus));
   } catch (error) {
     console.error("Error List BvItem:", error);
     res.status(500).json({ error: "Terjadi kesalahan pada server." });
@@ -171,31 +236,97 @@ router.put("/bv-items/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const {
+      sourceJobTypeId,
       name,
       keterangan,
       paymentUnit,
       groupId,
       ecommerceLink,
       breakdowns,
+      parentBvItemId,
+      isHeaderOnly,
     } = req.body;
 
     const existing = await prisma.bvItem.findUnique({ where: { id } });
     if (!existing)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
 
-    // kalau item ini dari HSPK, name/paymentUnit tetap terkunci ke master, gak boleh diketik ulang
-    const isFromMaster = !!existing.sourceJobTypeId;
+    const finalIsHeaderOnly =
+      isHeaderOnly !== undefined ? !!isHeaderOnly : existing.isHeaderOnly;
+
+    // validasi groupId, samain pola POST
+    if (groupId) {
+      const group = await prisma.rabGroup.findUnique({
+        where: { id: groupId },
+      });
+      if (!group)
+        return res
+          .status(404)
+          .json({ error: "Group/Sub-Group tidak ditemukan." });
+      if (group.projectId !== existing.projectId)
+        return res
+          .status(400)
+          .json({ error: "Group bukan milik project ini." });
+    }
+
+    // validasi parentBvItemId, samain pola POST
+    let finalGroupId = groupId !== undefined ? groupId || null : undefined;
+    if (parentBvItemId) {
+      const parent = await prisma.bvItem.findUnique({
+        where: { id: parentBvItemId },
+      });
+      if (!parent)
+        return res.status(404).json({ error: "Item induk tidak ditemukan." });
+
+      if (groupId === undefined) {
+        finalGroupId = parent.groupId;
+      }
+    }
+
+    let finalName = existing.name;
+    let finalUnit = existing.paymentUnit;
+    let finalSourceId = existing.sourceJobTypeId;
+
+    if (sourceJobTypeId !== undefined) {
+      if (sourceJobTypeId) {
+        const jobType = await prisma.jobType.findUnique({
+          where: { id: sourceJobTypeId },
+        });
+        if (!jobType)
+          return res
+            .status(404)
+            .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
+        finalName = jobType.name;
+        finalUnit = jobType.paymentUnit;
+        finalSourceId = sourceJobTypeId;
+      } else {
+        finalSourceId = null;
+        if (name) finalName = name;
+        if (paymentUnit) finalUnit = paymentUnit;
+      }
+    } else if (!existing.sourceJobTypeId) {
+      if (name !== undefined) finalName = name;
+      if (paymentUnit !== undefined) finalUnit = paymentUnit;
+    }
+
+    // validasi name wajib buat header custom, samain pola POST
+    if (finalIsHeaderOnly && !finalSourceId && !finalName) {
+      return res
+        .status(400)
+        .json({ error: 'Field "name" wajib diisi untuk header.' });
+    }
 
     let totalVolume = Number(existing.totalVolume);
     let breakdownUpdate;
 
     if (Array.isArray(breakdowns)) {
-      if (breakdowns.length === 0) {
-        return res
-          .status(400)
-          .json({ error: "Minimal harus ada 1 baris breakdown dimensi." });
+      if (!finalIsHeaderOnly && breakdowns.length === 0) {
+        return res.status(400).json({
+          error:
+            "Minimal harus ada 1 baris breakdown dimensi (kecuali header).",
+        });
       }
-      const rows = buildBreakdownRows(breakdowns);
+      const rows = finalIsHeaderOnly ? [] : buildBreakdownRows(breakdowns);
       totalVolume = rows.reduce((sum, b) => sum + b.subTotal, 0);
       breakdownUpdate = { deleteMany: {}, create: rows };
     }
@@ -203,10 +334,17 @@ router.put("/bv-items/:id", async (req, res) => {
     const updated = await prisma.bvItem.update({
       where: { id },
       data: {
-        ...(!isFromMaster && name !== undefined ? { name } : {}),
-        ...(!isFromMaster && paymentUnit !== undefined ? { paymentUnit } : {}),
+        name: finalName,
+        paymentUnit: finalIsHeaderOnly ? finalUnit || null : finalUnit,
+        sourceJobTypeId: finalSourceId,
         ...(keterangan !== undefined ? { keterangan } : {}),
-        ...(groupId !== undefined ? { groupId: groupId || null } : {}),
+        ...(parentBvItemId !== undefined
+          ? { parentBvItemId: parentBvItemId || null }
+          : {}),
+        ...(isHeaderOnly !== undefined
+          ? { isHeaderOnly: finalIsHeaderOnly }
+          : {}),
+        ...(finalGroupId !== undefined ? { groupId: finalGroupId } : {}),
         ...(ecommerceLink !== undefined ? { ecommerceLink } : {}),
         totalVolume,
         ...(breakdownUpdate ? { breakdowns: breakdownUpdate } : {}),
@@ -261,7 +399,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     let rapUnitPrice, componentRows, finalCategory, finalReference, overheadPct;
 
     if (bvItem.sourceJobTypeId) {
-      // ---- MODE HSPK: RAP otomatis dari JobType ----
       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
       if (!calc)
         return res.status(404).json({
@@ -284,7 +421,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           })),
       );
     } else {
-      // ---- MODE CUSTOM: user isi komponen manual ----
       if (!Array.isArray(components) || components.length === 0) {
         return res.status(400).json({
           error:
@@ -313,10 +449,60 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     const rabPrice = rabUnitPrice != null ? Number(rabUnitPrice) : rapUnitPrice;
 
     const result = await prisma.$transaction(async (tx) => {
+      const finalGroupId = groupId || bvItem.groupId || null;
+
+      let insertOrder;
+
+      if (bvItem.parentBvItemId) {
+        const parentBv = await tx.bvItem.findUnique({
+          where: { id: bvItem.parentBvItemId },
+          select: { linkedRabItemId: true },
+        });
+
+        if (parentBv?.linkedRabItemId) {
+          const parentRab = await tx.rabItem.findUnique({
+            where: { id: parentBv.linkedRabItemId },
+            select: { order: true },
+          });
+
+          // cari sibling (anak lain dari parent yg sama) yg udah linked duluan
+          const linkedSiblings = await tx.bvItem.findMany({
+            where: {
+              parentBvItemId: bvItem.parentBvItemId,
+              linkedRabItemId: { not: null },
+            },
+            include: { linkedRabItem: { select: { order: true } } },
+          });
+
+          const maxSiblingOrder = linkedSiblings.length
+            ? Math.max(...linkedSiblings.map((s) => s.linkedRabItem.order))
+            : parentRab.order;
+
+          insertOrder = maxSiblingOrder + 1;
+
+          await tx.rabItem.updateMany({
+            where: {
+              projectId: bvItem.projectId,
+              groupId: finalGroupId,
+              order: { gte: insertOrder },
+            },
+            data: { order: { increment: 1 } },
+          });
+        }
+      }
+
+      if (insertOrder === undefined) {
+        // bukan child, atau parent belum linked -> taro di belakang seperti biasa
+        const siblingCount = await tx.rabItem.count({
+          where: { projectId: bvItem.projectId, groupId: finalGroupId },
+        });
+        insertOrder = siblingCount;
+      }
+
       const rabItem = await tx.rabItem.create({
         data: {
           projectId: bvItem.projectId,
-          groupId: groupId || bvItem.groupId || null,
+          groupId: finalGroupId,
           name: bvItem.name,
           paymentUnit: bvItem.paymentUnit,
           category: finalCategory,
@@ -328,10 +514,41 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           rabUnitPrice: rabPrice,
           rabTotalPrice: rabPrice * vol,
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
+          order: insertOrder,
           components: { create: componentRows },
         },
       });
 
+      const linkedChildren = await tx.bvItem.findMany({
+        where: { parentBvItemId: id, linkedRabItemId: { not: null } },
+        select: { linkedRabItemId: true },
+        orderBy: { createdAt: "asc" },
+      });
+
+      if (linkedChildren.length > 0) {
+        const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
+
+        await tx.rabItem.updateMany({
+          where: { id: { in: childRabIds } },
+          data: { order: -1 },
+        });
+
+        await tx.rabItem.updateMany({
+          where: {
+            projectId: bvItem.projectId,
+            groupId: finalGroupId,
+            order: { gt: rabItem.order },
+          },
+          data: { order: { increment: childRabIds.length } },
+        });
+
+        for (let i = 0; i < childRabIds.length; i++) {
+          await tx.rabItem.update({
+            where: { id: childRabIds[i] },
+            data: { order: rabItem.order + 1 + i },
+          });
+        }
+      }
       const updatedBv = await tx.bvItem.update({
         where: { id },
         data: { linkedRabItemId: rabItem.id },
@@ -350,7 +567,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
-
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
 router.post("/bv-items/:id/sync", async (req, res) => {
   try {
@@ -367,20 +583,106 @@ router.post("/bv-items/:id/sync", async (req, res) => {
         .json({ error: "Item BV ini belum di-link ke RAB manapun." });
 
     const vol = Number(bvItem.totalVolume);
-    const rapUnitPrice = Number(bvItem.linkedRabItem.rapUnitPrice);
+    let rapUnitPrice = Number(bvItem.linkedRabItem.rapUnitPrice);
+    let overheadPct = bvItem.linkedRabItem.overhead;
+    let componentUpdate;
+
+    if (bvItem.sourceJobTypeId) {
+      const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
+      if (calc) {
+        rapUnitPrice = calc.total;
+        overheadPct = calc.jobType.overhead;
+        componentUpdate = {
+          deleteMany: {},
+          create: Object.entries(calc.breakdown).flatMap(([section, items]) =>
+            items.map((item) => ({
+              name: item.name,
+              unit: item.unit,
+              section,
+              coefficient: item.coefficient,
+              unitPrice: item.unitPrice,
+              lineTotal: item.lineTotal,
+            })),
+          ),
+        };
+      }
+    }
+
     const rabUnitPrice = Number(bvItem.linkedRabItem.rabUnitPrice);
 
-    const updated = await prisma.rabItem.update({
-      where: { id: bvItem.linkedRabItemId },
-      data: {
-        volume: vol,
-        rapTotalPrice: rapUnitPrice * vol,
-        rabTotalPrice: rabUnitPrice * vol,
-      },
+    const updated = await prisma.$transaction(async (tx) => {
+      // reposisi order kalau item ini child dan posisinya sekarang salah
+      if (bvItem.parentBvItemId) {
+        const parentBv = await tx.bvItem.findUnique({
+          where: { id: bvItem.parentBvItemId },
+          select: { linkedRabItemId: true },
+        });
+
+        if (parentBv?.linkedRabItemId) {
+          const parentRab = await tx.rabItem.findUnique({
+            where: { id: parentBv.linkedRabItemId },
+            select: { order: true, groupId: true, projectId: true },
+          });
+
+          const correctOrder = parentRab.order + 1;
+          const currentOrder = bvItem.linkedRabItem.order;
+
+          if (currentOrder !== correctOrder) {
+            // lepas dulu slot lama biar ga tabrakan pas geser
+            await tx.rabItem.update({
+              where: { id: bvItem.linkedRabItemId },
+              data: { order: -1 },
+            });
+
+            if (currentOrder < correctOrder) {
+              // pindah maju: item di antara posisi lama & baru mundur 1
+              await tx.rabItem.updateMany({
+                where: {
+                  projectId: parentRab.projectId,
+                  groupId: parentRab.groupId,
+                  order: { gt: currentOrder, lte: correctOrder },
+                },
+                data: { order: { decrement: 1 } },
+              });
+            } else {
+              // pindah mundur: item di antara posisi baru & lama maju 1
+              await tx.rabItem.updateMany({
+                where: {
+                  projectId: parentRab.projectId,
+                  groupId: parentRab.groupId,
+                  order: { gte: correctOrder, lt: currentOrder },
+                },
+                data: { order: { increment: 1 } },
+              });
+            }
+
+            await tx.rabItem.update({
+              where: { id: bvItem.linkedRabItemId },
+              data: { order: correctOrder },
+            });
+          }
+        }
+      }
+
+      return tx.rabItem.update({
+        where: { id: bvItem.linkedRabItemId },
+        data: {
+          name: bvItem.name,
+          paymentUnit: bvItem.paymentUnit,
+          overhead: overheadPct,
+          volume: vol,
+          rapUnitPrice,
+          rapTotalPrice: rapUnitPrice * vol,
+          rabTotalPrice: rabUnitPrice * vol,
+          ...(componentUpdate ? { components: componentUpdate } : {}),
+        },
+        include: { components: true },
+      });
     });
 
     res.json({
-      message: "Volume RAB berhasil disinkronkan dengan BV terbaru",
+      message:
+        "RAB berhasil disinkronkan dengan BV terbaru (nama, satuan, RAP, volume, posisi)",
       data: updated,
     });
   } catch (error) {
@@ -390,5 +692,4 @@ router.post("/bv-items/:id/sync", async (req, res) => {
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
-
 module.exports = router;

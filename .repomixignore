@@ -1,0 +1,5 @@
+fe/
+fe/**
+frontend/
+node_modules/
+.git/

@@ -156,6 +156,7 @@ model Project {
   hspkPeriod Int
   discipline Discipline   // <-- TAMBAH, wajib diisi
   grade      String?      // <-- TAMBAH
+  startDate  DateTime?   // <-- TAMBAH: tanggal mulai proyek, buat hitung tanggal per minggu TS
   clientId   String
   client     Client   @relation(fields: [clientId], references: [id])
   rabItems   RabItem[]
@@ -180,22 +181,27 @@ model RabItem {
   category    String?
   reference   String?
   overhead    Float?
-  discipline  Discipline?   // <-- TAMBAH
-  grade       String?       // <-- TAMBAH (opsional, biar lengkap)
+  discipline  Discipline?
+  grade       String?
+  timeSchedule TimeSchedule?   // <-- TAMBAH
 
   volume         Decimal  @db.Decimal(14, 4)
 
-  rapUnitPrice   Decimal  @db.Decimal(18, 4)  // otomatis, dari kalkulasi HSPK
-  rapTotalPrice  Decimal  @db.Decimal(18, 4)  // rapUnitPrice * volume
+  rapUnitPrice   Decimal  @db.Decimal(18, 4)
+  rapTotalPrice  Decimal  @db.Decimal(18, 4)
 
-  rabUnitPrice   Decimal  @db.Decimal(18, 4)  // MANUAL, diisi estimator
-  rabTotalPrice  Decimal  @db.Decimal(18, 4)  // rabUnitPrice * volume
+  rabUnitPrice   Decimal  @db.Decimal(18, 4)
+  rabTotalPrice  Decimal  @db.Decimal(18, 4)
 
   sourceJobTypeId String?
   groupId         String?
-  group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
-  bvItem BvItem? 
+  isByOwner Boolean @default(false)
+
+  order Int @default(0)
+
+  bvItem BvItem?
 
   components RabItemComponent[]
 
@@ -234,7 +240,8 @@ model RabGroup {
 
   items     RabItem[]
 
-  bvItems BvItem[]
+  bvItems       BvItem[]                            // relasi biasa (groupId)
+  headerLinkedBvItems BvItem[] @relation("HeaderLinkedGroup")
 
   createdAt DateTime @default(now())
 
@@ -258,6 +265,12 @@ model BvItem {
   groupId   String?
   group     RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
 
+  parentBvItemId String?
+  parentBvItem   BvItem?  @relation("BvItemChildren", fields: [parentBvItemId], references: [id], onDelete: Cascade)
+  children       BvItem[] @relation("BvItemChildren")
+
+  isHeaderOnly Boolean @default(false)   // true = cuma label, gak ada volume/breakdown
+
   sourceJobTypeId String?
   sourceJobType   JobType? @relation(fields: [sourceJobTypeId], references: [id])
 
@@ -271,6 +284,9 @@ model BvItem {
   linkedRabItemId String?  @unique
   linkedRabItem   RabItem? @relation(fields: [linkedRabItemId], references: [id], onDelete: SetNull)
 
+  linkedGroupId String?              // <-- TAMBAH: khusus header, nunjuk sub-group yg dibuat otomatis
+  linkedGroup   RabGroup? @relation("HeaderLinkedGroup", fields: [linkedGroupId], references: [id], onDelete: SetNull)
+
   breakdowns BvBreakdown[]
 
   createdAt DateTime @default(now())
@@ -278,6 +294,7 @@ model BvItem {
 
   @@index([projectId])
   @@index([groupId])
+  @@index([parentBvItemId])
 }
 
 model BvBreakdown {
@@ -289,6 +306,8 @@ model BvBreakdown {
   panjang    Decimal? @db.Decimal(10, 4)
   lebar      Decimal? @db.Decimal(10, 4)
   tinggi     Decimal? @db.Decimal(10, 4)
+  luas       Decimal? @db.Decimal(10, 4)
+  keliling   Decimal? @db.Decimal(10, 4)
   diameter   Decimal? @db.Decimal(10, 4)
   berat      Decimal? @db.Decimal(10, 4)
   jumlahSisi Decimal? @db.Decimal(10, 4)
@@ -298,6 +317,23 @@ model BvBreakdown {
   subTotal Decimal @db.Decimal(14, 4)
 
   @@index([bvItemId])
+
+
+
+
 }
+
+  model TimeSchedule {
+  id        String  @id @default(cuid())
+  rabItemId String  @unique
+  rabItem   RabItem @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  startWeek Int
+  endWeek   Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 
 

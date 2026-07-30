@@ -40,6 +40,17 @@ app.use("/api", exportExcel);
 //bv
 app.use("/api", bv);
 
+app.use("/api", require("./routes/exportToFile/bvExport.routes"));
+app.use("/api", require("./routes/exportToFile/fullExport.routes"));
+
+app.use("/api", require("./routes/exportToFile/rabView.routes"));
+
+//shedule
+app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));
+
+//
+app.use("/api", require("./routes/exportToFile/timeScheduleExport.routes"));
+
 app.use((err, req, res, next) => {
   if (err) {
     console.error(err);

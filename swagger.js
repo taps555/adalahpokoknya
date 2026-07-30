@@ -9,13 +9,25 @@ const doc = {
   schemes: ["http"],
 };
 
-const outputFile = "./swagger-output.json";
+const outputFile = "./swagger-output_crudGrrop.json";
 
-// Path disesuaikan dengan folder src/
 const routesFiles = [
-  "./src/index.js", // File entry point utama
-  "./src/routes/*.js", // File JS langsung di src/routes/
-  "./src/routes/**/*.js", // Semua sub-folder di src/routes/ (crudGrub, exportToFile, dll)
+  // "./src/routes/clients.js",
+  // "./src/routes/hspk.js",
+  // "./src/routes/jobs.routes.js",
+  // "./src/routes/projects.js",
+  // "./src/routes/upload.routes.js",
+  "./src/routes/crudGrub/bv.routes.js",
+  "./src/routes/crudGrub/rab.routes.js",
+  "./src/routes/crudGrub/rabGrub.routes.js",
+  "./src/routes/crudGrub/timeSchedule.routes.js",
+  // "./src/routes/exportToFile/bvExport.routes.js",
+  // "./src/routes/exportToFile/rabExport.routes.js",
+  // "./src/routes/exportToFile/rabView.routes.js",
+  // "./src/routes/exportToFile/fullExport.routes.js",
+  // "./src/routes/exportToFile/timeScheduleExport.routes.js",
+  // "",
 ];
+// const routesFiles = ["./src/index.js"];
 
 swaggerAutogen(outputFile, routesFiles, doc);

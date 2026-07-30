@@ -156,14 +156,14 @@ router.post("/projects/:projectId/rab-items", async (req, res) => {
 router.get("/projects/:projectId/rab-items", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline } = req.query; // <-- TAMBAH
+    const { discipline } = req.query;
     const items = await prisma.rabItem.findMany({
       where: {
         projectId,
-        ...(discipline ? { discipline } : {}), // <-- TAMBAH
+        ...(discipline ? { discipline } : {}),
       },
       include: { components: true },
-      orderBy: [{ category: "asc" }, { reference: "asc" }],
+      orderBy: [{ order: "asc" }],
     });
     res.json(items);
   } catch (error) {
@@ -176,13 +176,14 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
 router.put("/rab-items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { rabUnitPrice, components } = req.body;
+    const { rabUnitPrice, rapUnitPrice, components, groupId, isByOwner } =
+      req.body;
 
     const existing = await prisma.rabItem.findUnique({ where: { id } });
     if (!existing)
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
 
-    let rapUnitPrice = Number(existing.rapUnitPrice);
+    let rapUnitPrice_final = Number(existing.rapUnitPrice);
     let componentUpdate;
 
     if (Array.isArray(components)) {
@@ -201,8 +202,10 @@ router.put("/rab-items/:id", async (req, res) => {
       });
       const overheadPct =
         existing.overhead != null ? Number(existing.overhead) : 0.1;
-      rapUnitPrice = baseTotal + baseTotal * overheadPct;
+      rapUnitPrice_final = baseTotal + baseTotal * overheadPct;
       componentUpdate = { deleteMany: {}, create: rows };
+    } else if (rapUnitPrice != null) {
+      rapUnitPrice_final = Number(rapUnitPrice);
     }
 
     const vol = Number(existing.volume); // volume TIDAK bisa diubah di sini, harus lewat BV + Sync
@@ -214,15 +217,16 @@ router.put("/rab-items/:id", async (req, res) => {
     const updated = await prisma.rabItem.update({
       where: { id },
       data: {
-        rapUnitPrice,
-        rapTotalPrice: rapUnitPrice * vol,
+        rapUnitPrice: rapUnitPrice_final,
+        rapTotalPrice: rapUnitPrice_final * vol,
         rabUnitPrice: rabPrice,
         rabTotalPrice: rabPrice * vol,
         ...(componentUpdate ? { components: componentUpdate } : {}),
+        ...(groupId !== undefined ? { groupId: groupId || null } : {}),
+        ...(isByOwner !== undefined ? { isByOwner } : {}),
       },
       include: { components: true },
     });
-
     res.json({ message: "Item RAB berhasil diperbarui", data: updated });
   } catch (error) {
     console.error("Error Update RabItem:", error);
@@ -231,6 +235,87 @@ router.put("/rab-items/:id", async (req, res) => {
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
+
+/** PUT /rab-items/:id/switch-job — ganti sumber JobType master, re-snapshot semua field */
+router.put("/rab-items/:id/switch-job", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newJobTypeId } = req.body;
+    if (!newJobTypeId)
+      return res
+        .status(400)
+        .json({ error: 'Field "newJobTypeId" wajib diisi.' });
+
+    const existing = await prisma.rabItem.findUnique({ where: { id } });
+    if (!existing)
+      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    const calc = await calculateJobPrice(newJobTypeId);
+    if (!calc)
+      return res
+        .status(404)
+        .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
+
+    const vol = Number(existing.volume);
+    const rapUnitPrice = calc.total;
+
+    const updated = await prisma.rabItem.update({
+      where: { id },
+      data: {
+        name: calc.jobType.name,
+        paymentUnit: calc.jobType.paymentUnit,
+        category: calc.jobType.category,
+        reference: calc.jobType.reference,
+        discipline: calc.jobType.discipline, // <-- TAMBAH
+        grade: calc.jobType.grade, // <-- TAMBAH
+        overhead: calc.jobType.overhead,
+        rapUnitPrice,
+        rapTotalPrice: rapUnitPrice * vol,
+        rabUnitPrice: rapUnitPrice, // reset ke RAP, user isi ulang manual kalau perlu beda
+        rabTotalPrice: rapUnitPrice * vol,
+        sourceJobTypeId: calc.jobType.id,
+        components: {
+          deleteMany: {},
+          create: Object.entries(calc.breakdown).flatMap(([section, items]) =>
+            items.map((item) => ({
+              name: item.name,
+              unit: item.unit,
+              section,
+              coefficient: item.coefficient,
+              unitPrice: item.unitPrice,
+              lineTotal: item.lineTotal,
+            })),
+          ),
+        },
+      },
+      include: { components: true },
+    });
+
+    res.json({ message: "Jenis pekerjaan berhasil diganti", data: updated });
+  } catch (error) {
+    console.error("Error Switch Job:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+/** DELETE /rab-items/:id */
+router.delete("/rab-items/:id", async (req, res) => {
+  try {
+    await prisma.rabItem.delete({ where: { id: req.params.id } });
+    res.json({ message: "Item RAB berhasil dihapus." });
+  } catch (error) {
+    if (error.code === "P2025") {
+      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+    }
+    console.error("Error Delete RabItem:", error);
+    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+  }
+});
+
+module.exports = router;
+
 // router.put("/rab-items/:id", async (req, res) => {
 //   try {
 //     const { id } = req.params;
@@ -325,83 +410,3 @@ router.put("/rab-items/:id", async (req, res) => {
 //       .json({ error: error.message || "Terjadi kesalahan pada server." });
 //   }
 // });
-
-/** PUT /rab-items/:id/switch-job — ganti sumber JobType master, re-snapshot semua field */
-router.put("/rab-items/:id/switch-job", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { newJobTypeId } = req.body;
-    if (!newJobTypeId)
-      return res
-        .status(400)
-        .json({ error: 'Field "newJobTypeId" wajib diisi.' });
-
-    const existing = await prisma.rabItem.findUnique({ where: { id } });
-    if (!existing)
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
-
-    const calc = await calculateJobPrice(newJobTypeId);
-    if (!calc)
-      return res
-        .status(404)
-        .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
-
-    const vol = Number(existing.volume);
-    const rapUnitPrice = calc.total;
-
-    const updated = await prisma.rabItem.update({
-      where: { id },
-      data: {
-        name: calc.jobType.name,
-        paymentUnit: calc.jobType.paymentUnit,
-        category: calc.jobType.category,
-        reference: calc.jobType.reference,
-        discipline: calc.jobType.discipline, // <-- TAMBAH
-        grade: calc.jobType.grade, // <-- TAMBAH
-        overhead: calc.jobType.overhead,
-        rapUnitPrice,
-        rapTotalPrice: rapUnitPrice * vol,
-        rabUnitPrice: rapUnitPrice, // reset ke RAP, user isi ulang manual kalau perlu beda
-        rabTotalPrice: rapUnitPrice * vol,
-        sourceJobTypeId: calc.jobType.id,
-        components: {
-          deleteMany: {},
-          create: Object.entries(calc.breakdown).flatMap(([section, items]) =>
-            items.map((item) => ({
-              name: item.name,
-              unit: item.unit,
-              section,
-              coefficient: item.coefficient,
-              unitPrice: item.unitPrice,
-              lineTotal: item.lineTotal,
-            })),
-          ),
-        },
-      },
-      include: { components: true },
-    });
-
-    res.json({ message: "Jenis pekerjaan berhasil diganti", data: updated });
-  } catch (error) {
-    console.error("Error Switch Job:", error);
-    res
-      .status(500)
-      .json({ error: error.message || "Terjadi kesalahan pada server." });
-  }
-});
-
-/** DELETE /rab-items/:id */
-router.delete("/rab-items/:id", async (req, res) => {
-  try {
-    await prisma.rabItem.delete({ where: { id: req.params.id } });
-    res.json({ message: "Item RAB berhasil dihapus." });
-  } catch (error) {
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
-    }
-    console.error("Error Delete RabItem:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
-  }
-});
-
-module.exports = router;
