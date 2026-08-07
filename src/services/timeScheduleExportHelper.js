@@ -323,18 +323,54 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma) {
     const weight = weightOf(it);
     const weekly = weeklyWeightOf(it);
 
+    // 1. Tulis Nomor & Nama Item
     ws.getCell(`B${r}`).value = num;
     ws.getCell(`B${r}`).alignment = { horizontal: "center" };
     ws.getCell(`C${r}`).value = (isChild ? "- " : "") + (it.name || "");
 
-    if (hasChildren) {
-      // parent row: kosongkan kolom lain, jangan diisi
+    // 2. Kondisi "By Owner"
+    if (it.isByOwner) {
+      // A. Beri background warna kuning untuk baris "By Owner"
+      const lastWeekCol = weekCol(maxWeek);
+      // colRange("B", lastWeekCol).forEach((col) => {
+      //   ws.getCell(`${col}${r}`).fill = {
+      //     type: "pattern",
+      //     pattern: "solid",
+      //     fgColor: { argb: "FFFFE985" },
+      //   };
+      // });
+
+      // B. Isi Unit & Volume
+      ws.getCell(`E${r}`).value = it.paymentUnit || "";
+      ws.getCell(`E${r}`).alignment = { horizontal: "center" };
+      ws.getCell(`F${r}`).value = Number(it.volume);
+      fmt2(ws.getCell(`F${r}`));
+
+      // C. Set teks "By Owner" pada kolom G, H, I
+      ["G", "H"].forEach((col) => {
+        const cell = ws.getCell(`${col}${r}`);
+        cell.value = "By Owner";
+        cell.alignment = { horizontal: "center" };
+      });
+
+      // D. Set teks "By Owner" pada seluruh kolom mingguan
+      // ["G", "H", "I"].forEach((col) => {
+      //   const cell = ws.getCell(`${col(w)}${r}`);
+      //   cell.value = "By Owner";
+      //   cell.alignment = { horizontal: "center" };
+      // });
+
+      // 3. Kondisi Parent (Memiliki Anak)
+    } else if (hasChildren) {
       ["E", "F", "G", "H", "I"].forEach((col) => {
         ws.getCell(`${col}${r}`).value = "";
       });
+
       for (let w = 1; w <= maxWeek; w++) {
         ws.getCell(`${weekCol(w)}${r}`).value = "";
       }
+
+      // 4. Kondisi Item Normal (Child / Leaf)
     } else {
       ws.getCell(`E${r}`).value = it.paymentUnit || "";
       ws.getCell(`E${r}`).alignment = { horizontal: "center" };
@@ -344,7 +380,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma) {
       fmtRp(ws.getCell(`G${r}`));
       ws.getCell(`H${r}`).value = Number(it.rabTotalPrice);
       fmtRp(ws.getCell(`H${r}`));
-      ws.getCell(`I${r}`).value = weight / 100;
+      ws.getCell(`I${r}`).value = weight;
       fmtPct(ws.getCell(`I${r}`));
 
       for (let w = 1; w <= maxWeek; w++) {
@@ -355,6 +391,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma) {
         }
       }
     }
+
     r++;
   }
 
@@ -430,9 +467,18 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma) {
   colRange("C", lastWeekCol).forEach((col) =>
     fillSolid(ws.getCell(`${col}${r}`), "FFFFCCCC"),
   );
+
+  // Mengisi nilai total contract di kolom H
   ws.getCell(`H${r}`).value = totalContract;
   fmtRp(ws.getCell(`H${r}`));
-  ws.getCell(`I${r}`).value = 1;
+
+  // Menyimpan baris total saat ini
+  const total = r;
+
+  // Mengisi rumus persentase di kolom I (hasilnya pasti 100)
+  ws.getCell(`I${r}`).value = {
+    formula: `H${total}/$H$${total}*100`, // Contoh output di Excel: =H126/$H$126*100
+  };
   fmtPct(ws.getCell(`I${r}`));
   ws.getRow(r).font = { bold: true };
   r++;

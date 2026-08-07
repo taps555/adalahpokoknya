@@ -492,11 +492,13 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       }
 
       if (insertOrder === undefined) {
-        // bukan child, atau parent belum linked -> taro di belakang seperti biasa
-        const siblingCount = await tx.rabItem.count({
+        // bukan child, atau parent belum linked -> taro di belakang, pakai max(order)+1 (bukan count)
+        const lastItem = await tx.rabItem.findFirst({
           where: { projectId: bvItem.projectId, groupId: finalGroupId },
+          orderBy: { order: "desc" },
+          select: { order: true },
         });
-        insertOrder = siblingCount;
+        insertOrder = lastItem ? lastItem.order + 1 : 0;
       }
 
       const rabItem = await tx.rabItem.create({

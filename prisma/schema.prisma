@@ -163,6 +163,12 @@ model Project {
   bvItems BvItem[]
 
   rabGroups RabGroup[]
+
+
+  pairedProjectId String?  @unique          // <-- TAMBAH
+  pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id])  // <-- TAMBAH
+  pairedWith      Project? @relation("ProjectPair")  // <-- TAMBAH
+
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -198,12 +204,14 @@ model RabItem {
   group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
   isByOwner Boolean @default(false)
+  isStip    Boolean @default(false) // <-- TAMBAHKAN BARIS INI
 
   order Int @default(0)
 
   bvItem BvItem?
 
   components RabItemComponent[]
+  dailyProgress DailyProgress[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -333,6 +341,22 @@ model BvBreakdown {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+
+model DailyProgress {
+  id        String   @id @default(cuid())
+  rabItemId String
+  rabItem   RabItem  @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  date             DateTime // tanggal (jam diabaikan)
+  progressPercent  Decimal  @db.Decimal(6, 2) // input dari lapangan, misal 25.00
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([rabItemId, date]) // 1 item cuma boleh 1 catatan per tanggal
+  @@index([rabItemId])
 }
 
 

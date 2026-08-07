@@ -89,7 +89,7 @@ router.get("/:id", async (req, res, next) => {
   try {
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      include: { client: true },
+      include: { client: true, pairedProject: true },
     });
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan" });
@@ -114,6 +114,49 @@ router.get("/", async (req, res, next) => {
       orderBy: { createdAt: "desc" },
     });
     res.json(projects);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** PUT /projects/:id/pair — hubungkan 2 project (misal Civil & Interior) sebagai pasangan */
+router.put("/:id/pair", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { pairedProjectId } = req.body;
+
+    if (!pairedProjectId) {
+      return res
+        .status(400)
+        .json({ error: "Field pairedProjectId wajib diisi." });
+    }
+    if (pairedProjectId === id) {
+      return res.status(400).json({
+        error: "Project tidak boleh dipasangkan dengan dirinya sendiri.",
+      });
+    }
+
+    const [projectA, projectB] = await Promise.all([
+      prisma.project.findUnique({ where: { id } }),
+      prisma.project.findUnique({ where: { id: pairedProjectId } }),
+    ]);
+    if (!projectA)
+      return res.status(404).json({ error: "Project tidak ditemukan." });
+    if (!projectB)
+      return res
+        .status(404)
+        .json({ error: "Project pasangan tidak ditemukan." });
+
+    // set pairing dua arah dalam 1 transaction
+    const [updatedA] = await prisma.$transaction([
+      prisma.project.update({ where: { id }, data: { pairedProjectId } }),
+      prisma.project.update({
+        where: { id: pairedProjectId },
+        data: { pairedProjectId: id },
+      }),
+    ]);
+
+    res.json({ message: "Project berhasil dipasangkan", data: updatedA });
   } catch (err) {
     next(err);
   }

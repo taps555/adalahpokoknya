@@ -176,8 +176,14 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
 router.put("/rab-items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { rabUnitPrice, rapUnitPrice, components, groupId, isByOwner } =
-      req.body;
+    const {
+      rabUnitPrice,
+      rapUnitPrice,
+      components,
+      groupId,
+      isByOwner,
+      isStip,
+    } = req.body;
 
     const existing = await prisma.rabItem.findUnique({ where: { id } });
     if (!existing)
@@ -224,6 +230,7 @@ router.put("/rab-items/:id", async (req, res) => {
         ...(componentUpdate ? { components: componentUpdate } : {}),
         ...(groupId !== undefined ? { groupId: groupId || null } : {}),
         ...(isByOwner !== undefined ? { isByOwner } : {}),
+        ...(isStip !== undefined ? { isStip } : {}),
       },
       include: { components: true },
     });

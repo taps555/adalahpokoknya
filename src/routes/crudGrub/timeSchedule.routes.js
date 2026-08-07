@@ -332,7 +332,9 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
         paymentUnit: it.paymentUnit,
         volume: it.volume,
         rabTotalPrice: it.rabTotalPrice,
+        satuanHarga: it.rabUnitPrice,
         weight,
+
         startWeek: it.timeSchedule?.startWeek ?? null,
         endWeek: it.timeSchedule?.endWeek ?? null,
         weeklyWeight,
@@ -340,6 +342,8 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
         groupName: it.groupName,
         isChild,
         hasChildren,
+        isByOwner: it.isByOwner,
+        isStip: it.isStip,
       };
     });
 
