@@ -322,6 +322,8 @@ model BvBreakdown {
   jumlahBh   Decimal? @db.Decimal(10, 4)
   waste      Decimal? @db.Decimal(6, 4) @default(0)
 
+  modeHitung String? @default("auto")
+
   subTotal Decimal @db.Decimal(14, 4)
 
   @@index([bvItemId])

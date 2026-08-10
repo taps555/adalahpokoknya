@@ -6,54 +6,106 @@ const { calculateJobPrice } = require("../../services/calculateService");
 
 const router = express.Router();
 
-function calcBreakdownSubtotal({
-  panjang,
-  lebar,
-  tinggi,
-  luas,
-  keliling,
-  diameter,
-  berat,
-  jumlahSisi,
-  jumlahBh,
-  waste,
-}) {
-  const w = waste != null && waste !== "" ? Number(waste) / 100 : 0;
+// function calcBreakdownSubtotal({
+//   panjang,
+//   lebar,
+//   tinggi,
+//   luas,
+//   keliling,
+//   diameter,
+//   berat,
+//   jumlahSisi,
+//   jumlahBh,
+//   waste,
+// }) {
+//   const w = waste != null && waste !== "" ? Number(waste) / 100 : 0;
 
-  const s = jumlahSisi != null && jumlahSisi !== "" ? Number(jumlahSisi) : 1;
-  const b = jumlahBh != null && jumlahBh !== "" ? Number(jumlahBh) : 1;
-  const totalJumlah = s * b;
+//   const s = jumlahSisi != null && jumlahSisi !== "" ? Number(jumlahSisi) : 1;
+//   const b = jumlahBh != null && jumlahBh !== "" ? Number(jumlahBh) : 1;
+//   const totalJumlah = s * b;
 
-  const p = panjang != null && panjang !== "" ? Number(panjang) : 1;
-  const t = tinggi != null && tinggi !== "" ? Number(tinggi) : 1;
+//   const p = panjang != null && panjang !== "" ? Number(panjang) : 1;
+//   const t = tinggi != null && tinggi !== "" ? Number(tinggi) : 1;
 
-  if (berat != null && berat !== "") {
-    return p * t * Number(berat) * totalJumlah * (1 + w);
+//   if (berat != null && berat !== "") {
+//     return p * t * Number(berat) * totalJumlah * (1 + w);
+//   }
+
+//   if (luas != null && luas !== "") return Number(luas) * totalJumlah * (1 + w);
+//   if (keliling != null && keliling !== "")
+//     return Number(keliling) * totalJumlah * (1 + w);
+//   if (diameter != null && diameter !== "")
+//     return Number(diameter) * totalJumlah * (1 + w);
+
+//   const l = lebar != null && lebar !== "" ? Number(lebar) : 1;
+
+//   return p * l * t * totalJumlah * (1 + w);
+// }
+
+function calcBreakdownSubtotal(b, paymentUnit) {
+  const p = b.panjang != null && b.panjang !== "" ? Number(b.panjang) : 0;
+  const l = b.lebar != null && b.lebar !== "" ? Number(b.lebar) : 0;
+  const t = b.tinggi != null && b.tinggi !== "" ? Number(b.tinggi) : 0;
+  const luas = b.luas != null && b.luas !== "" ? Number(b.luas) : 0;
+  const keliling =
+    b.keliling != null && b.keliling !== "" ? Number(b.keliling) : 0;
+  const berat = b.berat != null && b.berat !== "" ? Number(b.berat) : 0;
+
+  const s =
+    b.jumlahSisi != null && b.jumlahSisi !== "" ? Number(b.jumlahSisi) : 1;
+  const bh = b.jumlahBh != null && b.jumlahBh !== "" ? Number(b.jumlahBh) : 1;
+  const totalJumlah = s * bh;
+
+  const w = b.waste != null && b.waste !== "" ? Number(b.waste) / 100 : 0;
+  const wasteMultiplier = 1 + w;
+
+  const satuan = (paymentUnit || "").toLowerCase().trim();
+  const mode = b.modeHitung || "auto";
+  let baseVolume = 0;
+
+  // ===== MODE MANUAL (BYPASS) =====
+  if (mode === "P") baseVolume = p;
+  else if (mode === "L") baseVolume = l;
+  else if (mode === "T") baseVolume = t;
+  else if (mode === "PxL") baseVolume = p * l;
+  else if (mode === "PxT") baseVolume = p * t;
+  else if (mode === "Luas") baseVolume = luas > 0 ? luas : p * l;
+  else if (mode === "Kel") baseVolume = keliling;
+  // ===== MODE OTOMATIS =====
+  else {
+    if (satuan === "m1" || satuan === "m'") {
+      baseVolume = p > 0 ? p : keliling;
+    } else if (satuan === "m2") {
+      if (luas > 0) baseVolume = luas;
+      else if (p > 0 && l > 0) baseVolume = p * l;
+      else if (p > 0 && t > 0) baseVolume = p * t;
+      else if (keliling > 0 && t > 0) baseVolume = keliling * t;
+    } else if (satuan === "m3") {
+      baseVolume =
+        luas > 0 && t > 0 ? luas * t : (p || 1) * (l || 1) * (t || 1);
+    } else if (satuan === "kg") {
+      baseVolume = p > 0 ? p * berat : berat;
+    } else {
+      baseVolume = 1;
+    }
   }
 
-  if (luas != null && luas !== "") return Number(luas) * totalJumlah * (1 + w);
-  if (keliling != null && keliling !== "")
-    return Number(keliling) * totalJumlah * (1 + w);
-  if (diameter != null && diameter !== "")
-    return Number(diameter) * totalJumlah * (1 + w);
-
-  const l = lebar != null && lebar !== "" ? Number(lebar) : 1;
-
-  return p * l * t * totalJumlah * (1 + w);
+  return baseVolume * totalJumlah * wasteMultiplier;
 }
 
-function buildBreakdownRows(breakdowns) {
+function buildBreakdownRows(breakdowns, paymentUnit) {
   return breakdowns.map((b) => {
-    const subTotal = calcBreakdownSubtotal(b);
+    const subTotal = calcBreakdownSubtotal(b, paymentUnit);
     return {
       keterangan: b.keterangan || null,
+      modeHitung: b.modeHitung || "auto", // Simpan mode hitung ke database
       panjang: b.panjang ?? null,
       lebar: b.lebar ?? null,
       tinggi: b.tinggi ?? null,
       luas: b.luas ?? null,
       keliling: b.keliling ?? null,
       diameter: b.diameter ?? null,
-      berat: b.berat ?? null, // <- tetap disimpan, cuma gak dipakai di calcBreakdownSubtotal
+      berat: b.berat ?? null,
       jumlahSisi: b.jumlahSisi ?? null,
       jumlahBh: b.jumlahBh ?? null,
       waste: b.waste ?? null,
@@ -152,7 +204,10 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
         .json({ error: 'Field "name" wajib diisi untuk header.' });
     }
 
-    const breakdownRows = isHeaderOnly ? [] : buildBreakdownRows(breakdowns);
+    const breakdownRows = isHeaderOnly
+      ? []
+      : buildBreakdownRows(breakdowns, finalUnit);
+
     const totalVolume = breakdownRows.reduce((sum, b) => sum + b.subTotal, 0);
 
     const bvItem = await prisma.bvItem.create({
@@ -326,7 +381,12 @@ router.put("/bv-items/:id", async (req, res) => {
             "Minimal harus ada 1 baris breakdown dimensi (kecuali header).",
         });
       }
-      const rows = finalIsHeaderOnly ? [] : buildBreakdownRows(breakdowns);
+
+      // UBAH BARIS INI: Tambahkan finalUnit ke dalam pemanggilan fungsi
+      const rows = finalIsHeaderOnly
+        ? []
+        : buildBreakdownRows(breakdowns, finalUnit);
+
       totalVolume = rows.reduce((sum, b) => sum + b.subTotal, 0);
       breakdownUpdate = { deleteMany: {}, create: rows };
     }
