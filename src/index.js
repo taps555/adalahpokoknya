@@ -23,6 +23,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
+app.use(express.static("public"));
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 app.use("/api", uploadRoutes);
 app.use("/api", jobsRoutes);
@@ -44,6 +46,8 @@ app.use("/api", require("./routes/exportToFile/bvExport.routes"));
 app.use("/api", require("./routes/exportToFile/fullExport.routes"));
 
 app.use("/api", require("./routes/exportToFile/rabView.routes"));
+app.use("/api", require("./routes/exportToFile/bvView.routes"));
+app.use("/api", require("./routes/exportToFile/tsView.routes"));
 
 //shedule
 app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));

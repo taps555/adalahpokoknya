@@ -354,6 +354,7 @@ model DailyProgress {
   date             DateTime // tanggal (jam diabaikan)
   progressPercent  Decimal  @db.Decimal(6, 2) // input dari lapangan, misal 25.00
 
+  photoUrl        String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

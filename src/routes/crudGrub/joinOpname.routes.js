@@ -4,45 +4,92 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const router = express.Router();
 
-router.put("/rab-items/:id/progress", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { date, progressPercent } = req.body;
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
-    if (!date || progressPercent == null) {
-      return res
-        .status(400)
-        .json({ error: "Field date dan progressPercent wajib diisi." });
+// ==========================================
+// 2. TAMBAHKAN KONFIGURASI STORAGE DI SINI
+// ==========================================
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const dir = "./public/uploads/progress";
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
-
-    const rabItem = await prisma.rabItem.findUnique({ where: { id } });
-    if (!rabItem)
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
-
-    // normalisasi tanggal ke tengah malam (biar unik per hari, gak kepengaruh jam)
-    const normalizedDate = new Date(date);
-    normalizedDate.setUTCHours(0, 0, 0, 0);
-
-    const progress = await prisma.dailyProgress.upsert({
-      where: {
-        rabItemId_date: { rabItemId: id, date: normalizedDate },
-      },
-      update: { progressPercent: Number(progressPercent) },
-      create: {
-        rabItemId: id,
-        date: normalizedDate,
-        progressPercent: Number(progressPercent),
-      },
-    });
-
-    res.json({ message: "Progress berhasil disimpan", data: progress });
-  } catch (error) {
-    console.error("Error Set Daily Progress:", error);
-    res
-      .status(500)
-      .json({ error: error.message || "Terjadi kesalahan pada server." });
-  }
+    cb(null, dir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, "progress-" + uniqueSuffix + path.extname(file.originalname));
+  },
 });
+const upload = multer({ storage: storage });
+
+// ==========================================
+// 3. UBAH BARIS ROUTER.PUT ANDA MENJADI SEPERTI INI
+// (Sisipkan upload.single("foto") di tengahnya)
+// ==========================================
+
+router.put(
+  "/rab-items/:id/progress",
+  upload.single("foto"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { date, progressPercent } = req.body;
+
+      if (!date || progressPercent == null) {
+        return res
+          .status(400)
+          .json({ error: "Field date dan progressPercent wajib diisi." });
+      }
+
+      const rabItem = await prisma.rabItem.findUnique({ where: { id } });
+      if (!rabItem) {
+        return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+      }
+
+      // Tangkap URL foto jika ada
+      const photoUrl = req.file
+        ? `/uploads/progress/${req.file.filename}`
+        : null;
+
+      const normalizedDate = new Date(date);
+      normalizedDate.setUTCHours(0, 0, 0, 0);
+
+      const updateData = { progressPercent: Number(progressPercent) };
+      if (photoUrl) {
+        updateData.photoUrl = photoUrl;
+      }
+
+      const progress = await prisma.dailyProgress.upsert({
+        where: {
+          rabItemId_date: { rabItemId: id, date: normalizedDate },
+        },
+        update: updateData,
+        create: {
+          rabItemId: id,
+          date: normalizedDate,
+          progressPercent: Number(progressPercent),
+          photoUrl: photoUrl,
+        },
+      });
+
+      res.status(200).json({
+        message: "Progres dan foto berhasil disimpan!",
+        data: progress,
+      });
+    } catch (error) {
+      console.error("Error Set Daily Progress:", error);
+      res
+        .status(500)
+        .json({ error: error.message || "Terjadi kesalahan pada server." });
+    }
+  },
+);
+
+module.exports = router;
 
 /** GET /projects/:projectId/join-opname — breakdown progress harian per item */
 router.get("/projects/:projectId/join-opname", async (req, res) => {
@@ -159,22 +206,32 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
           ? (Number(it.rabTotalPrice) / totalContract) * 100
           : 0;
 
+      // [UPDATE 1]: Ubah Map agar menyimpan object (percent & photoUrl)
       const progressByDate = new Map(
         (it.dailyProgress || []).map((p) => [
           new Date(p.date).toISOString().slice(0, 10),
-          Number(p.progressPercent),
+          {
+            percent: Number(p.progressPercent),
+            photoUrl: p.photoUrl || null,
+          },
         ]),
       );
 
       let sumProgress = 0;
       const dailyBreakdown = days.map((day) => {
         const key = day.date.toISOString().slice(0, 10);
-        const progress = hasChildren ? 0 : progressByDate.get(key) || 0;
+
+        // [UPDATE 2]: Ekstrak percent dan photoUrl dari pData
+        const pData = hasChildren ? null : progressByDate.get(key);
+        const progress = pData ? pData.percent : 0;
+        const photoUrl = pData ? pData.photoUrl : null;
+
         sumProgress += progress;
         return {
           dayNumber: day.dayNumber,
           date: day.date,
           progress,
+          photoUrl, // [UPDATE 3]: Kirim photoUrl ke Frontend
           bobot: weight * (progress / 100),
           volume: (progress / 100) * Number(it.volume),
         };
