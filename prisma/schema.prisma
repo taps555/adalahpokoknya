@@ -163,6 +163,7 @@ model Project {
   bvItems BvItem[]
 
   rabGroups RabGroup[]
+  surveyReports   SurveyReport[]
 
 
   pairedProjectId String?  @unique          // <-- TAMBAH
@@ -186,17 +187,17 @@ model RabItem {
   paymentUnit String
   category    String?
   reference   String?
-  overhead    Float?
+  overheadPercent Decimal  @db.Decimal(5, 2)  @default(0)
   discipline  Discipline?
   grade       String?
   timeSchedule TimeSchedule?   // <-- TAMBAH
 
   volume         Decimal  @db.Decimal(14, 4)
 
-  rapUnitPrice   Decimal  @db.Decimal(18, 4)
+  rapUnitPrice    Decimal  @db.Decimal(14, 2) @default(0)
   rapTotalPrice  Decimal  @db.Decimal(18, 4)
 
-  rabUnitPrice   Decimal  @db.Decimal(18, 4)
+  rabUnitPrice    Decimal  @db.Decimal(14, 2) @default(0)
   rabTotalPrice  Decimal  @db.Decimal(18, 4)
 
   sourceJobTypeId String?
@@ -306,31 +307,42 @@ model BvItem {
 }
 
 model BvBreakdown {
-  id       String @id @default(cuid())
-  bvItemId String
-  bvItem   BvItem @relation(fields: [bvItemId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  bvItemId        String
+  bvItem          BvItem   @relation(fields: [bvItemId], references: [id], onDelete: Cascade)
 
-  keterangan String?
-  panjang    Decimal? @db.Decimal(10, 4)
-  lebar      Decimal? @db.Decimal(10, 4)
-  tinggi     Decimal? @db.Decimal(10, 4)
-  luas       Decimal? @db.Decimal(10, 4)
-  keliling   Decimal? @db.Decimal(10, 4)
-  diameter   Decimal? @db.Decimal(10, 4)
-  berat      Decimal? @db.Decimal(10, 4)
-  jumlahSisi Decimal? @db.Decimal(10, 4)
-  jumlahBh   Decimal? @db.Decimal(10, 4)
-  waste      Decimal? @db.Decimal(6, 4) @default(0)
+  keterangan      String?
+  
+  panjang         Decimal? @db.Decimal(10, 4)
+  isPChecked      Boolean  @default(false)
 
-  modeHitung String? @default("auto")
+  lebar           Decimal? @db.Decimal(10, 4)
+  isLChecked      Boolean  @default(false)
 
-  subTotal Decimal @db.Decimal(14, 4)
+  tinggi          Decimal? @db.Decimal(10, 4)
+  isTChecked      Boolean  @default(false)
+
+  luas            Decimal? @db.Decimal(10, 4)
+  isLuasChecked   Boolean  @default(false)
+
+  keliling        Decimal? @db.Decimal(10, 4)
+  isKelChecked    Boolean  @default(false)
+
+  diameter        Decimal? @db.Decimal(10, 4)
+  // Diameter biasanya hanya untuk pelengkap deskripsi, jadi tidak perlu checkbox
+
+  berat           Decimal? @db.Decimal(10, 4)
+  isBeratChecked  Boolean  @default(false)
+
+  jumlahSisi      Decimal? @db.Decimal(10, 4)
+  jumlahBh        Decimal? @db.Decimal(10, 4)
+  waste           Decimal? @db.Decimal(6, 4) @default(0)
+
+  // Kolom 'modeHitung' DIHAPUS karena digantikan logika Checkbox di atas
+
+  subTotal        Decimal  @db.Decimal(14, 4)
 
   @@index([bvItemId])
-
-
-
-
 }
 
   model TimeSchedule {
@@ -362,5 +374,48 @@ model DailyProgress {
   @@index([rabItemId])
 }
 
+// 1. Tabel Header Survey (Satu proyek bisa disurvey beberapa kali)
+model SurveyReport {
+  id           String       @id @default(cuid())
+  projectId    String
+  project      Project      @relation(fields: [projectId], references: [id])
+  
+  surveyDate   DateTime     // Contoh: 28 Mei 2025
+  surveyorName String       // Contoh: "Itho Arch Dives"
+  notes        String?      // Catatan umum / informasi tambahan
+  
+  areas        SurveyArea[]
+  
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
 
+// 2. Tabel Area/Ruangan yang disurvey
+model SurveyArea {
+  id             String            @id @default(cuid())
+  surveyReportId String
+  surveyReport   SurveyReport      @relation(fields: [surveyReportId], references: [id], onDelete: Cascade)
+  
+  areaName       String            // Contoh: "R.Tamu", "R.Tidur 01"
+  analisa        String?           @db.Text // Kondisi existing
+  penanganan     String?           @db.Text // Solusi yang ditawarkan
+  informasiTambahan String?        @db.Text // Info tambahan soal warna, dll
+  
+  photoUrl       String?           // Path ke foto upload surveyor
+  
+  dimensions     SurveyDimension[]
+}
 
+// 3. Tabel Detail Dimensi (Karena 1 area bisa ada banyak jendela/ukuran)
+model SurveyDimension {
+  id             String       @id @default(cuid())
+  surveyAreaId   String
+  surveyArea     SurveyArea   @relation(fields: [surveyAreaId], references: [id], onDelete: Cascade)
+  
+  panjang        Decimal?     @db.Decimal(10, 4)
+  lebar          Decimal?     @db.Decimal(10, 4) // Contoh: 4.1
+  tinggi         Decimal?     @db.Decimal(10, 4) // Contoh: 3.0
+  luasan         Decimal?     @db.Decimal(10, 4) // Contoh: 12.3
+  
+  keterangan     String?      // Opsional (misal: "Jendela Kiri", "Jendela Kanan")
+}

@@ -42,7 +42,8 @@ const router = express.Router();
 //   return p * l * t * totalJumlah * (1 + w);
 // }
 
-function calcBreakdownSubtotal(b, paymentUnit) {
+function calcBreakdownSubtotal(b) {
+  // 1. Tarik nilai angkanya (kalau kosong jadikan 0)
   const p = b.panjang != null && b.panjang !== "" ? Number(b.panjang) : 0;
   const l = b.lebar != null && b.lebar !== "" ? Number(b.lebar) : 0;
   const t = b.tinggi != null && b.tinggi !== "" ? Number(b.tinggi) : 0;
@@ -51,6 +52,42 @@ function calcBreakdownSubtotal(b, paymentUnit) {
     b.keliling != null && b.keliling !== "" ? Number(b.keliling) : 0;
   const berat = b.berat != null && b.berat !== "" ? Number(b.berat) : 0;
 
+  // 2. Kita mulai baseVolume dari angka 1 (karena ini perkalian)
+  let baseVolume = 1;
+  let adaYangDicentang = false;
+
+  // 3. Kalikan HANYA JIKA dicentang (isXChecked = true)
+  if (b.isPChecked) {
+    baseVolume *= p;
+    adaYangDicentang = true;
+  }
+  if (b.isLChecked) {
+    baseVolume *= l;
+    adaYangDicentang = true;
+  }
+  if (b.isTChecked) {
+    baseVolume *= t;
+    adaYangDicentang = true;
+  }
+  if (b.isLuasChecked) {
+    baseVolume *= luas;
+    adaYangDicentang = true;
+  }
+  if (b.isKelChecked) {
+    baseVolume *= keliling;
+    adaYangDicentang = true;
+  }
+  if (b.isBeratChecked) {
+    baseVolume *= berat;
+    adaYangDicentang = true;
+  }
+
+  // Jika user sama sekali tidak mencentang apa-apa (misal borongan/ls), volume tetap 1
+  if (!adaYangDicentang) {
+    baseVolume = 1;
+  }
+
+  // 4. Hitung Sisi, Buah, dan Waste (Ini selalu dikalikan)
   const s =
     b.jumlahSisi != null && b.jumlahSisi !== "" ? Number(b.jumlahSisi) : 1;
   const bh = b.jumlahBh != null && b.jumlahBh !== "" ? Number(b.jumlahBh) : 1;
@@ -59,56 +96,39 @@ function calcBreakdownSubtotal(b, paymentUnit) {
   const w = b.waste != null && b.waste !== "" ? Number(b.waste) / 100 : 0;
   const wasteMultiplier = 1 + w;
 
-  const satuan = (paymentUnit || "").toLowerCase().trim();
-  const mode = b.modeHitung || "auto";
-  let baseVolume = 0;
-
-  // ===== MODE MANUAL (BYPASS) =====
-  if (mode === "P") baseVolume = p;
-  else if (mode === "L") baseVolume = l;
-  else if (mode === "T") baseVolume = t;
-  else if (mode === "PxL") baseVolume = p * l;
-  else if (mode === "PxT") baseVolume = p * t;
-  else if (mode === "Luas") baseVolume = luas > 0 ? luas : p * l;
-  else if (mode === "Kel") baseVolume = keliling;
-  // ===== MODE OTOMATIS =====
-  else {
-    if (satuan === "m1" || satuan === "m'") {
-      baseVolume = p > 0 ? p : keliling;
-    } else if (satuan === "m2") {
-      if (luas > 0) baseVolume = luas;
-      else if (p > 0 && l > 0) baseVolume = p * l;
-      else if (p > 0 && t > 0) baseVolume = p * t;
-      else if (keliling > 0 && t > 0) baseVolume = keliling * t;
-    } else if (satuan === "m3") {
-      baseVolume =
-        luas > 0 && t > 0 ? luas * t : (p || 1) * (l || 1) * (t || 1);
-    } else if (satuan === "kg") {
-      baseVolume = p > 0 ? p * berat : berat;
-    } else {
-      baseVolume = 1;
-    }
-  }
-
   return baseVolume * totalJumlah * wasteMultiplier;
 }
 
-function buildBreakdownRows(breakdowns, paymentUnit) {
+function buildBreakdownRows(breakdowns) {
+  // Tidak butuh lagi paymentUnit untuk hitung rumus
   return breakdowns.map((b) => {
-    const subTotal = calcBreakdownSubtotal(b, paymentUnit);
+    const subTotal = calcBreakdownSubtotal(b);
     return {
       keterangan: b.keterangan || null,
-      modeHitung: b.modeHitung || "auto", // Simpan mode hitung ke database
+
       panjang: b.panjang ?? null,
+      isPChecked: !!b.isPChecked, // Simpan status centang ke database
+
       lebar: b.lebar ?? null,
+      isLChecked: !!b.isLChecked,
+
       tinggi: b.tinggi ?? null,
+      isTChecked: !!b.isTChecked,
+
       luas: b.luas ?? null,
+      isLuasChecked: !!b.isLuasChecked,
+
       keliling: b.keliling ?? null,
-      diameter: b.diameter ?? null,
+      isKelChecked: !!b.isKelChecked,
+
       berat: b.berat ?? null,
+      isBeratChecked: !!b.isBeratChecked,
+
+      diameter: b.diameter ?? null, // Diameter ga ikut dikali, cuma dicatat
       jumlahSisi: b.jumlahSisi ?? null,
       jumlahBh: b.jumlahBh ?? null,
       waste: b.waste ?? null,
+
       subTotal,
     };
   });
@@ -204,9 +224,7 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
         .json({ error: 'Field "name" wajib diisi untuk header.' });
     }
 
-    const breakdownRows = isHeaderOnly
-      ? []
-      : buildBreakdownRows(breakdowns, finalUnit);
+    const breakdownRows = isHeaderOnly ? [] : buildBreakdownRows(breakdowns);
 
     const totalVolume = breakdownRows.reduce((sum, b) => sum + b.subTotal, 0);
 
@@ -439,6 +457,197 @@ router.delete("/bv-items/:id", async (req, res) => {
  * Mode HSPK (sourceJobTypeId ada): RAP otomatis dihitung dari JobType, user cuma isi rabUnitPrice.
  * Mode Custom: user isi components manual + rabUnitPrice.
  */
+// router.post("/bv-items/:id/link-to-rab", async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { rabUnitPrice, groupId, category, reference, overhead, components } =
+//       req.body;
+
+//     const bvItem = await prisma.bvItem.findUnique({ where: { id } });
+//     if (!bvItem)
+//       return res.status(404).json({ error: "Item BV tidak ditemukan." });
+//     if (bvItem.linkedRabItemId) {
+//       return res.status(400).json({
+//         error:
+//           "Item BV ini sudah pernah di-link ke RAB. Hapus link lama dulu kalau mau link ulang.",
+//       });
+//     }
+
+//     const vol = Number(bvItem.totalVolume);
+//     let rapUnitPrice, componentRows, finalCategory, finalReference, overheadPct;
+
+//     if (bvItem.sourceJobTypeId) {
+//       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
+//       if (!calc)
+//         return res.status(404).json({
+//           error: "Jenis pekerjaan (master) sumber BV ini tidak ditemukan.",
+//         });
+
+//       rapUnitPrice = calc.total;
+//       overheadPct = calc.jobType.overhead;
+//       finalCategory = category || calc.jobType.category;
+//       finalReference = reference || calc.jobType.reference;
+//       componentRows = Object.entries(calc.breakdown).flatMap(
+//         ([section, items]) =>
+//           items.map((item) => ({
+//             name: item.name,
+//             unit: item.unit,
+//             section,
+//             coefficient: item.coefficient,
+//             unitPrice: item.unitPrice,
+//             lineTotal: item.lineTotal,
+//           })),
+//       );
+//     } else {
+//       if (!Array.isArray(components) || components.length === 0) {
+//         return res.status(400).json({
+//           error:
+//             "Minimal harus ada 1 komponen (bahan/upah/alat) untuk item BV custom.",
+//         });
+//       }
+//       overheadPct = overhead != null ? Number(overhead) : 0.1;
+//       let baseTotal = 0;
+//       componentRows = components.map((c) => {
+//         const lineTotal = Number(c.coefficient) * Number(c.unitPrice);
+//         baseTotal += lineTotal;
+//         return {
+//           name: c.name,
+//           unit: c.unit,
+//           section: c.section,
+//           coefficient: c.coefficient,
+//           unitPrice: c.unitPrice,
+//           lineTotal,
+//         };
+//       });
+//       rapUnitPrice = baseTotal + baseTotal * overheadPct;
+//       finalCategory = category || null;
+//       finalReference = reference || null;
+//     }
+
+//     const rabPrice = rabUnitPrice != null ? Number(rabUnitPrice) : rapUnitPrice;
+
+//     const result = await prisma.$transaction(async (tx) => {
+//       const finalGroupId = groupId || bvItem.groupId || null;
+
+//       let insertOrder;
+
+//       if (bvItem.parentBvItemId) {
+//         const parentBv = await tx.bvItem.findUnique({
+//           where: { id: bvItem.parentBvItemId },
+//           select: { linkedRabItemId: true },
+//         });
+
+//         if (parentBv?.linkedRabItemId) {
+//           const parentRab = await tx.rabItem.findUnique({
+//             where: { id: parentBv.linkedRabItemId },
+//             select: { order: true },
+//           });
+
+//           // cari sibling (anak lain dari parent yg sama) yg udah linked duluan
+//           const linkedSiblings = await tx.bvItem.findMany({
+//             where: {
+//               parentBvItemId: bvItem.parentBvItemId,
+//               linkedRabItemId: { not: null },
+//             },
+//             include: { linkedRabItem: { select: { order: true } } },
+//           });
+
+//           const maxSiblingOrder = linkedSiblings.length
+//             ? Math.max(...linkedSiblings.map((s) => s.linkedRabItem.order))
+//             : parentRab.order;
+
+//           insertOrder = maxSiblingOrder + 1;
+
+//           await tx.rabItem.updateMany({
+//             where: {
+//               projectId: bvItem.projectId,
+//               groupId: finalGroupId,
+//               order: { gte: insertOrder },
+//             },
+//             data: { order: { increment: 1 } },
+//           });
+//         }
+//       }
+
+//       if (insertOrder === undefined) {
+//         // bukan child, atau parent belum linked -> taro di belakang, pakai max(order)+1 (bukan count)
+//         const lastItem = await tx.rabItem.findFirst({
+//           where: { projectId: bvItem.projectId, groupId: finalGroupId },
+//           orderBy: { order: "desc" },
+//           select: { order: true },
+//         });
+//         insertOrder = lastItem ? lastItem.order + 1 : 0;
+//       }
+
+//       const rabItem = await tx.rabItem.create({
+//         data: {
+//           projectId: bvItem.projectId,
+//           groupId: finalGroupId,
+//           name: bvItem.name,
+//           paymentUnit: bvItem.paymentUnit,
+//           category: finalCategory,
+//           reference: finalReference,
+//           overhead: overheadPct,
+//           volume: vol,
+//           rapUnitPrice,
+//           rapTotalPrice: rapUnitPrice * vol,
+//           rabUnitPrice: rabPrice,
+//           rabTotalPrice: rabPrice * vol,
+//           sourceJobTypeId: bvItem.sourceJobTypeId || null,
+//           order: insertOrder,
+//           components: { create: componentRows },
+//         },
+//       });
+
+//       const linkedChildren = await tx.bvItem.findMany({
+//         where: { parentBvItemId: id, linkedRabItemId: { not: null } },
+//         select: { linkedRabItemId: true },
+//         orderBy: { createdAt: "asc" },
+//       });
+
+//       if (linkedChildren.length > 0) {
+//         const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
+
+//         await tx.rabItem.updateMany({
+//           where: { id: { in: childRabIds } },
+//           data: { order: -1 },
+//         });
+
+//         await tx.rabItem.updateMany({
+//           where: {
+//             projectId: bvItem.projectId,
+//             groupId: finalGroupId,
+//             order: { gt: rabItem.order },
+//           },
+//           data: { order: { increment: childRabIds.length } },
+//         });
+
+//         for (let i = 0; i < childRabIds.length; i++) {
+//           await tx.rabItem.update({
+//             where: { id: childRabIds[i] },
+//             data: { order: rabItem.order + 1 + i },
+//           });
+//         }
+//       }
+//       const updatedBv = await tx.bvItem.update({
+//         where: { id },
+//         data: { linkedRabItemId: rabItem.id },
+//       });
+
+//       return { rabItem, bvItem: updatedBv };
+//     });
+
+//     res
+//       .status(201)
+//       .json({ message: "Item BV berhasil di-link ke RAB", data: result });
+//   } catch (error) {
+//     console.error("Error Link BvItem to Rab:", error);
+//     res
+//       .status(500)
+//       .json({ error: error.message || "Terjadi kesalahan pada server." });
+//   }
+// });
+/** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
 router.post("/bv-items/:id/link-to-rab", async (req, res) => {
   try {
     const { id } = req.params;
@@ -456,19 +665,30 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     }
 
     const vol = Number(bvItem.totalVolume);
-    let rapUnitPrice, componentRows, finalCategory, finalReference, overheadPct;
+    let rapUnitPrice = 0; // Set default 0 biar aman kalau kosongan
+    let componentRows = [];
+    let finalCategory = category || null;
+    let finalReference = reference || null;
+    let overheadPct =
+      overhead != null && overhead !== "" ? Number(overhead) : 10;
+    let calculatedRabPrice = 0;
 
+    // ==========================================
+    // 1. JALUR MASTER AHSP
+    // ==========================================
     if (bvItem.sourceJobTypeId) {
       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
       if (!calc)
-        return res.status(404).json({
-          error: "Jenis pekerjaan (master) sumber BV ini tidak ditemukan.",
-        });
+        return res
+          .status(404)
+          .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
 
-      rapUnitPrice = calc.total;
-      overheadPct = calc.jobType.overhead;
+      overheadPct = calc.jobType.overhead
+        ? Number(calc.jobType.overhead)
+        : overheadPct;
       finalCategory = category || calc.jobType.category;
       finalReference = reference || calc.jobType.reference;
+
       componentRows = Object.entries(calc.breakdown).flatMap(
         ([section, items]) =>
           items.map((item) => ({
@@ -480,39 +700,54 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
             lineTotal: item.lineTotal,
           })),
       );
-    } else {
-      if (!Array.isArray(components) || components.length === 0) {
-        return res.status(400).json({
-          error:
-            "Minimal harus ada 1 komponen (bahan/upah/alat) untuk item BV custom.",
-        });
-      }
-      overheadPct = overhead != null ? Number(overhead) : 0.1;
-      let baseTotal = 0;
-      componentRows = components.map((c) => {
-        const lineTotal = Number(c.coefficient) * Number(c.unitPrice);
-        baseTotal += lineTotal;
-        return {
-          name: c.name,
-          unit: c.unit,
-          section: c.section,
-          coefficient: c.coefficient,
-          unitPrice: c.unitPrice,
-          lineTotal,
-        };
-      });
-      rapUnitPrice = baseTotal + baseTotal * overheadPct;
-      finalCategory = category || null;
-      finalReference = reference || null;
+
+      rapUnitPrice = componentRows.reduce(
+        (sum, comp) => sum + Number(comp.lineTotal),
+        0,
+      );
+      calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
     }
 
-    const rabPrice = rabUnitPrice != null ? Number(rabUnitPrice) : rapUnitPrice;
+    // ==========================================
+    // 2. JALUR CUSTOM (SUDAH DIBIKIN HALAL KOSONGAN!)
+    // ==========================================
+    else {
+      let baseTotal = 0;
+
+      // Hanya proses kalau user kebetulan ngisi komponen
+      if (Array.isArray(components) && components.length > 0) {
+        componentRows = components.map((c) => {
+          const lineTotal =
+            Number(c.coefficient || 0) * Number(c.unitPrice || 0);
+          baseTotal += lineTotal;
+          return {
+            name: c.name,
+            unit: c.unit,
+            section: c.section,
+            coefficient: c.coefficient,
+            unitPrice: c.unitPrice,
+            lineTotal,
+          };
+        });
+      }
+
+      rapUnitPrice = baseTotal;
+      calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
+    }
+
+    // ==========================================
+    // 3. TENTUKAN HARGA FINAL JUAL & SIMPAN
+    // ==========================================
+    const finalRabSatuan =
+      rabUnitPrice != null && rabUnitPrice !== ""
+        ? Number(rabUnitPrice)
+        : calculatedRabPrice;
 
     const result = await prisma.$transaction(async (tx) => {
       const finalGroupId = groupId || bvItem.groupId || null;
-
       let insertOrder;
 
+      // Logika Ordering (Tidak Diubah)
       if (bvItem.parentBvItemId) {
         const parentBv = await tx.bvItem.findUnique({
           where: { id: bvItem.parentBvItemId },
@@ -525,7 +760,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
             select: { order: true },
           });
 
-          // cari sibling (anak lain dari parent yg sama) yg udah linked duluan
           const linkedSiblings = await tx.bvItem.findMany({
             where: {
               parentBvItemId: bvItem.parentBvItemId,
@@ -552,7 +786,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       }
 
       if (insertOrder === undefined) {
-        // bukan child, atau parent belum linked -> taro di belakang, pakai max(order)+1 (bukan count)
         const lastItem = await tx.rabItem.findFirst({
           where: { projectId: bvItem.projectId, groupId: finalGroupId },
           orderBy: { order: "desc" },
@@ -561,6 +794,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
         insertOrder = lastItem ? lastItem.order + 1 : 0;
       }
 
+      // Create di tabel RAB
       const rabItem = await tx.rabItem.create({
         data: {
           projectId: bvItem.projectId,
@@ -569,18 +803,23 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           paymentUnit: bvItem.paymentUnit,
           category: finalCategory,
           reference: finalReference,
+
           overhead: overheadPct,
           volume: vol,
-          rapUnitPrice,
+
+          rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,
-          rabUnitPrice: rabPrice,
-          rabTotalPrice: rabPrice * vol,
+
+          rabUnitPrice: finalRabSatuan,
+          rabTotalPrice: finalRabSatuan * vol,
+
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
           order: insertOrder,
-          components: { create: componentRows },
+          components: { create: componentRows }, // Bisa nembak array kosong [] dengan aman
         },
       });
 
+      // Update urutan Child
       const linkedChildren = await tx.bvItem.findMany({
         where: { parentBvItemId: id, linkedRabItemId: { not: null } },
         select: { linkedRabItemId: true },
@@ -589,12 +828,10 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
 
       if (linkedChildren.length > 0) {
         const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
-
         await tx.rabItem.updateMany({
           where: { id: { in: childRabIds } },
           data: { order: -1 },
         });
-
         await tx.rabItem.updateMany({
           where: {
             projectId: bvItem.projectId,
@@ -603,7 +840,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           },
           data: { order: { increment: childRabIds.length } },
         });
-
         for (let i = 0; i < childRabIds.length; i++) {
           await tx.rabItem.update({
             where: { id: childRabIds[i] },
@@ -611,11 +847,11 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           });
         }
       }
+
       const updatedBv = await tx.bvItem.update({
         where: { id },
         data: { linkedRabItemId: rabItem.id },
       });
-
       return { rabItem, bvItem: updatedBv };
     });
 
@@ -629,7 +865,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
-/** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
+
 router.post("/bv-items/:id/sync", async (req, res) => {
   try {
     const { id } = req.params;
@@ -752,6 +988,60 @@ router.post("/bv-items/:id/sync", async (req, res) => {
     res
       .status(500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+router.post("/bv-items/:id/unlink", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Cari item BV dan cek temannya di RAB
+    const bvItem = await prisma.bvItem.findUnique({
+      where: { id },
+      include: { linkedRabItem: true },
+    });
+
+    if (!bvItem) {
+      return res.status(404).json({ error: "Item BV tidak ditemukan." });
+    }
+
+    if (!bvItem.linkedRabItemId || !bvItem.linkedRabItem) {
+      return res.status(400).json({ error: "Item ini memang belum di-link." });
+    }
+
+    // 2. THE LOCK (GEMBOK PROFESIONAL)
+    // Cek apakah Pak Jim sudah mengisi harga di RAB (Total harga > 0)
+    // Kita cek rabTotalPrice atau rabUnitPrice
+    const isPriced = Number(bvItem.linkedRabItem.rabTotalPrice) > 0;
+
+    if (isPriced) {
+      // TOLAK PERMINTAAN UNLINK!
+      return res.status(403).json({
+        error:
+          "UNLINK DITOLAK: Item ini sudah dikerjakan/diberi harga oleh Estimator (Pak Jim). Silakan hubungi Estimator untuk menghapus harga terlebih dahulu jika ingin merevisi struktur.",
+      });
+    }
+
+    // 3. JIKA BELUM DIBERI HARGA (Rp 0), SILAKAN UNLINK (Aman!)
+    await prisma.$transaction(async (tx) => {
+      // Hapus cangkang kosong di RAB
+      await tx.rabItem.delete({
+        where: { id: bvItem.linkedRabItemId },
+      });
+
+      // Lepaskan ikatan di BV
+      await tx.bvItem.update({
+        where: { id },
+        data: { linkedRabItemId: null },
+      });
+    });
+
+    res.json({ message: "Berhasil Unlink! Item dikembalikan ke Modul BV." });
+  } catch (error) {
+    console.error("Error Unlink:", error);
+    res
+      .status(500)
+      .json({ error: "Terjadi kesalahan pada server saat unlink." });
   }
 });
 module.exports = router;
