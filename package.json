@@ -20,6 +20,8 @@
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.19.1",
+    "puppeteer": "^25.8.0",
     "swagger-autogen": "^2.23.7",
     "swagger-ui-express": "^5.0.1",
     "xlsx": "^0.18.5"

@@ -373,19 +373,18 @@ model DailyProgress {
   @@unique([rabItemId, date]) // 1 item cuma boleh 1 catatan per tanggal
   @@index([rabItemId])
 }
-
 // 1. Tabel Header Survey (Satu proyek bisa disurvey beberapa kali)
 model SurveyReport {
   id           String       @id @default(cuid())
   projectId    String
   project      Project      @relation(fields: [projectId], references: [id])
-  
+
   surveyDate   DateTime     // Contoh: 28 Mei 2025
   surveyorName String       // Contoh: "Itho Arch Dives"
   notes        String?      // Catatan umum / informasi tambahan
-  
+
   areas        SurveyArea[]
-  
+
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 }
@@ -395,15 +394,29 @@ model SurveyArea {
   id             String            @id @default(cuid())
   surveyReportId String
   surveyReport   SurveyReport      @relation(fields: [surveyReportId], references: [id], onDelete: Cascade)
-  
+
   areaName       String            // Contoh: "R.Tamu", "R.Tidur 01"
   analisa        String?           @db.Text // Kondisi existing
   penanganan     String?           @db.Text // Solusi yang ditawarkan
   informasiTambahan String?        @db.Text // Info tambahan soal warna, dll
-  
-  photoUrl       String?           // Path ke foto upload surveyor
-  
+
+  photoUrl       String?           // DEPRECATED - dibiarin biar data lama gak rusak, area baru pake relasi "photos" di bawah
+  photoCaption   String?           // Caption di bawah grid foto, contoh: "KONDISI KAIN GORDAIN DAN RELL R.TAMU"
+
+  photos         SurveyPhoto[]
   dimensions     SurveyDimension[]
+}
+
+// 2b. Tabel Foto per Area (1 area bisa punya beberapa foto, ditampilkan grid di PDF)
+model SurveyPhoto {
+  id           String     @id @default(cuid())
+  surveyAreaId String
+  surveyArea   SurveyArea @relation(fields: [surveyAreaId], references: [id], onDelete: Cascade)
+
+  url          String     // Path file, contoh: "/uploads/surveys/survey-xxx.jpg"
+  order        Int        @default(0) // Urutan tampil di grid (0,1,2,3)
+
+  createdAt    DateTime   @default(now())
 }
 
 // 3. Tabel Detail Dimensi (Karena 1 area bisa ada banyak jendela/ukuran)
@@ -411,11 +424,11 @@ model SurveyDimension {
   id             String       @id @default(cuid())
   surveyAreaId   String
   surveyArea     SurveyArea   @relation(fields: [surveyAreaId], references: [id], onDelete: Cascade)
-  
+
   panjang        Decimal?     @db.Decimal(10, 4)
   lebar          Decimal?     @db.Decimal(10, 4) // Contoh: 4.1
   tinggi         Decimal?     @db.Decimal(10, 4) // Contoh: 3.0
   luasan         Decimal?     @db.Decimal(10, 4) // Contoh: 12.3
-  
+
   keterangan     String?      // Opsional (misal: "Jendela Kiri", "Jendela Kanan")
 }
