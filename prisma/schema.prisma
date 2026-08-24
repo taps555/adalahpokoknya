@@ -214,10 +214,16 @@ model RabItem {
   components RabItemComponent[]
   dailyProgress DailyProgress[]
 
+  // 👇 TAMBAHKAN 3 BARIS INI UNTUK RELASI INDUK-ANAK DI RAB ITEM 👇
+  parentId        String?
+  parent          RabItem?   @relation("ItemChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children        RabItem[]  @relation("ItemChildren")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([projectId])
+  @@index([parentId]) // <-- Tambahkan index ini juga
 }
 
 model RabItemComponent {

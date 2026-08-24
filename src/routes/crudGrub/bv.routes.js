@@ -804,7 +804,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           category: finalCategory,
           reference: finalReference,
 
-          overhead: overheadPct,
+          overheadPercent: overheadPct, // <-- Diubah dari 'overhead'
           volume: vol,
 
           rapUnitPrice: rapUnitPrice,
@@ -815,7 +815,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
 
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
           order: insertOrder,
-          components: { create: componentRows }, // Bisa nembak array kosong [] dengan aman
+          components: { create: componentRows },
         },
       });
 
