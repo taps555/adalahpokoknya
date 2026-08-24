@@ -651,12 +651,21 @@ router.delete("/bv-items/:id", async (req, res) => {
 router.post("/bv-items/:id/link-to-rab", async (req, res) => {
   try {
     const { id } = req.params;
-    const { rabUnitPrice, groupId, category, reference, overhead, components } =
-      req.body;
+    // Tambahkan includeChildren dari req.body
+    const {
+      rabUnitPrice,
+      groupId,
+      category,
+      reference,
+      overhead,
+      components,
+      includeChildren,
+    } = req.body;
 
     const bvItem = await prisma.bvItem.findUnique({ where: { id } });
     if (!bvItem)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
+
     if (bvItem.linkedRabItemId) {
       return res.status(400).json({
         error:
@@ -665,7 +674,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     }
 
     const vol = Number(bvItem.totalVolume);
-    let rapUnitPrice = 0; // Set default 0 biar aman kalau kosongan
+    let rapUnitPrice = 0;
     let componentRows = [];
     let finalCategory = category || null;
     let finalReference = reference || null;
@@ -677,6 +686,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     // 1. JALUR MASTER AHSP
     // ==========================================
     if (bvItem.sourceJobTypeId) {
+      // (Pastikan fungsi calculateJobPrice bisa diakses di sini)
       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
       if (!calc)
         return res
@@ -707,14 +717,11 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       );
       calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
     }
-
     // ==========================================
-    // 2. JALUR CUSTOM (SUDAH DIBIKIN HALAL KOSONGAN!)
+    // 2. JALUR CUSTOM
     // ==========================================
     else {
       let baseTotal = 0;
-
-      // Hanya proses kalau user kebetulan ngisi komponen
       if (Array.isArray(components) && components.length > 0) {
         componentRows = components.map((c) => {
           const lineTotal =
@@ -730,7 +737,6 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           };
         });
       }
-
       rapUnitPrice = baseTotal;
       calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
     }
@@ -747,7 +753,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       const finalGroupId = groupId || bvItem.groupId || null;
       let insertOrder;
 
-      // Logika Ordering (Tidak Diubah)
+      // --- LOGIKA ORDERING (TIDAK DIUBAH) ---
       if (bvItem.parentBvItemId) {
         const parentBv = await tx.bvItem.findUnique({
           where: { id: bvItem.parentBvItemId },
@@ -794,7 +800,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
         insertOrder = lastItem ? lastItem.order + 1 : 0;
       }
 
-      // Create di tabel RAB
+      // --- CREATE PARENT DI TABEL RAB ---
       const rabItem = await tx.rabItem.create({
         data: {
           projectId: bvItem.projectId,
@@ -803,23 +809,97 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           paymentUnit: bvItem.paymentUnit,
           category: finalCategory,
           reference: finalReference,
-
-          overheadPercent: overheadPct, // <-- Diubah dari 'overhead'
+          overheadPercent: overheadPct, // <-- Pastikan overheadPercent
           volume: vol,
-
           rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,
-
           rabUnitPrice: finalRabSatuan,
           rabTotalPrice: finalRabSatuan * vol,
-
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
           order: insertOrder,
           components: { create: componentRows },
         },
       });
 
-      // Update urutan Child
+      // =================================================================
+      // 🔥 FITUR BARU: AUTO LINK CHILDREN JIKA DIA PUNYA ANAK 🔥
+      // =================================================================
+      if (includeChildren) {
+        // Cari anak-anak BV yang BELUM di-link
+        const unlinkedChildren = await tx.bvItem.findMany({
+          where: { parentBvItemId: id, linkedRabItemId: null },
+          orderBy: { createdAt: "asc" },
+        });
+
+        for (const childBv of unlinkedChildren) {
+          let childRapSatuan = 0;
+          let childComponents = [];
+          let childOverhead = 10;
+          let childCategory = finalCategory; // Ikut dari parent
+
+          // Jika si anak punya referensi AHSP, kita ambil rinciannya
+          if (childBv.sourceJobTypeId) {
+            const calc = await calculateJobPrice(childBv.sourceJobTypeId);
+            if (calc) {
+              childOverhead = calc.jobType.overhead
+                ? Number(calc.jobType.overhead)
+                : 10;
+              childCategory = calc.jobType.category || childCategory;
+
+              childComponents = Object.entries(calc.breakdown).flatMap(
+                ([section, items]) =>
+                  items.map((item) => ({
+                    name: item.name,
+                    unit: item.unit,
+                    section,
+                    coefficient: item.coefficient,
+                    unitPrice: item.unitPrice,
+                    lineTotal: item.lineTotal,
+                  })),
+              );
+              childRapSatuan = childComponents.reduce(
+                (sum, comp) => sum + Number(comp.lineTotal),
+                0,
+              );
+            }
+          }
+
+          const childVol = Number(childBv.totalVolume);
+          const childRabSatuan =
+            childRapSatuan + childRapSatuan * (childOverhead / 100);
+
+          // Buat item RAB untuk anak
+          const childRab = await tx.rabItem.create({
+            data: {
+              projectId: childBv.projectId,
+              groupId: finalGroupId,
+              parentId: rabItem.id, // <-- PENTING: Sambungkan ke Parent RAB yg baru dibuat!
+              name: childBv.name,
+              paymentUnit: childBv.paymentUnit,
+              category: childCategory,
+              overheadPercent: childOverhead,
+              volume: childVol,
+              rapUnitPrice: childRapSatuan,
+              rapTotalPrice: childRapSatuan * childVol,
+              rabUnitPrice: childRabSatuan,
+              rabTotalPrice: childRabSatuan * childVol,
+              sourceJobTypeId: childBv.sourceJobTypeId || null,
+              order: -1, // Set -1 dulu sementara, blok di bawah yang akan mengurutkan
+              components: { create: childComponents },
+            },
+          });
+
+          // Tandai BV anak sudah di-link
+          await tx.bvItem.update({
+            where: { id: childBv.id },
+            data: { linkedRabItemId: childRab.id },
+          });
+        }
+      }
+      // =================================================================
+
+      // --- UPDATE URUTAN DAN PARENT ID UNTUK SEMUA ANAK ---
+      // (Termasuk anak yang lama dan anak yang baru saja dibuat di atas)
       const linkedChildren = await tx.bvItem.findMany({
         where: { parentBvItemId: id, linkedRabItemId: { not: null } },
         select: { linkedRabItemId: true },
@@ -828,10 +908,14 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
 
       if (linkedChildren.length > 0) {
         const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
+
+        // Pastikan parentId semua anak diset ke Induk yang baru terbuat
         await tx.rabItem.updateMany({
           where: { id: { in: childRabIds } },
-          data: { order: -1 },
+          data: { order: -1, parentId: rabItem.id },
         });
+
+        // Geser semua item lain ke bawah untuk memberi ruang untuk anak-anak ini
         await tx.rabItem.updateMany({
           where: {
             projectId: bvItem.projectId,
@@ -840,6 +924,8 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           },
           data: { order: { increment: childRabIds.length } },
         });
+
+        // Urutkan anak-anak tepat di bawah induknya
         for (let i = 0; i < childRabIds.length; i++) {
           await tx.rabItem.update({
             where: { id: childRabIds[i] },
@@ -848,10 +934,12 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
         }
       }
 
+      // --- UPDATE PARENT BV ITEM ---
       const updatedBv = await tx.bvItem.update({
         where: { id },
         data: { linkedRabItemId: rabItem.id },
       });
+
       return { rabItem, bvItem: updatedBv };
     });
 

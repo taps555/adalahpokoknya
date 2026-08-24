@@ -271,7 +271,7 @@ router.put("/rab-items/:id", async (req, res) => {
       data: {
         rapUnitPrice: rapSatuan,
         rapTotalPrice: rapTotal,
-        overhead: overhead,
+        overheadPercent: overhead,
         rabUnitPrice: rabSatuan,
         rabTotalPrice: rabTotal,
         ...(componentUpdate ? { components: componentUpdate } : {}),
@@ -468,7 +468,7 @@ router.put("/rab-items/:id/switch-job", async (req, res) => {
         discipline: calc.jobType.discipline,
         grade: calc.jobType.grade,
 
-        overhead: overhead,
+        overheadPercent: overhead,
         rapUnitPrice: rapSatuan,
         rapTotalPrice: rapTotal,
         rabUnitPrice: rabSatuan,
