@@ -6,23 +6,26 @@ const path = require("path");
 const PINK = "#e91e8c";
 const PINK_LIGHT = "#f6c6e0";
 const GREY_TEXT = "#222222";
-const RED_INFO = "#c0117a"; // warna "informasi tambahan" di contoh (magenta/merah)
+const RED_INFO = "#c0117a";
 const BORDER = "#999999";
 
 const PAGE_MARGIN = 30;
-const PAGE_WIDTH = 841.89; // A4 LANDSCAPE (tabelnya lebar banget di contoh -> landscape lebih pas)
+const PAGE_WIDTH = 841.89; // A4 LANDSCAPE
 const PAGE_HEIGHT = 595.28;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 
-// Lebar kolom (total harus = CONTENT_WIDTH)
 const COL = {
   no: 24,
   keterangan: 90,
   foto: 190,
-  ukuran: 110, // dibagi 3: T, L, V
-  analisa: 0, // diisi belakangan (sisa)
+  ukuran: 110,
+  analisa: 0,
 };
 COL.analisa = CONTENT_WIDTH - COL.no - COL.keterangan - COL.foto - COL.ukuran;
+
+// Grid foto: 4 kolom, tinggi tiap thumbnail tetap kecil biar muat banyak (maks 20/area)
+const PHOTO_GRID_COLS = 4;
+const PHOTO_CELL_H = 34;
 
 function colX() {
   const x0 = PAGE_MARGIN;
@@ -54,7 +57,7 @@ function resolvePhotoPath(url) {
 }
 
 // ==========================================
-// HEADER TABEL (2 baris: judul kolom + sub-kolom T/L/V), dipanggil ulang tiap halaman baru
+// HEADER TABEL
 // ==========================================
 function drawTableHeader(doc, y) {
   const { x0, x1, x2, x3, x4, xEnd } = colX();
@@ -62,14 +65,11 @@ function drawTableHeader(doc, y) {
   const rowH2 = 13;
   const totalH = rowH1 + rowH2;
 
-  // Background pink penuh row 1
   doc.rect(x0, y, CONTENT_WIDTH, rowH1).fill(PINK);
-  // Kolom yang merge 2 baris (NO, KETERANGAN, FOTO, ANALISA) - lanjutin pink ke row2
   doc.rect(x0, y + rowH1, COL.no, rowH2).fill(PINK);
   doc.rect(x1, y + rowH1, COL.keterangan, rowH2).fill(PINK);
   doc.rect(x2, y + rowH1, COL.foto, rowH2).fill(PINK);
   doc.rect(x4, y + rowH1, COL.analisa, rowH2).fill(PINK);
-  // Sub-header T/L/V - pink lebih muda
   doc.rect(x3, y + rowH1, COL.ukuran, rowH2).fill(PINK_LIGHT);
 
   doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8);
@@ -93,7 +93,6 @@ function drawTableHeader(doc, y) {
     });
   });
 
-  // Border grid
   doc.strokeColor(BORDER).lineWidth(0.5);
   [x0, x1, x2, x3, x3 + subW, x3 + subW * 2, x4, xEnd].forEach((x) => {
     doc
@@ -105,7 +104,7 @@ function drawTableHeader(doc, y) {
   doc
     .moveTo(x3, y + rowH1)
     .lineTo(x4, y + rowH1)
-    .stroke(); // pemisah UKURAN vs sub T/L/V
+    .stroke();
   doc
     .moveTo(x0, y + totalH)
     .lineTo(xEnd, y + totalH)
@@ -127,52 +126,81 @@ function ensureSpace(doc, y, needed, onNewPage) {
 }
 
 // ==========================================
-// Grid foto 2x2 + caption
+// Grid foto DINAMIS: 4 kolom, N baris (maks 20 foto/area -> 5 baris)
 // ==========================================
-function drawPhotoGrid(doc, area, x, y, width) {
-  const photos = (
-    area.photos && area.photos.length
-      ? area.photos
-      : area.photoUrl
-        ? [{ url: area.photoUrl }]
-        : []
-  ).slice(0, 4);
+function getPhotoList(area) {
+  if (area.photos && area.photos.length) return area.photos;
+  if (area.photoUrl) return [{ url: area.photoUrl }];
+  return [];
+}
 
+function photoGridHeight(area, width) {
+  const photos = getPhotoList(area);
   const pad = 4;
   const gap = 3;
-  const cellW = (width - pad * 2 - gap) / 2;
-  const cellH = 50;
+  const count = Math.max(photos.length, 1); // minimal 1 baris walau kosong (nampilin placeholder)
+  const rows = Math.ceil(count / PHOTO_GRID_COLS);
+  let h = rows * PHOTO_CELL_H + (rows - 1) * gap + pad * 2;
 
-  for (let i = 0; i < 4; i++) {
-    const row = Math.floor(i / 2);
-    const col = i % 2;
+  if (area.photoCaption) {
+    h += 4 + Math.ceil(area.photoCaption.length / 40) * 8 + 4;
+  }
+  return h;
+}
+
+function drawPhotoGrid(doc, area, x, y, width) {
+  const photos = getPhotoList(area);
+  const pad = 4;
+  const gap = 3;
+  const cellW =
+    (width - pad * 2 - gap * (PHOTO_GRID_COLS - 1)) / PHOTO_GRID_COLS;
+
+  if (photos.length === 0) {
+    doc
+      .rect(x + pad, y, width - pad * 2, PHOTO_CELL_H)
+      .fillAndStroke("#f2f2f2", "#cccccc");
+    doc
+      .fillColor("#aaaaaa")
+      .fontSize(7)
+      .font("Helvetica-Oblique")
+      .text("Tidak ada foto", x + pad, y + PHOTO_CELL_H / 2 - 4, {
+        width: width - pad * 2,
+        align: "center",
+      });
+    doc.fillColor(GREY_TEXT).font("Helvetica");
+    return y + PHOTO_CELL_H + pad;
+  }
+
+  photos.forEach((photo, i) => {
+    const row = Math.floor(i / PHOTO_GRID_COLS);
+    const col = i % PHOTO_GRID_COLS;
     const cx = x + pad + col * (cellW + gap);
-    const cy = y + row * (cellH + gap);
-    const photo = photos[i];
-    const filePath = photo ? resolvePhotoPath(photo.url) : null;
+    const cy = y + row * (PHOTO_CELL_H + gap);
+    const filePath = resolvePhotoPath(photo.url);
 
     if (filePath) {
       doc.image(filePath, cx, cy, {
         width: cellW,
-        height: cellH,
-        fit: [cellW, cellH],
+        height: PHOTO_CELL_H,
+        fit: [cellW, PHOTO_CELL_H],
       });
-      doc.rect(cx, cy, cellW, cellH).stroke("#cccccc");
+      doc.rect(cx, cy, cellW, PHOTO_CELL_H).stroke("#cccccc");
     } else {
-      doc.rect(cx, cy, cellW, cellH).fillAndStroke("#f2f2f2", "#cccccc");
+      doc.rect(cx, cy, cellW, PHOTO_CELL_H).fillAndStroke("#f2f2f2", "#cccccc");
       doc
         .fillColor("#aaaaaa")
-        .fontSize(6.5)
+        .fontSize(5.5)
         .font("Helvetica-Oblique")
-        .text(photo ? "Gagal muat foto" : "-", cx, cy + cellH / 2 - 4, {
+        .text("Gagal muat", cx, cy + PHOTO_CELL_H / 2 - 3, {
           width: cellW,
           align: "center",
         });
       doc.fillColor(GREY_TEXT).font("Helvetica");
     }
-  }
+  });
 
-  let gridBottom = y + cellH * 2 + gap;
+  const rows = Math.ceil(photos.length / PHOTO_GRID_COLS);
+  let gridBottom = y + rows * PHOTO_CELL_H + (rows - 1) * gap;
 
   if (area.photoCaption) {
     doc.font("Helvetica-Bold").fontSize(7).fillColor(GREY_TEXT);
@@ -185,26 +213,14 @@ function drawPhotoGrid(doc, area, x, y, width) {
       align: "center",
     });
     doc.font("Helvetica");
-    gridBottom = gridBottom + 4 + capH;
+    gridBottom += 4 + capH;
   }
 
   return gridBottom;
 }
 
-function photoGridHeight(area, width) {
-  const pad = 4;
-  const gap = 3;
-  const cellH = 50;
-  let h = cellH * 2 + gap;
-  if (area.photoCaption) {
-    // estimasi tinggi caption (dihitung ulang presisi pas drawing via doc, ini cuma perkiraan buat sizing row)
-    h += 4 + Math.ceil(area.photoCaption.length / 40) * 9 + 4;
-  }
-  return h + 8;
-}
-
 // ==========================================
-// Kolom UKURAN: per dimensi -> label "LUASAN" (pink) + baris angka T/L/V
+// Kolom UKURAN
 // ==========================================
 function drawUkuranColumn(doc, dims, x, y, width) {
   const subW = width / 3;
@@ -219,7 +235,6 @@ function drawUkuranColumn(doc, dims, x, y, width) {
 
   let cy = y;
   dims.forEach((d) => {
-    // label LUASAN
     doc.rect(x, cy, width, labelH).fill(PINK);
     doc
       .fillColor("#fff")
@@ -228,7 +243,6 @@ function drawUkuranColumn(doc, dims, x, y, width) {
       .text("LUASAN", x, cy + 3, { width, align: "center" });
     cy += labelH;
 
-    // baris angka T | L | V
     const vals = [fmtNum(d.tinggi), fmtNum(d.lebar), fmtNum(d.luasan)];
     doc.font("Helvetica").fontSize(7.5).fillColor(GREY_TEXT);
     vals.forEach((v, i) => {
@@ -249,7 +263,7 @@ function ukuranColumnHeight(dims) {
 }
 
 // ==========================================
-// Kolom ANALISA: DATA LOKASI / PENANGANAN / info tambahan (merah)
+// Kolom ANALISA
 // ==========================================
 function drawAnalisaColumn(doc, area, x, y, width) {
   const sections = [
@@ -309,7 +323,7 @@ function analisaColumnHeight(doc, area, width) {
 }
 
 // ==========================================
-// 1 baris area penuh (NO | KETERANGAN | FOTO | UKURAN | ANALISA)
+// 1 baris area penuh
 // ==========================================
 function drawAreaRow(doc, area, index, y) {
   const { x0, x1, x2, x3, x4, xEnd } = colX();
@@ -325,26 +339,18 @@ function drawAreaRow(doc, area, index, y) {
 
   y = ensureSpace(doc, y, rowH + 40, (d, ny) => drawTableHeader(d, ny));
 
-  // NO
   doc.font("Helvetica-Bold").fontSize(8).fillColor(GREY_TEXT);
   doc.text(String(index + 1), x0, y + 5, { width: COL.no, align: "center" });
 
-  // KETERANGAN
   doc
     .font("Helvetica-Bold")
     .fontSize(7.5)
     .text(area.areaName || "-", x1 + 4, y + 5, { width: COL.keterangan - 8 });
 
-  // FOTO
   drawPhotoGrid(doc, area, x2, y + 4, COL.foto);
-
-  // UKURAN
   drawUkuranColumn(doc, area.dimensions, x3, y + 4, COL.ukuran);
-
-  // ANALISA
   drawAnalisaColumn(doc, area, x4, y + 4, COL.analisa);
 
-  // Border luar row + garis vertikal antar kolom
   doc.strokeColor(BORDER).lineWidth(0.5);
   const subW = COL.ukuran / 3;
   [x0, x1, x2, x3, x3 + subW, x3 + subW * 2, x4, xEnd].forEach((x) => {
@@ -364,7 +370,7 @@ function drawAreaRow(doc, area, index, y) {
 }
 
 // ==========================================
-// META INFO (KATEGORI/JENIS/LOKASI/TANGGAL/SURVEYOR)
+// META INFO
 // ==========================================
 function drawMetaInfo(doc, survey, y) {
   const rows = [
@@ -378,15 +384,20 @@ function drawMetaInfo(doc, survey, y) {
     ["SURVEYOR", survey.surveyorName || "-"],
   ];
 
+  const LABEL_X = PAGE_MARGIN;
+  const COLON_X = PAGE_MARGIN + 110; // atur sesuai lebar label terpanjang
+  const VALUE_X = COLON_X + 12;
+  const LINE_HEIGHT = 12;
+
   doc.fontSize(8.5);
-  rows.forEach(([label, value]) => {
-    doc
-      .font("Helvetica-Bold")
-      .text(label, PAGE_MARGIN, y, { width: 120, continued: true });
-    doc.font("Helvetica").text(`: ${value}`);
-    y = doc.y + 1;
+  rows.forEach(([label, value], i) => {
+    const rowY = y + i * LINE_HEIGHT;
+    doc.font("Helvetica-Bold").text(label, LABEL_X, rowY);
+    doc.font("Helvetica-Bold").text(":", COLON_X, rowY);
+    doc.font("Helvetica").text(String(value), VALUE_X, rowY);
   });
-  return y + 10;
+
+  return y + rows.length * LINE_HEIGHT;
 }
 
 /**
@@ -406,9 +417,8 @@ function streamSurveyPdf(survey, outStream) {
   let y = PAGE_MARGIN;
 
   // --- Area logo: DIKOSONGIN DULU, tinggal isi doc.image(path, x, y, {width}) di sini nanti ---
-  y += 55; // spasi kosong buat logo, samain tinggi kira2 kayak contoh
+  y += 55;
 
-  // Header bar pink judul
   doc.rect(PAGE_MARGIN, y, CONTENT_WIDTH, 22).fill(PINK);
   doc
     .fillColor("#fff")
@@ -428,7 +438,6 @@ function streamSurveyPdf(survey, outStream) {
     y = drawAreaRow(doc, area, i, y);
   });
 
-  // Footer tanda tangan
   y = ensureSpace(doc, y, 90, (d, ny) => ny);
   doc
     .fontSize(9)
@@ -442,12 +451,10 @@ function streamSurveyPdf(survey, outStream) {
     width: CONTENT_WIDTH,
     align: "right",
   });
-  doc
-    .font("Helvetica-Bold")
-    .text("SURVEYOR", PAGE_MARGIN, doc.y + 40, {
-      width: CONTENT_WIDTH,
-      align: "right",
-    });
+  doc.font("Helvetica-Bold").text("SURVEYOR", PAGE_MARGIN, doc.y + 40, {
+    width: CONTENT_WIDTH,
+    align: "right",
+  });
   doc
     .font("Helvetica")
     .text(survey.surveyorName || "-", PAGE_MARGIN, doc.y + 2, {
