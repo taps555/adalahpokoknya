@@ -207,6 +207,8 @@ model RabItem {
   isByOwner Boolean @default(false)
   isStip    Boolean @default(false) // <-- TAMBAHKAN BARIS INI
 
+  isHeaderOnly    Boolean  @default(false)
+
   order Int @default(0)
 
   bvItem BvItem?

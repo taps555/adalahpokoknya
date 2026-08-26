@@ -6,42 +6,6 @@ const { calculateJobPrice } = require("../../services/calculateService");
 
 const router = express.Router();
 
-// function calcBreakdownSubtotal({
-//   panjang,
-//   lebar,
-//   tinggi,
-//   luas,
-//   keliling,
-//   diameter,
-//   berat,
-//   jumlahSisi,
-//   jumlahBh,
-//   waste,
-// }) {
-//   const w = waste != null && waste !== "" ? Number(waste) / 100 : 0;
-
-//   const s = jumlahSisi != null && jumlahSisi !== "" ? Number(jumlahSisi) : 1;
-//   const b = jumlahBh != null && jumlahBh !== "" ? Number(jumlahBh) : 1;
-//   const totalJumlah = s * b;
-
-//   const p = panjang != null && panjang !== "" ? Number(panjang) : 1;
-//   const t = tinggi != null && tinggi !== "" ? Number(tinggi) : 1;
-
-//   if (berat != null && berat !== "") {
-//     return p * t * Number(berat) * totalJumlah * (1 + w);
-//   }
-
-//   if (luas != null && luas !== "") return Number(luas) * totalJumlah * (1 + w);
-//   if (keliling != null && keliling !== "")
-//     return Number(keliling) * totalJumlah * (1 + w);
-//   if (diameter != null && diameter !== "")
-//     return Number(diameter) * totalJumlah * (1 + w);
-
-//   const l = lebar != null && lebar !== "" ? Number(lebar) : 1;
-
-//   return p * l * t * totalJumlah * (1 + w);
-// }
-
 function calcBreakdownSubtotal(b) {
   // 1. Tarik nilai angkanya (kalau kosong jadikan 0)
   const p = b.panjang != null && b.panjang !== "" ? Number(b.panjang) : 0;
@@ -283,16 +247,36 @@ router.get("/projects/:projectId/bv-items", async (req, res) => {
 
     function withStatus(it) {
       let status = "BELUM_DILINK";
+
       if (it.linkedRabItem) {
-        const same =
-          Number(it.totalVolume) === Number(it.linkedRabItem.volume) &&
-          it.name === it.linkedRabItem.name &&
-          it.paymentUnit === it.linkedRabItem.paymentUnit;
-        status = same ? "SUDAH_SINKRON" : "BELUM_SINKRON";
+        let same = false;
+
+        // ==========================================
+        // PENGECEKAN SINKRONISASI DIBEDAKAN
+        // ==========================================
+        if (it.isHeaderOnly) {
+          // Khusus Header: Cukup cek kesamaan NAMA saja (karena tidak ada volume/satuan)
+          same = it.name === it.linkedRabItem.name;
+        } else {
+          // Item Biasa: Cek nama, volume, dan satuan
+          same =
+            Number(it.totalVolume) === Number(it.linkedRabItem.volume) &&
+            it.name === it.linkedRabItem.name &&
+            it.paymentUnit === it.linkedRabItem.paymentUnit;
+        }
+
+        // Catatan: Saya ubah dari "SUDAH_SINKRON" jadi "SUDAH_DILINK"
+        // supaya cocok dengan kode tombol Frontend Anda!
+        status = same ? "SUDAH_DILINK" : "BELUM_SINKRON";
       }
+
       return {
         ...it,
-        linkStatus: it.isHeaderOnly ? null : status,
+        // ==========================================
+        // KITA HAPUS PENGECUALIAN NULL UNTUK HEADER
+        // ==========================================
+        linkStatus: status,
+
         children: (it.children || []).map(withStatus),
       };
     }
@@ -452,201 +436,35 @@ router.delete("/bv-items/:id", async (req, res) => {
   }
 });
 
-/**
- * POST /bv-items/:id/link-to-rab
- * Mode HSPK (sourceJobTypeId ada): RAP otomatis dihitung dari JobType, user cuma isi rabUnitPrice.
- * Mode Custom: user isi components manual + rabUnitPrice.
- */
-// router.post("/bv-items/:id/link-to-rab", async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const { rabUnitPrice, groupId, category, reference, overhead, components } =
-//       req.body;
+router.delete("/bv-items-bulk", async (req, res) => {
+  try {
+    // Menangkap array ID dari frontend
+    const { itemIds } = req.body;
 
-//     const bvItem = await prisma.bvItem.findUnique({ where: { id } });
-//     if (!bvItem)
-//       return res.status(404).json({ error: "Item BV tidak ditemukan." });
-//     if (bvItem.linkedRabItemId) {
-//       return res.status(400).json({
-//         error:
-//           "Item BV ini sudah pernah di-link ke RAB. Hapus link lama dulu kalau mau link ulang.",
-//       });
-//     }
+    if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Tidak ada item yang dipilih untuk dihapus." });
+    }
 
-//     const vol = Number(bvItem.totalVolume);
-//     let rapUnitPrice, componentRows, finalCategory, finalReference, overheadPct;
+    // Eksekusi hapus massal (Prisma akan menghapus semua ID yang ada di dalam array)
+    const deleted = await prisma.bvItem.deleteMany({
+      where: {
+        id: { in: itemIds },
+      },
+    });
 
-//     if (bvItem.sourceJobTypeId) {
-//       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
-//       if (!calc)
-//         return res.status(404).json({
-//           error: "Jenis pekerjaan (master) sumber BV ini tidak ditemukan.",
-//         });
+    res.json({
+      message: `${deleted.count} Item BV berhasil dihapus secara massal.`,
+    });
+  } catch (error) {
+    console.error("Error Bulk Delete BV:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Gagal menghapus data massal." });
+  }
+});
 
-//       rapUnitPrice = calc.total;
-//       overheadPct = calc.jobType.overhead;
-//       finalCategory = category || calc.jobType.category;
-//       finalReference = reference || calc.jobType.reference;
-//       componentRows = Object.entries(calc.breakdown).flatMap(
-//         ([section, items]) =>
-//           items.map((item) => ({
-//             name: item.name,
-//             unit: item.unit,
-//             section,
-//             coefficient: item.coefficient,
-//             unitPrice: item.unitPrice,
-//             lineTotal: item.lineTotal,
-//           })),
-//       );
-//     } else {
-//       if (!Array.isArray(components) || components.length === 0) {
-//         return res.status(400).json({
-//           error:
-//             "Minimal harus ada 1 komponen (bahan/upah/alat) untuk item BV custom.",
-//         });
-//       }
-//       overheadPct = overhead != null ? Number(overhead) : 0.1;
-//       let baseTotal = 0;
-//       componentRows = components.map((c) => {
-//         const lineTotal = Number(c.coefficient) * Number(c.unitPrice);
-//         baseTotal += lineTotal;
-//         return {
-//           name: c.name,
-//           unit: c.unit,
-//           section: c.section,
-//           coefficient: c.coefficient,
-//           unitPrice: c.unitPrice,
-//           lineTotal,
-//         };
-//       });
-//       rapUnitPrice = baseTotal + baseTotal * overheadPct;
-//       finalCategory = category || null;
-//       finalReference = reference || null;
-//     }
-
-//     const rabPrice = rabUnitPrice != null ? Number(rabUnitPrice) : rapUnitPrice;
-
-//     const result = await prisma.$transaction(async (tx) => {
-//       const finalGroupId = groupId || bvItem.groupId || null;
-
-//       let insertOrder;
-
-//       if (bvItem.parentBvItemId) {
-//         const parentBv = await tx.bvItem.findUnique({
-//           where: { id: bvItem.parentBvItemId },
-//           select: { linkedRabItemId: true },
-//         });
-
-//         if (parentBv?.linkedRabItemId) {
-//           const parentRab = await tx.rabItem.findUnique({
-//             where: { id: parentBv.linkedRabItemId },
-//             select: { order: true },
-//           });
-
-//           // cari sibling (anak lain dari parent yg sama) yg udah linked duluan
-//           const linkedSiblings = await tx.bvItem.findMany({
-//             where: {
-//               parentBvItemId: bvItem.parentBvItemId,
-//               linkedRabItemId: { not: null },
-//             },
-//             include: { linkedRabItem: { select: { order: true } } },
-//           });
-
-//           const maxSiblingOrder = linkedSiblings.length
-//             ? Math.max(...linkedSiblings.map((s) => s.linkedRabItem.order))
-//             : parentRab.order;
-
-//           insertOrder = maxSiblingOrder + 1;
-
-//           await tx.rabItem.updateMany({
-//             where: {
-//               projectId: bvItem.projectId,
-//               groupId: finalGroupId,
-//               order: { gte: insertOrder },
-//             },
-//             data: { order: { increment: 1 } },
-//           });
-//         }
-//       }
-
-//       if (insertOrder === undefined) {
-//         // bukan child, atau parent belum linked -> taro di belakang, pakai max(order)+1 (bukan count)
-//         const lastItem = await tx.rabItem.findFirst({
-//           where: { projectId: bvItem.projectId, groupId: finalGroupId },
-//           orderBy: { order: "desc" },
-//           select: { order: true },
-//         });
-//         insertOrder = lastItem ? lastItem.order + 1 : 0;
-//       }
-
-//       const rabItem = await tx.rabItem.create({
-//         data: {
-//           projectId: bvItem.projectId,
-//           groupId: finalGroupId,
-//           name: bvItem.name,
-//           paymentUnit: bvItem.paymentUnit,
-//           category: finalCategory,
-//           reference: finalReference,
-//           overhead: overheadPct,
-//           volume: vol,
-//           rapUnitPrice,
-//           rapTotalPrice: rapUnitPrice * vol,
-//           rabUnitPrice: rabPrice,
-//           rabTotalPrice: rabPrice * vol,
-//           sourceJobTypeId: bvItem.sourceJobTypeId || null,
-//           order: insertOrder,
-//           components: { create: componentRows },
-//         },
-//       });
-
-//       const linkedChildren = await tx.bvItem.findMany({
-//         where: { parentBvItemId: id, linkedRabItemId: { not: null } },
-//         select: { linkedRabItemId: true },
-//         orderBy: { createdAt: "asc" },
-//       });
-
-//       if (linkedChildren.length > 0) {
-//         const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
-
-//         await tx.rabItem.updateMany({
-//           where: { id: { in: childRabIds } },
-//           data: { order: -1 },
-//         });
-
-//         await tx.rabItem.updateMany({
-//           where: {
-//             projectId: bvItem.projectId,
-//             groupId: finalGroupId,
-//             order: { gt: rabItem.order },
-//           },
-//           data: { order: { increment: childRabIds.length } },
-//         });
-
-//         for (let i = 0; i < childRabIds.length; i++) {
-//           await tx.rabItem.update({
-//             where: { id: childRabIds[i] },
-//             data: { order: rabItem.order + 1 + i },
-//           });
-//         }
-//       }
-//       const updatedBv = await tx.bvItem.update({
-//         where: { id },
-//         data: { linkedRabItemId: rabItem.id },
-//       });
-
-//       return { rabItem, bvItem: updatedBv };
-//     });
-
-//     res
-//       .status(201)
-//       .json({ message: "Item BV berhasil di-link ke RAB", data: result });
-//   } catch (error) {
-//     console.error("Error Link BvItem to Rab:", error);
-//     res
-//       .status(500)
-//       .json({ error: error.message || "Terjadi kesalahan pada server." });
-//   }
-// });
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
 router.post("/bv-items/:id/link-to-rab", async (req, res) => {
   try {
@@ -679,7 +497,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     let finalCategory = category || null;
     let finalReference = reference || null;
     let overheadPct =
-      overhead != null && overhead !== "" ? Number(overhead) : 10;
+      overhead != null && overhead !== "" ? Number(overhead) : 0;
     let calculatedRabPrice = 0;
 
     // ==========================================
@@ -806,11 +624,13 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           projectId: bvItem.projectId,
           groupId: finalGroupId,
           name: bvItem.name,
-          paymentUnit: bvItem.paymentUnit,
+          paymentUnit: bvItem.paymentUnit || "-",
           category: finalCategory,
           reference: finalReference,
           overheadPercent: overheadPct, // <-- Pastikan overheadPercent
           volume: vol,
+          isHeaderOnly: bvItem.isHeaderOnly || false,
+
           rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,
           rabUnitPrice: finalRabSatuan,
@@ -875,7 +695,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
               groupId: finalGroupId,
               parentId: rabItem.id, // <-- PENTING: Sambungkan ke Parent RAB yg baru dibuat!
               name: childBv.name,
-              paymentUnit: childBv.paymentUnit,
+              paymentUnit: childBv.paymentUnit || "-",
               category: childCategory,
               overheadPercent: childOverhead,
               volume: childVol,
@@ -951,6 +771,109 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     res
       .status(500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+// ==========================================
+// BULK ACTION: LINK TO RAB MASSAL
+// ==========================================
+router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
+  try {
+    const { itemIds } = req.body;
+
+    if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Tidak ada item yang dipilih untuk di-link." });
+    }
+
+    const results = await prisma.$transaction(async (tx) => {
+      let linkedCount = 0;
+
+      // 1. Ambil semua data BV yang diceklis sekaligus
+      const bvItemsRaw = await tx.bvItem.findMany({
+        where: { id: { in: itemIds } },
+        orderBy: { createdAt: "asc" }, // Amankan urutan aslinya berdasarkan waktu pembuatan
+      });
+
+      // 2. Trik Jitu: Pisahkan Induk dan Anak!
+      // Kita wajib membuat Induknya lebih dulu, supaya saat Anak dibuat, Induknya sudah siap di RAB.
+      const parents = bvItemsRaw.filter((b) => !b.parentBvItemId);
+      const children = bvItemsRaw.filter((b) => !!b.parentBvItemId);
+      const sortedBvItems = [...parents, ...children];
+
+      for (const bvItem of sortedBvItems) {
+        // Lewati jika sudah pernah di-link
+        if (bvItem.linkedRabItemId) continue;
+
+        // 3. Tentukan Urutan (Taruh di posisi paling bawah pada grupnya)
+        const lastItem = await tx.rabItem.findFirst({
+          where: {
+            projectId: bvItem.projectId,
+            groupId: bvItem.groupId,
+          },
+          orderBy: { order: "desc" },
+        });
+        const insertOrder = lastItem ? lastItem.order + 1 : 0;
+
+        // 4. Cari tahu siapa "Bapaknya" (Parent) di tabel RAB
+        let rabParentId = null;
+        if (bvItem.parentBvItemId) {
+          const parentBv = await tx.bvItem.findUnique({
+            where: { id: bvItem.parentBvItemId },
+          });
+          // Jika Bapaknya di BV sudah sukses di-link ke RAB, tangkap ID RAB Bapaknya!
+          if (parentBv && parentBv.linkedRabItemId) {
+            rabParentId = parentBv.linkedRabItemId;
+          }
+        }
+
+        // 5. Buat kembarannya di tabel RAB dengan struktur yang utuh
+        const newRab = await tx.rabItem.create({
+          data: {
+            projectId: bvItem.projectId,
+            groupId: bvItem.groupId,
+
+            // ==========================================
+            // 🔥 INI KUNCI AGAR STRUKTUR TIDAK HANCUR 🔥
+            // ==========================================
+            parentId: rabParentId, // Memastikan Anak menempel tepat di bawah Induknya
+            order: insertOrder, // Memastikan posisinya urut ke bawah, bukan rebutan di atas
+            // ==========================================
+
+            name: bvItem.name,
+            paymentUnit: bvItem.paymentUnit || "-",
+            volume: Number(bvItem.totalVolume) || 0,
+            isHeaderOnly: bvItem.isHeaderOnly || false,
+
+            overheadPercent: 0,
+            rapUnitPrice: 0,
+            rabUnitPrice: 0,
+            rapTotalPrice: 0,
+            rabTotalPrice: 0,
+          },
+        });
+
+        // 6. Tandai item BV bahwa dia sudah di-link
+        await tx.bvItem.update({
+          where: { id: bvItem.id },
+          data: { linkedRabItemId: newRab.id },
+        });
+
+        linkedCount++;
+      }
+
+      return linkedCount;
+    });
+
+    res.json({
+      message: `${results} Item BV berhasil di-link ke RAB dengan struktur yang rapi!`,
+    });
+  } catch (error) {
+    console.error("Error Bulk Link to RAB:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Gagal melakukan Link ke RAB massal." });
   }
 });
 
