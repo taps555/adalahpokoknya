@@ -26,6 +26,13 @@ COL.analisa = CONTENT_WIDTH - COL.no - COL.keterangan - COL.foto - COL.ukuran;
 // Grid foto: 4 kolom, tinggi tiap thumbnail tetap kecil biar muat banyak (maks 20/area)
 const PHOTO_GRID_COLS = 4;
 const PHOTO_CELL_H = 34;
+const PHOTO_GRID_PAD = 4;
+const PHOTO_GRID_GAP = 3;
+
+// Kolom UKURAN: setiap baris dimensi = 1 label "LUASAN" + 1 baris nilai P/L/T/V
+const UKURAN_SUBCOLS = 4; // P, L, T, V
+const UKURAN_LABEL_H = 12;
+const UKURAN_VALUE_H = 14;
 
 function colX() {
   const x0 = PAGE_MARGIN;
@@ -64,6 +71,7 @@ function drawTableHeader(doc, y) {
   const rowH1 = 16;
   const rowH2 = 13;
   const totalH = rowH1 + rowH2;
+  const ukuranSubW = COL.ukuran / UKURAN_SUBCOLS;
 
   doc.rect(x0, y, CONTENT_WIDTH, rowH1).fill(PINK);
   doc.rect(x0, y + rowH1, COL.no, rowH2).fill(PINK);
@@ -85,16 +93,25 @@ function drawTableHeader(doc, y) {
   doc.text("ANALISA", x4 + 4, y + totalH / 2 - 4, { width: COL.analisa - 8 });
 
   doc.fillColor(GREY_TEXT).fontSize(7.5);
-  const subW = COL.ukuran / 3;
-  ["T", "L", "V"].forEach((lab, i) => {
-    doc.text(lab, x3 + i * subW, y + rowH1 + 3, {
-      width: subW,
+  ["P", "L", "T", "V"].forEach((lab, i) => {
+    doc.text(lab, x3 + i * ukuranSubW, y + rowH1 + 3, {
+      width: ukuranSubW,
       align: "center",
     });
   });
 
   doc.strokeColor(BORDER).lineWidth(0.5);
-  [x0, x1, x2, x3, x3 + subW, x3 + subW * 2, x4, xEnd].forEach((x) => {
+  [
+    x0,
+    x1,
+    x2,
+    x3,
+    x3 + ukuranSubW,
+    x3 + ukuranSubW * 2,
+    x3 + ukuranSubW * 3,
+    x4,
+    xEnd,
+  ].forEach((x) => {
     doc
       .moveTo(x, y)
       .lineTo(x, y + totalH)
@@ -136,11 +153,10 @@ function getPhotoList(area) {
 
 function photoGridHeight(area, width) {
   const photos = getPhotoList(area);
-  const pad = 4;
-  const gap = 3;
   const count = Math.max(photos.length, 1); // minimal 1 baris walau kosong (nampilin placeholder)
   const rows = Math.ceil(count / PHOTO_GRID_COLS);
-  let h = rows * PHOTO_CELL_H + (rows - 1) * gap + pad * 2;
+  let h =
+    rows * PHOTO_CELL_H + (rows - 1) * PHOTO_GRID_GAP + PHOTO_GRID_PAD * 2;
 
   if (area.photoCaption) {
     h += 4 + Math.ceil(area.photoCaption.length / 40) * 8 + 4;
@@ -150,32 +166,31 @@ function photoGridHeight(area, width) {
 
 function drawPhotoGrid(doc, area, x, y, width) {
   const photos = getPhotoList(area);
-  const pad = 4;
-  const gap = 3;
   const cellW =
-    (width - pad * 2 - gap * (PHOTO_GRID_COLS - 1)) / PHOTO_GRID_COLS;
+    (width - PHOTO_GRID_PAD * 2 - PHOTO_GRID_GAP * (PHOTO_GRID_COLS - 1)) /
+    PHOTO_GRID_COLS;
 
   if (photos.length === 0) {
     doc
-      .rect(x + pad, y, width - pad * 2, PHOTO_CELL_H)
+      .rect(x + PHOTO_GRID_PAD, y, width - PHOTO_GRID_PAD * 2, PHOTO_CELL_H)
       .fillAndStroke("#f2f2f2", "#cccccc");
     doc
       .fillColor("#aaaaaa")
       .fontSize(7)
       .font("Helvetica-Oblique")
-      .text("Tidak ada foto", x + pad, y + PHOTO_CELL_H / 2 - 4, {
-        width: width - pad * 2,
+      .text("Tidak ada foto", x + PHOTO_GRID_PAD, y + PHOTO_CELL_H / 2 - 4, {
+        width: width - PHOTO_GRID_PAD * 2,
         align: "center",
       });
     doc.fillColor(GREY_TEXT).font("Helvetica");
-    return y + PHOTO_CELL_H + pad;
+    return y + PHOTO_CELL_H + PHOTO_GRID_PAD;
   }
 
   photos.forEach((photo, i) => {
     const row = Math.floor(i / PHOTO_GRID_COLS);
     const col = i % PHOTO_GRID_COLS;
-    const cx = x + pad + col * (cellW + gap);
-    const cy = y + row * (PHOTO_CELL_H + gap);
+    const cx = x + PHOTO_GRID_PAD + col * (cellW + PHOTO_GRID_GAP);
+    const cy = y + row * (PHOTO_CELL_H + PHOTO_GRID_GAP);
     const filePath = resolvePhotoPath(photo.url);
 
     if (filePath) {
@@ -200,18 +215,23 @@ function drawPhotoGrid(doc, area, x, y, width) {
   });
 
   const rows = Math.ceil(photos.length / PHOTO_GRID_COLS);
-  let gridBottom = y + rows * PHOTO_CELL_H + (rows - 1) * gap;
+  let gridBottom = y + rows * PHOTO_CELL_H + (rows - 1) * PHOTO_GRID_GAP;
 
   if (area.photoCaption) {
     doc.font("Helvetica-Bold").fontSize(7).fillColor(GREY_TEXT);
     const capH = doc.heightOfString(area.photoCaption.toUpperCase(), {
-      width: width - pad * 2,
+      width: width - PHOTO_GRID_PAD * 2,
       align: "center",
     });
-    doc.text(area.photoCaption.toUpperCase(), x + pad, gridBottom + 4, {
-      width: width - pad * 2,
-      align: "center",
-    });
+    doc.text(
+      area.photoCaption.toUpperCase(),
+      x + PHOTO_GRID_PAD,
+      gridBottom + 4,
+      {
+        width: width - PHOTO_GRID_PAD * 2,
+        align: "center",
+      },
+    );
     doc.font("Helvetica");
     gridBottom += 4 + capH;
   }
@@ -223,43 +243,44 @@ function drawPhotoGrid(doc, area, x, y, width) {
 // Kolom UKURAN
 // ==========================================
 function drawUkuranColumn(doc, dims, x, y, width) {
-  const subW = width / 3;
-  const labelH = 12;
-  const valueH = 14;
+  const subW = width / UKURAN_SUBCOLS;
 
   if (!dims || dims.length === 0) {
-    doc.rect(x, y, width, valueH).stroke(BORDER);
+    doc.rect(x, y, width, UKURAN_VALUE_H).stroke(BORDER);
     doc.fontSize(7.5).text("-", x, y + 4, { width, align: "center" });
-    return y + valueH;
+    return y + UKURAN_VALUE_H;
   }
 
   let cy = y;
   dims.forEach((d) => {
-    doc.rect(x, cy, width, labelH).fill(PINK);
+    doc.rect(x, cy, width, UKURAN_LABEL_H).fill(PINK);
     doc
       .fillColor("#fff")
       .font("Helvetica-Bold")
       .fontSize(6.5)
       .text("LUASAN", x, cy + 3, { width, align: "center" });
-    cy += labelH;
+    cy += UKURAN_LABEL_H;
 
-    const vals = [fmtNum(d.tinggi), fmtNum(d.lebar), fmtNum(d.luasan)];
+    const vals = [
+      fmtNum(d.panjang),
+      fmtNum(d.lebar),
+      fmtNum(d.tinggi),
+      fmtNum(d.luasan),
+    ];
     doc.font("Helvetica").fontSize(7.5).fillColor(GREY_TEXT);
     vals.forEach((v, i) => {
-      doc.rect(x + i * subW, cy, subW, valueH).stroke(BORDER);
+      doc.rect(x + i * subW, cy, subW, UKURAN_VALUE_H).stroke(BORDER);
       doc.text(v, x + i * subW, cy + 4, { width: subW, align: "center" });
     });
-    cy += valueH;
+    cy += UKURAN_VALUE_H;
   });
 
   return cy;
 }
 
 function ukuranColumnHeight(dims) {
-  const labelH = 12;
-  const valueH = 14;
-  if (!dims || dims.length === 0) return valueH;
-  return dims.length * (labelH + valueH);
+  if (!dims || dims.length === 0) return UKURAN_VALUE_H;
+  return dims.length * (UKURAN_LABEL_H + UKURAN_VALUE_H);
 }
 
 // ==========================================
@@ -331,6 +352,10 @@ function drawAreaRow(doc, area, index, y) {
   const fotoH = photoGridHeight(area, COL.foto);
   const ukuranH = ukuranColumnHeight(area.dimensions);
   const analisaH = analisaColumnHeight(doc, area, COL.analisa);
+
+  // Ukur tinggi teks KETERANGAN pakai font yang sama dengan yang dipakai
+  // saat render, biar hasil heightOfString akurat (bold vs regular beda metrik).
+  doc.font("Helvetica-Bold").fontSize(7.5);
   const ketH = doc.heightOfString(area.areaName || "-", {
     width: COL.keterangan - 8,
   });
@@ -351,9 +376,21 @@ function drawAreaRow(doc, area, index, y) {
   drawUkuranColumn(doc, area.dimensions, x3, y + 4, COL.ukuran);
   drawAnalisaColumn(doc, area, x4, y + 4, COL.analisa);
 
+  // Garis vertikal kolom UKURAN harus align dengan sub-kolom P/L/T/V di header,
+  // makanya pakai COL.ukuran / UKURAN_SUBCOLS, bukan pembagian sembarang.
   doc.strokeColor(BORDER).lineWidth(0.5);
-  const subW = COL.ukuran / 3;
-  [x0, x1, x2, x3, x3 + subW, x3 + subW * 2, x4, xEnd].forEach((x) => {
+  const ukuranSubW = COL.ukuran / UKURAN_SUBCOLS;
+  [
+    x0,
+    x1,
+    x2,
+    x3,
+    x3 + ukuranSubW,
+    x3 + ukuranSubW * 2,
+    x3 + ukuranSubW * 3,
+    x4,
+    xEnd,
+  ].forEach((x) => {
     doc
       .moveTo(x, y)
       .lineTo(x, y + rowH)

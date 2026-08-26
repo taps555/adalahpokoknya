@@ -90,7 +90,10 @@ router.post(
           panjang: dim.panjang ? Number(dim.panjang) : null,
           lebar: dim.lebar ? Number(dim.lebar) : null,
           tinggi: dim.tinggi ? Number(dim.tinggi) : null,
-          luasan: dim.luasan ? Number(dim.luasan) : null,
+          luasan:
+            dim.panjang && dim.lebar
+              ? Number(dim.panjang) * Number(dim.lebar)
+              : null,
         }));
 
         return {
@@ -315,7 +318,10 @@ router.put("/surveys/:id", uploadSurvey.any(), async (req, res) => {
         panjang: dim.panjang ? Number(dim.panjang) : null,
         lebar: dim.lebar ? Number(dim.lebar) : null,
         tinggi: dim.tinggi ? Number(dim.tinggi) : null,
-        luasan: dim.luasan ? Number(dim.luasan) : null,
+        luasan:
+          dim.panjang && dim.lebar
+            ? Number(dim.panjang) * Number(dim.lebar)
+            : null,
       }));
 
       return {
