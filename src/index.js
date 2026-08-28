@@ -59,6 +59,8 @@ app.use("/api", require("./routes/crudGrub/joinOpname.routes"));
 
 app.use("/api", require("./routes/crudGrub/survey.routes"));
 
+app.use("/api", require("./routes/crudGrub/complain.routes"));
+
 app.use((err, req, res, next) => {
   if (err) {
     console.error(err);

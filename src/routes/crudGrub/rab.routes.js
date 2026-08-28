@@ -78,7 +78,7 @@ router.put("/rab-items/:id", async (req, res) => {
       });
 
       // Hapus jika ada komponen bahan nyangkut di si Induk
-      await prisma.rabComponent.deleteMany({ where: { rabItemId: id } });
+      await prisma.rabItemComponent.deleteMany({ where: { rabItemId: id } });
 
       return res.json({
         message: "Item berhasil diperbarui (Disimpan sebagai Judul/Induk).",
@@ -113,6 +113,13 @@ router.put("/rab-items/:id", async (req, res) => {
       componentUpdate = { deleteMany: {}, create: rows };
     } else if (rapUnitPrice !== undefined && rapUnitPrice !== null) {
       rapSatuan = Number(rapUnitPrice);
+
+      const existingComponentCount = await prisma.rabItemComponent.count({
+        where: { rabItemId: id },
+      });
+      if (existingComponentCount > 0) {
+        componentUpdate = { deleteMany: {} };
+      }
     }
 
     // 2. RUMUS INTINYA (HITUNG RAB & TOTAL)
@@ -322,6 +329,205 @@ router.post("/rab-items/bulk-delete", async (req, res) => {
  * PUT /projects/:projectId/rab-items/bulk-price-by-name
  * (Sihir Sapu Jagat: Update harga massal berdasarkan NAMA item)
  */
+
+router.put("/rab-items/bulk-price", async (req, res) => {
+  try {
+    const { ids, rapUnitPrice, overheadPercent } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0)
+      return res
+        .status(400)
+        .json({ error: 'Field "ids" wajib diisi (array).' });
+
+    if (rapUnitPrice === undefined && overheadPercent === undefined)
+      return res.status(400).json({
+        error: "Isi minimal salah satu: rapUnitPrice atau overheadPercent.",
+      });
+
+    const items = await prisma.rabItem.findMany({
+      where: { id: { in: ids } },
+      include: { components: true },
+    });
+
+    const results = [];
+    const skipped = [];
+    const clearedComponents = [];
+
+    for (const existing of items) {
+      const childCount = await prisma.rabItem.count({
+        where: { parentId: existing.id },
+      });
+      if (childCount > 0) {
+        skipped.push({ id: existing.id, reason: "Item Induk, dilewati." });
+        continue;
+      }
+
+      const vol = Number(existing.volume);
+      const hadComponents = existing.components.length > 0;
+
+      const rapSatuan =
+        rapUnitPrice !== undefined && rapUnitPrice !== null
+          ? Number(rapUnitPrice)
+          : Number(existing.rapUnitPrice);
+
+      const overhead =
+        overheadPercent !== undefined && overheadPercent !== null
+          ? Number(overheadPercent)
+          : Number(existing.overheadPercent || existing.overhead);
+
+      const nilaiOverhead = rapSatuan * (overhead / 100);
+      const rabSatuan = rapSatuan + nilaiOverhead;
+
+      const rapTotal = rapSatuan * vol;
+      const rabTotal = rabSatuan * vol;
+
+      // Kalau harga di-override manual & item sebelumnya punya rincian AHSP,
+      // hapus rincian biar gak nyangkut/gak sinkron
+      const shouldClearComponents = hadComponents && rapUnitPrice !== undefined;
+
+      const updated = await prisma.rabItem.update({
+        where: { id: existing.id },
+        data: {
+          rapUnitPrice: rapSatuan,
+          rapTotalPrice: rapTotal,
+          overheadPercent: overhead,
+          rabUnitPrice: rabSatuan,
+          rabTotalPrice: rabTotal,
+          ...(shouldClearComponents ? { components: { deleteMany: {} } } : {}),
+        },
+      });
+
+      if (shouldClearComponents) clearedComponents.push(existing.id);
+      results.push(updated);
+    }
+
+    res.json({
+      message: `Berhasil update ${results.length} item. Dilewati ${skipped.length} item Induk.`,
+      data: results,
+      skipped,
+      warning:
+        clearedComponents.length > 0
+          ? `${clearedComponents.length} item sebelumnya punya rincian AHSP, rincian dihapus karena harga di-override manual: ${clearedComponents.join(", ")}`
+          : undefined,
+    });
+  } catch (error) {
+    console.error("Error Bulk Update RabItem:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+router.put("/rab-items/bulk-switch-job", async (req, res) => {
+  try {
+    const { ids, newJobTypeId, customOverhead } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0)
+      return res
+        .status(400)
+        .json({ error: 'Field "ids" wajib diisi (array).' });
+
+    if (!newJobTypeId)
+      return res
+        .status(400)
+        .json({ error: 'Field "newJobTypeId" wajib diisi.' });
+
+    const calc = await calculateJobPrice(newJobTypeId);
+    if (!calc)
+      return res
+        .status(404)
+        .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
+
+    const items = await prisma.rabItem.findMany({ where: { id: { in: ids } } });
+
+    const results = [];
+    const skipped = [];
+
+    for (const existing of items) {
+      const childCount = await prisma.rabItem.count({
+        where: { parentId: existing.id },
+      });
+      if (childCount > 0) {
+        skipped.push({ id: existing.id, reason: "Item Induk, dilewati." });
+        continue;
+      }
+
+      const vol = Number(existing.volume);
+
+      const newComponents = Object.entries(calc.breakdown).flatMap(
+        ([section, componentItems]) =>
+          componentItems.map((item) => ({
+            name: item.name,
+            unit: item.unit,
+            section,
+            coefficient: item.coefficient,
+            unitPrice: item.unitPrice,
+            lineTotal: item.lineTotal,
+          })),
+      );
+
+      const rapSatuan = newComponents.reduce(
+        (sum, comp) => sum + Number(comp.lineTotal),
+        0,
+      );
+
+      let overhead = 0;
+      if (
+        customOverhead !== undefined &&
+        customOverhead !== null &&
+        customOverhead !== ""
+      ) {
+        overhead = Number(customOverhead);
+      } else if (calc.jobType.overhead) {
+        overhead = Number(calc.jobType.overhead);
+      } else {
+        overhead = Number(existing.overhead || 0);
+      }
+
+      const nilaiOverhead = rapSatuan * (overhead / 100);
+      const rabSatuan = rapSatuan + nilaiOverhead;
+
+      const rapTotal = rapSatuan * vol;
+      const rabTotal = rabSatuan * vol;
+
+      const updated = await prisma.rabItem.update({
+        where: { id: existing.id },
+        data: {
+          category: calc.jobType.category,
+          reference: calc.jobType.reference,
+          discipline: calc.jobType.discipline,
+          grade: calc.jobType.grade,
+
+          overheadPercent: overhead,
+          rapUnitPrice: rapSatuan,
+          rapTotalPrice: rapTotal,
+          rabUnitPrice: rabSatuan,
+          rabTotalPrice: rabTotal,
+
+          sourceJobTypeId: calc.jobType.id,
+          components: {
+            deleteMany: {},
+            create: newComponents,
+          },
+        },
+      });
+
+      results.push(updated);
+    }
+
+    res.json({
+      message: `Berhasil suntik AHSP ke ${results.length} item. Dilewati ${skipped.length} item Induk.`,
+      data: results,
+      skipped,
+    });
+  } catch (error) {
+    console.error("Error Bulk Switch Job:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
 router.put(
   "/projects/:projectId/rab-items/bulk-price-by-name",
   async (req, res) => {

@@ -163,12 +163,15 @@ model Project {
   bvItems BvItem[]
 
   rabGroups RabGroup[]
-  surveyReports   SurveyReport[]
+    surveyReports     SurveyReport[]
+  complaintReports  ComplaintReport[]
 
 
   pairedProjectId String?  @unique          // <-- TAMBAH
   pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id])  // <-- TAMBAH
   pairedWith      Project? @relation("ProjectPair")  // <-- TAMBAH
+
+  
 
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -439,4 +442,45 @@ model SurveyDimension {
   luasan         Decimal?     @db.Decimal(10, 4) // Contoh: 12.3
 
   keterangan     String?      // Opsional (misal: "Jendela Kiri", "Jendela Kanan")
+}
+
+model ComplaintReport {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  categories ComplaintCategory[]
+}
+
+model ComplaintCategory {
+  id                String          @id @default(cuid())
+  complaintReportId String
+  complaintReport   ComplaintReport @relation(fields: [complaintReportId], references: [id], onDelete: Cascade)
+  name              String
+  order             Int
+
+  items ComplaintItem[]
+}
+
+model ComplaintItem {
+  id                 String            @id @default(cuid())
+  categoryId         String
+  category           ComplaintCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  order              Int
+  defectList         String
+  repairDate         DateTime?
+  status             Boolean           @default(false)
+  repairDefectReport String?
+
+  photos ComplaintPhoto[]
+}
+
+model ComplaintPhoto {
+  id     String        @id @default(cuid())
+  itemId String
+  item   ComplaintItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  url    String
+  order  Int
 }
