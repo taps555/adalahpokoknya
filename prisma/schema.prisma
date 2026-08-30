@@ -301,6 +301,7 @@ model BvItem {
   totalVolume Decimal @db.Decimal(14, 4)
 
   ecommerceLink   String?
+  nameEcommerceLink String?
   linkedRabItemId String?  @unique
   linkedRabItem   RabItem? @relation(fields: [linkedRabItemId], references: [id], onDelete: SetNull)
 

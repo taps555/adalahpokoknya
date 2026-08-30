@@ -68,6 +68,7 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
   try {
     const { projectId } = req.params;
     const { discipline } = req.query;
+
     const groups = await prisma.rabGroup.findMany({
       where: { projectId },
       include: {
