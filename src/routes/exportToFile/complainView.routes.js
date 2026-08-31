@@ -12,10 +12,13 @@ const GREY_HEADER_BG = "#e0e0e0";
 
 const MARGIN = 20;
 const MIN_ROW_H = 30;
-const PHOTO_W = 130;
-const PHOTO_H = 100;
+
+// UBAH DUA NILAI INI MENJADI LEBIH BESAR
+const PHOTO_W = 210; // Lebarkan agar mengisi ruang kanan (sesuaikan jika kolom lebih lebar)
+const PHOTO_H = 280; // Tinggikan drastis karena foto Anda berbentuk portrait (berdiri)
+
 const PHOTO_GAP = 6;
-const PHOTO_COLS = 2;
+const PHOTO_COLS = 2; // Jika ingin 2 foto bersebelahan, nilai W 210 sudah cukup besar
 
 // ==========================================
 // LEBAR KOLOM (proporsional, dihitung ulang tiap render sesuai CONTENT_WIDTH)

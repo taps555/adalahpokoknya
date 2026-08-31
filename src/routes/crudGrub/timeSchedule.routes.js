@@ -3,8 +3,7 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const router = express.Router();
 
-/** PUT /rab-items/:id/schedule — assign / update rentang minggu pengerjaan item RAB */
-/** PUT /projects/:projectId/start-date — set tanggal mulai proyek (dipakai buat hitung tanggal per minggu TS) */
+/** PUT /projects/:projectId/start-date — set tanggal mulai proyek */
 router.put("/projects/:projectId/start-date", async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -37,7 +36,8 @@ router.put("/projects/:projectId/start-date", async (req, res) => {
   }
 });
 
-router.put("/rab-items/:id/schedule", async (req, res) => {
+/** PUT /rap-items/:id/schedule — assign / update rentang minggu pengerjaan item RAP */
+router.put("/rap-items/:id/schedule", async (req, res) => {
   try {
     const { id } = req.params;
     const { startWeek, endWeek } = req.body;
@@ -48,14 +48,14 @@ router.put("/rab-items/:id/schedule", async (req, res) => {
       });
     }
 
-    const rabItem = await prisma.rabItem.findUnique({ where: { id } });
-    if (!rabItem)
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+    const rapItem = await prisma.rapItem.findUnique({ where: { id } });
+    if (!rapItem)
+      return res.status(404).json({ error: "Item RAP tidak ditemukan." });
 
-    const schedule = await prisma.timeSchedule.upsert({
-      where: { rabItemId: id },
+    const schedule = await prisma.rapTimeSchedule.upsert({
+      where: { rapItemId: id },
       update: { startWeek, endWeek },
-      create: { rabItemId: id, startWeek, endWeek },
+      create: { rapItemId: id, startWeek, endWeek },
     });
 
     res.json({ message: "Jadwal berhasil disimpan", data: schedule });
@@ -67,11 +67,11 @@ router.put("/rab-items/:id/schedule", async (req, res) => {
   }
 });
 
-/** DELETE /rab-items/:id/schedule — hapus jadwal item (belum dijadwalkan lagi) */
-router.delete("/rab-items/:id/schedule", async (req, res) => {
+/** DELETE /rap-items/:id/schedule — hapus jadwal item */
+router.delete("/rap-items/:id/schedule", async (req, res) => {
   try {
     const { id } = req.params;
-    await prisma.timeSchedule.delete({ where: { rabItemId: id } });
+    await prisma.rapTimeSchedule.delete({ where: { rapItemId: id } });
     res.json({ message: "Jadwal berhasil dihapus." });
   } catch (error) {
     if (error.code === "P2025") {
@@ -82,131 +82,8 @@ router.delete("/rab-items/:id/schedule", async (req, res) => {
   }
 });
 
-/** GET /projects/:projectId/time-schedule — generate tabel breakdown mingguan + kurva S rencana */
-// router.get("/projects/:projectId/time-schedule", async (req, res) => {
-//   try {
-//     const { projectId } = req.params;
-//     const { discipline } = req.query;
-
-//     const project = await prisma.project.findUnique({
-//       where: { id: projectId },
-//     });
-//     if (!project)
-//       return res.status(404).json({ error: "Project tidak ditemukan." });
-
-//     const rabItems = await prisma.rabItem.findMany({
-//       where: {
-//         projectId,
-//         ...(discipline ? { discipline } : {}),
-//       },
-//       include: {
-//         timeSchedule: true,
-//         group: true,
-//         bvItem: { select: { id: true, parentBvItemId: true } }, // <-- tambah
-//       },
-//       orderBy: [{ order: "asc" }],
-//     });
-
-//     // kumpulkan id yang jadi parent (punya anak)
-//     const parentIds = new Set(
-//       rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
-//     );
-
-//     // total kontrak: item yang punya anak DIKECUALIKAN, biar ga double count
-//     const totalContract = rabItems.reduce((sum, it) => {
-//       const hasChildren = parentIds.has(it.bvItem?.id);
-//       if (hasChildren) return sum;
-//       return sum + Number(it.rabTotalPrice);
-//     }, 0);
-
-//     const maxWeek = rabItems.reduce((max, it) => {
-//       if (!it.timeSchedule) return max;
-//       return Math.max(max, it.timeSchedule.endWeek);
-//     }, 0);
-
-//     const weekDates = [];
-//     for (let w = 1; w <= maxWeek; w++) {
-//       let start = null;
-//       let end = null;
-//       if (project.startDate) {
-//         start = new Date(project.startDate);
-//         start.setDate(start.getDate() + (w - 1) * 7);
-//         end = new Date(start);
-//         end.setDate(end.getDate() + 6);
-//       }
-//       weekDates.push({ week: w, start, end });
-//     }
-
-//     const items = rabItems.map((it) => {
-//       const isChild = !!it.bvItem?.parentBvItemId;
-//       const hasChildren = parentIds.has(it.bvItem?.id);
-
-//       // parent yang punya anak: bobot 0, ga masuk jadwal sendiri
-//       const weight =
-//         !hasChildren && totalContract > 0
-//           ? (Number(it.rabTotalPrice) / totalContract) * 100
-//           : 0;
-
-//       const weeklyWeight = {};
-//       if (it.timeSchedule && !hasChildren) {
-//         const { startWeek, endWeek } = it.timeSchedule;
-//         const span = endWeek - startWeek + 1;
-//         const perWeek = weight / span;
-//         for (let w = startWeek; w <= endWeek; w++) {
-//           weeklyWeight[w] = perWeek;
-//         }
-//       }
-
-//       return {
-//         rabItemId: it.id,
-//         name: it.name,
-//         paymentUnit: it.paymentUnit,
-//         volume: it.volume,
-//         rabTotalPrice: it.rabTotalPrice,
-//         weight,
-//         startWeek: it.timeSchedule?.startWeek ?? null,
-//         endWeek: it.timeSchedule?.endWeek ?? null,
-//         weeklyWeight,
-//         groupId: it.groupId,
-//         groupName: it.group?.name || "Tanpa Group",
-//         isChild, // <-- tambah
-//         hasChildren, // <-- tambah
-//       };
-//     });
-
-//     const weeklyTotal = {};
-//     for (let w = 1; w <= maxWeek; w++) {
-//       weeklyTotal[w] = items.reduce(
-//         (sum, it) => sum + (it.weeklyWeight[w] || 0),
-//         0,
-//       );
-//     }
-
-//     let cumulative = 0;
-//     const cumulativeTotal = {};
-//     for (let w = 1; w <= maxWeek; w++) {
-//       cumulative += weeklyTotal[w];
-//       cumulativeTotal[w] = cumulative;
-//     }
-
-//     res.json({
-//       projectId,
-//       startDate: project.startDate,
-//       maxWeek,
-//       weekDates,
-//       items,
-//       weeklyTotal,
-//       cumulativeTotal,
-//     });
-//   } catch (error) {
-//     console.error("Error Get Time Schedule:", error);
-//     res
-//       .status(500)
-//       .json({ error: error.message || "Terjadi kesalahan pada server." });
-//   }
-// });
-
-router.get("/projects/:projectId/time-schedule", async (req, res) => {
+/** GET /projects/:projectId/rap-time-schedule — generate tabel breakdown mingguan + kurva S rencana RAP */
+router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
   try {
     const { projectId } = req.params;
     const { discipline } = req.query;
@@ -217,14 +94,14 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
-    // query berbasis GROUP dulu, urutannya eksplisit — sama pola kayak export
-    const groups = await prisma.rabGroup.findMany({
+    // query berbasis GROUP RAP
+    const groups = await prisma.rapGroup.findMany({
       where: { projectId, parentId: null },
       include: {
         items: {
           where: discipline ? { discipline } : undefined,
           include: {
-            timeSchedule: true,
+            rapTimeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
           },
           orderBy: { order: "asc" },
@@ -234,7 +111,7 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
             items: {
               where: discipline ? { discipline } : undefined,
               include: {
-                timeSchedule: true,
+                rapTimeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
               },
               orderBy: { order: "asc" },
@@ -246,52 +123,51 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
       orderBy: { order: "asc" },
     });
 
-    // item tanpa group (groupId null) diambil terpisah, dipaksa di akhir
-    const ungroupedItems = await prisma.rabItem.findMany({
+    // item tanpa group (groupId null)
+    const ungroupedItems = await prisma.rapItem.findMany({
       where: {
         projectId,
         groupId: null,
         ...(discipline ? { discipline } : {}),
       },
       include: {
-        timeSchedule: true,
+        rapTimeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
       },
       orderBy: { order: "asc" },
     });
 
-    // susun rabItems FLAT tapi urutannya sesuai urutan group yang benar
-    const rabItems = [];
+    const rapItems = [];
     groups.forEach((group) => {
-      rabItems.push(
+      rapItems.push(
         ...group.items.map((it) => ({
           ...it,
           groupName: group.name.toUpperCase(),
         })),
       );
       (group.children || []).forEach((sub) => {
-        rabItems.push(
+        rapItems.push(
           ...sub.items.map((it) => ({ ...it, groupName: sub.name })),
         );
       });
     });
-    rabItems.push(
+    rapItems.push(
       ...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })),
     );
 
     const parentIds = new Set(
-      rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
+      rapItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
     );
 
-    const totalContract = rabItems.reduce((sum, it) => {
+    const totalContract = rapItems.reduce((sum, it) => {
       const hasChildren = parentIds.has(it.bvItem?.id);
       if (hasChildren) return sum;
-      return sum + Number(it.rabTotalPrice);
+      return sum + Number(it.rapTotalPrice);
     }, 0);
 
-    const maxWeek = rabItems.reduce((max, it) => {
-      if (!it.timeSchedule) return max;
-      return Math.max(max, it.timeSchedule.endWeek);
+    const maxWeek = rapItems.reduce((max, it) => {
+      if (!it.rapTimeSchedule) return max;
+      return Math.max(max, it.rapTimeSchedule.endWeek);
     }, 0);
 
     const weekDates = [];
@@ -307,18 +183,18 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
       weekDates.push({ week: w, start, end });
     }
 
-    const items = rabItems.map((it) => {
+    const items = rapItems.map((it) => {
       const isChild = !!it.bvItem?.parentBvItemId;
       const hasChildren = parentIds.has(it.bvItem?.id);
 
       const weight =
         !hasChildren && totalContract > 0
-          ? (Number(it.rabTotalPrice) / totalContract) * 100
+          ? (Number(it.rapTotalPrice) / totalContract) * 100
           : 0;
 
       const weeklyWeight = {};
-      if (it.timeSchedule && !hasChildren) {
-        const { startWeek, endWeek } = it.timeSchedule;
+      if (it.rapTimeSchedule && !hasChildren) {
+        const { startWeek, endWeek } = it.rapTimeSchedule;
         const span = endWeek - startWeek + 1;
         const perWeek = weight / span;
         for (let w = startWeek; w <= endWeek; w++) {
@@ -327,16 +203,16 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
       }
 
       return {
-        rabItemId: it.id,
+        rapItemId: it.id,
         name: it.name,
         paymentUnit: it.paymentUnit,
         volume: it.volume,
-        rabTotalPrice: it.rabTotalPrice,
-        satuanHarga: it.rabUnitPrice,
+        rapTotalPrice: it.rapTotalPrice,
+        satuanHarga: it.rapUnitPrice,
         weight,
 
-        startWeek: it.timeSchedule?.startWeek ?? null,
-        endWeek: it.timeSchedule?.endWeek ?? null,
+        startWeek: it.rapTimeSchedule?.startWeek ?? null,
+        endWeek: it.rapTimeSchedule?.endWeek ?? null,
         weeklyWeight,
         groupId: it.groupId,
         groupName: it.groupName,
@@ -372,7 +248,7 @@ router.get("/projects/:projectId/time-schedule", async (req, res) => {
       cumulativeTotal,
     });
   } catch (error) {
-    console.error("Error Get Time Schedule:", error);
+    console.error("Error Get RAP Time Schedule:", error);
     res
       .status(500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });

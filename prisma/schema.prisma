@@ -166,6 +166,8 @@ model Project {
     surveyReports     SurveyReport[]
   complaintReports  ComplaintReport[]
 
+// 👇 PAHAT BARIS INI DI SINI 👇
+  basts      Bast[]
 
   pairedProjectId String?  @unique          // <-- TAMBAH
   pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id])  // <-- TAMBAH
@@ -378,7 +380,7 @@ model DailyProgress {
   date             DateTime // tanggal (jam diabaikan)
   progressPercent  Decimal  @db.Decimal(6, 2) // input dari lapangan, misal 25.00
 
-  photoUrl        String?
+  photoUrls        String[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -484,4 +486,43 @@ model ComplaintPhoto {
   item   ComplaintItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
   url    String
   order  Int
+}
+
+// Tambahkan di dalam model Project
+// basts Bast[]
+
+model Bast {
+  id                   String   @id @default(cuid())
+  projectId            String
+  project              Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  bastNumber           String   // NO. BAST
+  spkNumber            String   // NO. SPK
+  handoverDate         DateTime // Tanggal BAST
+
+  pihakPertamaName     String   // Nama Pemberi Tugas (Bisa dari Client atau custom)
+  pihakPertamaPosition String   @default("Pemberi Tugas")
+  
+  pihakKeduaName       String   // Nama Kontraktor
+  pihakKeduaPosition   String   @default("Penerima Pekerjaan")
+
+  statusText           String   @default("SELESAI DIKERJAKAN 100% dan DITERIMA DENGAN BAIK")
+
+  photos               BastPhoto[]
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+model BastPhoto {
+  id        String   @id @default(cuid())
+  bastId    String
+  bast      Bast     @relation(fields: [bastId], references: [id], onDelete: Cascade)
+  
+  url       String
+  order     Int      @default(0)
+
+  @@index([bastId])
 }

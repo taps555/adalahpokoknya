@@ -375,7 +375,7 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
               repairDate: item.repairDate ? new Date(item.repairDate) : null,
               status: !!item.status,
               repairDefectReport: item.repairDefectReport || null,
-              photos: { create: photosToCreate },
+              photos: { create: photosToCreate } || null,
             };
           },
         );

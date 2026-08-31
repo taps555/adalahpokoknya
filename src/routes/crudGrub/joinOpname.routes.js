@@ -33,7 +33,7 @@ const upload = multer({ storage: storage });
 
 router.put(
   "/rab-items/:id/progress",
-  upload.single("foto"),
+  upload.array("foto", 50), // Bat maksimal 5 foto (sesuaikan kebutuhan)
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -50,17 +50,27 @@ router.put(
         return res.status(404).json({ error: "Item RAB tidak ditemukan." });
       }
 
-      // Tangkap URL foto jika ada
-      const photoUrl = req.file
-        ? `/uploads/progress/${req.file.filename}`
-        : null;
+      // Tangkap array URL foto jika ada file yang diunggah
+      const photoUrls =
+        req.files && req.files.length > 0
+          ? req.files.map((file) => `/uploads/progress/${file.filename}`)
+          : undefined;
 
       const normalizedDate = new Date(date);
       normalizedDate.setUTCHours(0, 0, 0, 0);
 
       const updateData = { progressPercent: Number(progressPercent) };
-      if (photoUrl) {
-        updateData.photoUrl = photoUrl;
+      if (photoUrls && photoUrls.length > 0) {
+        updateData.photoUrls = photoUrls; // Ubah dari photoUrl menjadi photoUrls
+      }
+
+      const createData = {
+        rabItemId: id,
+        date: normalizedDate,
+        progressPercent: Number(progressPercent),
+      };
+      if (photoUrls && photoUrls.length > 0) {
+        createData.photoUrls = photoUrls;
       }
 
       const progress = await prisma.dailyProgress.upsert({
@@ -68,16 +78,11 @@ router.put(
           rabItemId_date: { rabItemId: id, date: normalizedDate },
         },
         update: updateData,
-        create: {
-          rabItemId: id,
-          date: normalizedDate,
-          progressPercent: Number(progressPercent),
-          photoUrl: photoUrl,
-        },
+        create: createData,
       });
 
       res.status(200).json({
-        message: "Progres dan foto berhasil disimpan!",
+        message: "Progres dan foto-foto berhasil disimpan!",
         data: progress,
       });
     } catch (error) {

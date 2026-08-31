@@ -17,16 +17,16 @@ const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 const COL = {
   no: 24,
   keterangan: 90,
-  foto: 190,
+  foto: 250,
   ukuran: 110,
   analisa: 0,
 };
 COL.analisa = CONTENT_WIDTH - COL.no - COL.keterangan - COL.foto - COL.ukuran;
 
 // Grid foto: 4 kolom, tinggi tiap thumbnail tetap kecil biar muat banyak (maks 20/area)
-const PHOTO_GRID_COLS = 4;
-const PHOTO_CELL_H = 34;
-const PHOTO_GRID_PAD = 4;
+const PHOTO_GRID_COLS = 2; // Diubah menjadi 2 kolom (kiri dan kanan)
+const PHOTO_CELL_H = 75; // Disesuaikan menjadi lebih tinggi (misal 100) karena foto sekarang lebih lebar. Silakan ubah jika kurang pas.
+const PHOTO_GRID_PAD = 2;
 const PHOTO_GRID_GAP = 3;
 
 // Kolom UKURAN: setiap baris dimensi = 1 label "LUASAN" + 1 baris nilai P/L/T/V
@@ -150,7 +150,6 @@ function getPhotoList(area) {
   if (area.photoUrl) return [{ url: area.photoUrl }];
   return [];
 }
-
 function photoGridHeight(area, width) {
   const photos = getPhotoList(area);
   const count = Math.max(photos.length, 1); // minimal 1 baris walau kosong (nampilin placeholder)
@@ -187,6 +186,7 @@ function drawPhotoGrid(doc, area, x, y, width) {
   }
 
   photos.forEach((photo, i) => {
+    // Logika ini otomatis akan membuat foto turun ke bawah setelah 2 kolom terisi
     const row = Math.floor(i / PHOTO_GRID_COLS);
     const col = i % PHOTO_GRID_COLS;
     const cx = x + PHOTO_GRID_PAD + col * (cellW + PHOTO_GRID_GAP);
@@ -346,23 +346,72 @@ function analisaColumnHeight(doc, area, width) {
 // ==========================================
 // 1 baris area penuh
 // ==========================================
-function drawAreaRow(doc, area, index, y) {
-  const { x0, x1, x2, x3, x4, xEnd } = colX();
+// ==========================================
+// Kapasitas 1 halaman (dipakai buat deteksi row yang butuh di-split)
+// ==========================================
+function tableHeaderHeight() {
+  return 16 + 13; // rowH1 + rowH2, harus sama persis kayak di drawTableHeader
+}
 
+function maxContentHeightFreshPage() {
+  // Tinggi maksimal konten row kalau start dari atas halaman baru,
+  // langsung setelah table header, sebelum kena margin bawah.
+  return PAGE_HEIGHT - PAGE_MARGIN * 2 - tableHeaderHeight();
+}
+
+function computePhotoCapacityPerChunk(maxHeight) {
+  const rows = Math.floor(
+    (maxHeight - PHOTO_GRID_PAD * 2 + PHOTO_GRID_GAP) /
+      (PHOTO_CELL_H + PHOTO_GRID_GAP),
+  );
+  return Math.max(rows, 1) * PHOTO_GRID_COLS;
+}
+
+// ==========================================
+// 1 baris area penuh (dispatcher)
+// ==========================================
+function drawAreaRow(doc, area, index, y) {
   const fotoH = photoGridHeight(area, COL.foto);
   const ukuranH = ukuranColumnHeight(area.dimensions);
   const analisaH = analisaColumnHeight(doc, area, COL.analisa);
 
-  // Ukur tinggi teks KETERANGAN pakai font yang sama dengan yang dipakai
-  // saat render, biar hasil heightOfString akurat (bold vs regular beda metrik).
   doc.font("Helvetica-Bold").fontSize(7.5);
   const ketH = doc.heightOfString(area.areaName || "-", {
     width: COL.keterangan - 8,
   });
 
   const rowH = Math.max(fotoH, ukuranH, analisaH, ketH) + 10;
+  const maxFresh = maxContentHeightFreshPage() - 10;
+
+  if (rowH <= maxFresh) {
+    // Muat di 1 halaman (current atau fresh) -> jalur normal, aman.
+    return drawAreaRowSingle(doc, area, index, y, rowH);
+  }
+
+  // Row lebih tinggi dari 1 halaman penuh -> WAJIB di-split.
+  // NOTE: split ini nge-handle kasus fotonya kebanyakan (kasus paling umum).
+  // Kalau suatu saat teks UKURAN atau ANALISA sendirian aja udah lebih
+  // tinggi dari 1 halaman (jarang, tapi mungkin), itu belum ke-cover di sini
+  // -> perlu split terpisah kalau kejadian, bilang aja nanti.
+  return drawAreaRowSplit(doc, area, index, y, {
+    ukuranH,
+    analisaH,
+    ketH,
+    maxFresh,
+  });
+}
+
+// ==========================================
+// Jalur normal: row muat di 1 halaman
+// (ini isinya sama persis kayak drawAreaRow versi sebelumnya)
+// ==========================================
+function drawAreaRowSingle(doc, area, index, y, rowH) {
+  const { x0, x1, x2, x3, x4, xEnd } = colX();
 
   y = ensureSpace(doc, y, rowH + 40, (d, ny) => drawTableHeader(d, ny));
+
+  const originalBottomMargin = doc.page.margins.bottom;
+  doc.page.margins.bottom = -9999;
 
   doc.font("Helvetica-Bold").fontSize(8).fillColor(GREY_TEXT);
   doc.text(String(index + 1), x0, y + 5, { width: COL.no, align: "center" });
@@ -376,8 +425,6 @@ function drawAreaRow(doc, area, index, y) {
   drawUkuranColumn(doc, area.dimensions, x3, y + 4, COL.ukuran);
   drawAnalisaColumn(doc, area, x4, y + 4, COL.analisa);
 
-  // Garis vertikal kolom UKURAN harus align dengan sub-kolom P/L/T/V di header,
-  // makanya pakai COL.ukuran / UKURAN_SUBCOLS, bukan pembagian sembarang.
   doc.strokeColor(BORDER).lineWidth(0.5);
   const ukuranSubW = COL.ukuran / UKURAN_SUBCOLS;
   [
@@ -402,10 +449,141 @@ function drawAreaRow(doc, area, index, y) {
     .lineTo(xEnd, y + rowH)
     .stroke();
 
+  doc.page.margins.bottom = originalBottomMargin;
   doc.fillColor(GREY_TEXT).font("Helvetica");
   return y + rowH;
 }
 
+// ==========================================
+// Jalur split: row lebih tinggi dari 1 halaman -> foto dipecah per chunk
+// ==========================================
+function maxContentHeightContinuationPage() {
+  // Halaman lanjutan gak ada pita header pink, jadi ruangnya lebih lega
+  // dibanding halaman pertama yang harus nyisain tempat buat header.
+  return PAGE_HEIGHT - PAGE_MARGIN * 2;
+}
+
+function drawAreaRowSplit(doc, area, index, y, heights) {
+  const { x0, x1, x2, x3, x4, xEnd } = colX();
+  const photos = getPhotoList(area);
+  const bottomLimit = PAGE_HEIGHT - PAGE_MARGIN;
+
+  // Ruang yang MASIH ADA di halaman sekarang (y ini posisi setelah header
+  // yang udah kepasang duluan sama caller / streamSurveyPdf).
+  const remainingOnCurrentPage = bottomLimit - y - 10;
+
+  // Tinggi minimal yang WAJIB muat buat chunk pertama: minimal 1 baris
+  // foto (kalau ada foto), digabung sama ukuran/analisa/keterangan yang
+  // emang harus nampil bareng di chunk pertama (mereka kolom terpisah,
+  // jadi gak numpuk tinggi, cuma diambil yang paling tinggi).
+  const minPhotoRowH =
+    photos.length > 0 ? PHOTO_CELL_H + PHOTO_GRID_PAD * 2 : 0;
+  const minFirstChunkH = Math.max(
+    minPhotoRowH,
+    heights.ukuranH,
+    heights.analisaH,
+    heights.ketH,
+  );
+
+  // Cuma pindah halaman kalau ruang sisa BENERAN gak cukup buat chunk
+  // pertama yang berguna. Kalau masih cukup, pakai halaman sekarang,
+  // gak usah gambar header baru (headernya udah ada di atas, dari caller).
+  const needNewPage = remainingOnCurrentPage < minFirstChunkH;
+
+  if (needNewPage) {
+    doc.addPage({ size: "A4", layout: "landscape", margin: PAGE_MARGIN });
+    y = drawTableHeader(doc, PAGE_MARGIN);
+  }
+
+  const maxFreshFirst = needNewPage ? heights.maxFresh : remainingOnCurrentPage;
+  const maxFreshCont = maxContentHeightContinuationPage() - 10;
+
+  const capacityFirstChunk = computePhotoCapacityPerChunk(maxFreshFirst);
+  const capacityContChunk = computePhotoCapacityPerChunk(maxFreshCont);
+
+  let photoIdx = 0;
+  let firstChunk = true;
+
+  while (photoIdx < photos.length || firstChunk) {
+    const capacity = firstChunk ? capacityFirstChunk : capacityContChunk;
+    const chunkPhotos = photos.slice(photoIdx, photoIdx + capacity);
+    const chunkArea = firstChunk
+      ? { ...area, photos: chunkPhotos }
+      : { photos: chunkPhotos };
+
+    const chunkFotoH = photoGridHeight(chunkArea, COL.foto);
+    const chunkRowH = firstChunk
+      ? Math.max(chunkFotoH, heights.ukuranH, heights.analisaH, heights.ketH) +
+        10
+      : chunkFotoH + 10;
+
+    const originalBottomMargin = doc.page.margins.bottom;
+    doc.page.margins.bottom = -9999;
+
+    doc.font("Helvetica-Bold").fontSize(8).fillColor(GREY_TEXT);
+    doc.text(firstChunk ? String(index + 1) : "", x0, y + 5, {
+      width: COL.no,
+      align: "center",
+    });
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(7.5)
+      .text(
+        firstChunk ? area.areaName || "-" : "(lanjutan foto)",
+        x1 + 4,
+        y + 5,
+        {
+          width: COL.keterangan - 8,
+        },
+      );
+
+    drawPhotoGrid(doc, chunkArea, x2, y + 4, COL.foto);
+
+    if (firstChunk) {
+      drawUkuranColumn(doc, area.dimensions, x3, y + 4, COL.ukuran);
+      drawAnalisaColumn(doc, area, x4, y + 4, COL.analisa);
+    }
+
+    doc.strokeColor(BORDER).lineWidth(0.5);
+    const ukuranSubW = COL.ukuran / UKURAN_SUBCOLS;
+    [
+      x0,
+      x1,
+      x2,
+      x3,
+      x3 + ukuranSubW,
+      x3 + ukuranSubW * 2,
+      x3 + ukuranSubW * 3,
+      x4,
+      xEnd,
+    ].forEach((x) => {
+      doc
+        .moveTo(x, y)
+        .lineTo(x, y + chunkRowH)
+        .stroke();
+    });
+    doc.moveTo(x0, y).lineTo(xEnd, y).stroke();
+    doc
+      .moveTo(x0, y + chunkRowH)
+      .lineTo(xEnd, y + chunkRowH)
+      .stroke();
+
+    doc.page.margins.bottom = originalBottomMargin;
+    doc.fillColor(GREY_TEXT).font("Helvetica");
+
+    y += chunkRowH;
+    photoIdx += capacity;
+    firstChunk = false;
+
+    if (photoIdx < photos.length) {
+      doc.addPage({ size: "A4", layout: "landscape", margin: PAGE_MARGIN });
+      y = PAGE_MARGIN; // lanjutan: tanpa header
+    }
+  }
+
+  return y;
+}
 // ==========================================
 // META INFO
 // ==========================================
@@ -488,13 +666,13 @@ function streamSurveyPdf(survey, outStream) {
     width: CONTENT_WIDTH,
     align: "right",
   });
-  doc.font("Helvetica-Bold").text("SURVEYOR", PAGE_MARGIN, doc.y + 40, {
+  doc.font("Helvetica-Bold").text("SURVEYOR", PAGE_MARGIN, doc.y + 4, {
     width: CONTENT_WIDTH,
     align: "right",
   });
   doc
     .font("Helvetica")
-    .text(survey.surveyorName || "-", PAGE_MARGIN, doc.y + 2, {
+    .text(survey.surveyorName || "-", PAGE_MARGIN, doc.y + 50, {
       width: CONTENT_WIDTH,
       align: "right",
     });
