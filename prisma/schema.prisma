@@ -31,6 +31,26 @@ enum FileKind {
   CSV
 }
 
+enum Role {
+  SUPER_ADMIN
+  PERENCANA
+  PELAKSANA
+  FINANCE
+  PURCHASING
+  PROJECT_MANAGER
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique // atau email
+  password  String   // password yang sudah di-hash
+  name      String   // nama lengkap pegawai
+  role      Role     @default(PERENCANA)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 /// Daftar harga satuan dasar: bahan, upah (tenaga kerja), dan alat.
 /// Ini adalah bagian "HARGA SATUAN BAHAN, UPAH DAN ALAT" di dokumen HSPK.
 model PriceItem {
@@ -161,6 +181,10 @@ model Project {
   client     Client   @relation(fields: [clientId], references: [id])
   rabItems   RabItem[]
   bvItems BvItem[]
+
+
+  rabStatus RabStatus @default(DRAFT)
+  materialRequests MaterialRequest[]
 
   rabGroups RabGroup[]
     surveyReports     SurveyReport[]
@@ -525,4 +549,68 @@ model BastPhoto {
   order     Int      @default(0)
 
   @@index([bastId])
+}
+
+enum RabStatus {
+  DRAFT       // Masih bisa diotak-atik oleh Estimator
+  LOCKED      // Sudah fix dan dikirim ke Finance (Tidak bisa diedit sembarangan)
+  REVISION    // Sedang dalam revisi (jika ada addendum/perubahan)
+}
+
+enum ProcurementStatus {
+  PENDING     // Menunggu diproses Finance
+  PARTIAL     // Sebagian barang sudah di-PO / dibeli
+  COMPLETED   // Semua kebutuhan sudah dibeli
+}
+
+// =========================================================
+// FINANCE & PROCUREMENT (KEBUTUHAN MATERIAL & ALAT DARI RAB)
+// =========================================================
+
+/// Tabel Header ketika RAB dikirim ke Finance (Bill of Materials)
+model MaterialRequest {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items       MaterialRequestItem[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model MaterialRequestItem {
+  id              String   @id @default(cuid())
+  headerId        String
+  header          MaterialRequest @relation(fields: [headerId], references: [id], onDelete: Cascade)
+  
+  // -- DATA DASAR --
+  itemName        String
+  unit            String
+  discipline      String?  // SIPIL atau INTERIOR
+  
+  // -- ANGKA & HARGA (Batas Budget dari Perencana) --
+  estimatedVolume Float
+  pricePerUnit    Float
+  totalPrice      Float
+  volumePekerjaan Float?
+  status ProcurementStatus @default(PENDING)
+
+
+  
+  // -- JADWAL & ALOKASI (Otomatis dari Sistem) --
+  scheduleRange   String?  // Contoh: "W1 - W4"
+  groupName        String?
+  jobName          String?
+  
+  // -- KOLOM CATATAN (Berdasarkan Role) --
+  catatanPerencana String? @db.Text
+  
+  // -- KOLOM FINANCE (Untuk dikerjakan di Fase 2 nanti) --
+  isCompleted     Boolean  @default(false) 
+  orderedVolume   Float    @default(0)     
+  catatanFinance  String?  @db.Text        
+  
+  // -- KOLOM PELAKSANA (Untuk dikerjakan di Fase 2 nanti) --
+  tanggalOnsite   DateTime? 
+  updateLapangan  String?  @db.Text        
 }

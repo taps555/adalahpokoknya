@@ -4,6 +4,7 @@ const express = require("express");
 // Naik dua tingkat (keluar dari CRUDRAB, lalu keluar dari routes)
 const prisma = require("../../lib/prisma");
 const { calculateJobPrice } = require("../../services/calculateService");
+const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
@@ -298,32 +299,37 @@ router.delete("/rab-items/:id", async (req, res) => {
 });
 
 /** POST /rab-items/bulk-delete — Hapus massal berdasarkan kumpulan ID */
-router.post("/rab-items/bulk-delete", async (req, res) => {
-  try {
-    const { ids } = req.body;
+router.post(
+  "/rab-items/bulk-delete",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  async (req, res) => {
+    try {
+      const { ids } = req.body;
 
-    // Cegat kalau datanya kosong
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Tidak ada ID yang dikirim untuk dihapus." });
+      // Cegat kalau datanya kosong
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Tidak ada ID yang dikirim untuk dihapus." });
+      }
+
+      // SAPU JAGAT DELETE: Prisma langsung menghapus semua ID yang ada di dalam array
+      const deleted = await prisma.rabItem.deleteMany({
+        where: {
+          id: { in: ids },
+        },
+      });
+
+      res.json({ message: `Berhasil menghapus ${deleted.count} item RAB.` });
+    } catch (error) {
+      console.error("Error Bulk Delete RabItems:", error);
+      res.status(500).json({
+        error: "Terjadi kesalahan pada server saat menghapus massal.",
+      });
     }
-
-    // SAPU JAGAT DELETE: Prisma langsung menghapus semua ID yang ada di dalam array
-    const deleted = await prisma.rabItem.deleteMany({
-      where: {
-        id: { in: ids },
-      },
-    });
-
-    res.json({ message: `Berhasil menghapus ${deleted.count} item RAB.` });
-  } catch (error) {
-    console.error("Error Bulk Delete RabItems:", error);
-    res
-      .status(500)
-      .json({ error: "Terjadi kesalahan pada server saat menghapus massal." });
-  }
-});
+  },
+);
 
 /**
  * PUT /projects/:projectId/rab-items/bulk-price-by-name
@@ -581,5 +587,300 @@ router.put(
     }
   },
 );
+
+/**
+ * POST /projects/:projectId/sync-finance
+ * Fitur Snapshot: Mengunci RAB dan Merekap BOM (Bahan & Alat) ke Finance
+ */
+/**
+ * POST /projects/:projectId/sync-finance
+ * Merekap RAB menjadi Purchase Requisition (Daftar Permintaan Barang)
+ */
+/**
+ * POST /projects/:projectId/sync-finance
+ * Merekap RAB menjadi PR (Sesuai Urutan Hierarki Pekerjaan, Tanpa Digabung)
+ */
+function buildPath(node, nameKey = "name") {
+  // Jalan ke atas rantai parent, kumpulin nama dari akar sampai node ini sendiri
+  const names = [];
+  let cur = node;
+  while (cur) {
+    names.unshift(cur[nameKey]);
+    cur = cur.parent || null;
+  }
+  return names.join(" ▸ ");
+}
+
+// Tambahkan helper function ini di atas (sebelum router.post) atau di tempat utilities
+const addDays = (date, days) => {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+};
+
+// 2. Fungsi formatDate yang baru (DD/MM/YY)
+const formatDate = (date) => {
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = String(date.getFullYear()).slice(-2);
+
+  return `${day}/${month}/${year}`;
+};
+
+router.post("/projects/:projectId/sync-finance", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        rabItems: {
+          orderBy: { order: "asc" },
+          include: {
+            timeSchedule: true,
+            components: true,
+            group: { include: { parent: true } },
+            parent: { include: { parent: true } },
+          },
+        },
+      },
+    });
+
+    if (!project)
+      return res.status(404).json({ error: "Proyek tidak ditemukan" });
+
+    const requestItemsData = [];
+
+    project.rabItems.forEach((rabItem) => {
+      if (!rabItem.components || rabItem.components.length === 0) return;
+
+      // --- GROUP ---
+      const groupName = rabItem.group ? buildPath(rabItem.group) : "Lainnya";
+
+      // --- JOB ---
+      const jobName = rabItem.parent ? buildPath(rabItem.parent) : rabItem.name;
+
+      const jobDiscipline = project.discipline;
+      const jobVolume = Number(rabItem.volume);
+
+      // --- TIME SCHEDULE CALCULATION ---
+      const startW = rabItem.timeSchedule?.startWeek || null;
+      const endW = rabItem.timeSchedule?.endWeek || null;
+      let scheduleStr = null;
+
+      if (startW !== null && endW !== null) {
+        if (project.startDate) {
+          // Jika proyek punya startDate, konversi Week menjadi Tanggal
+          const projectStart = new Date(project.startDate);
+
+          // Mulai minggu ke-N: startDate + ((startWeek - 1) * 7 hari)
+          const startTaskDate = addDays(projectStart, (startW - 1) * 7);
+
+          // Akhir minggu ke-N: startDate + (endWeek * 7 hari) - 1 hari
+          const endTaskDate = addDays(projectStart, endW * 7 - 1);
+
+          scheduleStr = `${formatDate(startTaskDate)} - ${formatDate(endTaskDate)}`;
+        } else {
+          // Fallback jika project.startDate belum diisi (masih null)
+          scheduleStr =
+            startW === endW ? `W${startW}` : `W${startW} - W${endW}`;
+        }
+      }
+
+      rabItem.components.forEach((comp) => {
+        if (comp.section === "UPAH") return;
+
+        const itemVolume = Number(
+          (Number(comp.coefficient) * jobVolume).toFixed(4),
+        );
+        const pricePerUnit = Number(comp.unitPrice);
+        const itemTotal = itemVolume * pricePerUnit;
+
+        requestItemsData.push({
+          itemName: comp.name,
+          unit: comp.unit,
+          discipline: jobDiscipline,
+          groupName,
+          jobName,
+          volumePekerjaan: jobVolume,
+          estimatedVolume: itemVolume,
+          pricePerUnit: pricePerUnit,
+          totalPrice: itemTotal,
+          scheduleRange: scheduleStr, // <-- Akan terisi format "DD/MM/YYYY - DD/MM/YYYY"
+          catatanPerencana: req.body.catatan || null,
+        });
+      });
+    });
+
+    await prisma.$transaction(async (tx) => {
+      // Bersihkan data lama jika ada
+      await tx.materialRequest.deleteMany({
+        where: { projectId: projectId },
+      });
+
+      // Buat header baru
+      const mr = await tx.materialRequest.create({
+        data: { projectId: projectId },
+      });
+
+      // Simpan rincian barang
+      const insertData = requestItemsData.map((item) => ({
+        ...item,
+        headerId: mr.id,
+      }));
+      if (insertData.length > 0) {
+        await tx.materialRequestItem.createMany({ data: insertData });
+      }
+
+      // Kunci proyek
+      await tx.project.update({
+        where: { id: projectId },
+        data: { rabStatus: "LOCKED" },
+      });
+    });
+
+    res.json({ message: "Berhasil! Data dikirim dengan judul bersih." });
+  } catch (error) {
+    console.error("Sync Finance Error:", error);
+    res.status(500).json({ error: "Gagal mengirim data ke Finance." });
+  }
+});
+
+/** PUT /material-request-items/finance-update-bulk
+ * Finance update banyak item sekaligus (orderedVolume, catatanFinance)
+ * Status auto-derive dari orderedVolume vs estimatedVolume
+ */
+router.put(
+  "/material-request-items/finance-update-bulk",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  async (req, res) => {
+    try {
+      const { items } = req.body; // [{ id, orderedVolume, catatanFinance }, ...]
+
+      if (!Array.isArray(items) || items.length === 0)
+        return res
+          .status(400)
+          .json({ error: 'Field "items" wajib diisi (array).' });
+
+      const ids = items.map((i) => i.id);
+      const existingItems = await prisma.materialRequestItem.findMany({
+        where: { id: { in: ids } },
+      });
+      const existingMap = new Map(existingItems.map((e) => [e.id, e]));
+
+      const results = [];
+      const skipped = [];
+
+      for (const item of items) {
+        const existing = existingMap.get(item.id);
+        if (!existing) {
+          skipped.push({ id: item.id, reason: "Item tidak ditemukan." });
+          continue;
+        }
+
+        const newOrderedVolume =
+          item.orderedVolume !== undefined
+            ? Number(item.orderedVolume)
+            : Number(existing.orderedVolume);
+
+        let status;
+        if (newOrderedVolume <= 0) status = "PENDING";
+        else if (newOrderedVolume < Number(existing.estimatedVolume))
+          status = "PARTIAL";
+        else status = "COMPLETED";
+
+        const updated = await prisma.materialRequestItem.update({
+          where: { id: item.id },
+          data: {
+            orderedVolume: newOrderedVolume,
+            status,
+            ...(item.catatanFinance !== undefined
+              ? { catatanFinance: item.catatanFinance }
+              : {}),
+          },
+        });
+
+        results.push(updated);
+      }
+
+      res.json({
+        message: `Berhasil update procurement ${results.length} item. Dilewati ${skipped.length} item.`,
+        data: results,
+        skipped,
+      });
+    } catch (error) {
+      console.error("Error Finance Update Bulk:", error);
+      res
+        .status(500)
+        .json({ error: error.message || "Terjadi kesalahan pada server." });
+    }
+  },
+);
+
+/**
+ * 2. POST /projects/:projectId/cancel-finance
+ * Menarik kembali data dari Finance dan membuka kunci RAB (kembali ke DRAFT)
+ */
+router.post(
+  "/projects/:projectId/cancel-finance",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  async (req, res) => {
+    try {
+      const { projectId } = req.params;
+
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+      });
+
+      if (!project)
+        return res.status(404).json({ error: "Proyek tidak ditemukan" });
+
+      if (project.rabStatus !== "LOCKED") {
+        return res.status(400).json({
+          error: "RAB belum dikirim ke Finance, tidak ada yang perlu ditarik.",
+        });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.materialRequest.deleteMany({
+          where: { projectId: projectId },
+        });
+
+        await tx.project.update({
+          where: { id: projectId },
+          data: { rabStatus: "DRAFT" },
+        });
+      });
+
+      res.json({
+        message: "Batal Kirim Berhasil! RAB kembali terbuka (DRAFT).",
+      });
+    } catch (error) {
+      console.error("Cancel Finance Error:", error);
+      res
+        .status(500)
+        .json({ error: "Gagal membatalkan pengiriman ke Finance." });
+    }
+  },
+);
+
+router.get("/projects/:projectId/material-requests", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    const headers = await prisma.materialRequest.findMany({
+      where: { projectId },
+      include: { items: true },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(headers);
+  } catch (error) {
+    console.error("Error List MaterialRequest:", error);
+    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+  }
+});
 
 module.exports = router;

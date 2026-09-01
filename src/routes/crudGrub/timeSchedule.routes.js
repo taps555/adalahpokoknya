@@ -36,7 +36,7 @@ router.put("/projects/:projectId/start-date", async (req, res) => {
   }
 });
 
-/** PUT /rap-items/:id/schedule — assign / update rentang minggu pengerjaan item RAP */
+/** PUT /rap-items/:id/schedule — assign / update rentang minggu pengerjaan item RAB */
 router.put("/rap-items/:id/schedule", async (req, res) => {
   try {
     const { id } = req.params;
@@ -48,14 +48,14 @@ router.put("/rap-items/:id/schedule", async (req, res) => {
       });
     }
 
-    const rapItem = await prisma.rapItem.findUnique({ where: { id } });
-    if (!rapItem)
-      return res.status(404).json({ error: "Item RAP tidak ditemukan." });
+    const rabItem = await prisma.rabItem.findUnique({ where: { id } });
+    if (!rabItem)
+      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
 
-    const schedule = await prisma.rapTimeSchedule.upsert({
-      where: { rapItemId: id },
+    const schedule = await prisma.timeSchedule.upsert({
+      where: { rabItemId: id },
       update: { startWeek, endWeek },
-      create: { rapItemId: id, startWeek, endWeek },
+      create: { rabItemId: id, startWeek, endWeek },
     });
 
     res.json({ message: "Jadwal berhasil disimpan", data: schedule });
@@ -71,7 +71,7 @@ router.put("/rap-items/:id/schedule", async (req, res) => {
 router.delete("/rap-items/:id/schedule", async (req, res) => {
   try {
     const { id } = req.params;
-    await prisma.rapTimeSchedule.delete({ where: { rapItemId: id } });
+    await prisma.timeSchedule.delete({ where: { rabItemId: id } });
     res.json({ message: "Jadwal berhasil dihapus." });
   } catch (error) {
     if (error.code === "P2025") {
@@ -82,7 +82,7 @@ router.delete("/rap-items/:id/schedule", async (req, res) => {
   }
 });
 
-/** GET /projects/:projectId/rap-time-schedule — generate tabel breakdown mingguan + kurva S rencana RAP */
+/** GET /projects/:projectId/rap-time-schedule — generate tabel breakdown mingguan + kurva S rencana RAB */
 router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -94,14 +94,14 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
-    // query berbasis GROUP RAP
-    const groups = await prisma.rapGroup.findMany({
+    // query berbasis GROUP RAB
+    const groups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
         items: {
           where: discipline ? { discipline } : undefined,
           include: {
-            rapTimeSchedule: true,
+            timeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
           },
           orderBy: { order: "asc" },
@@ -111,7 +111,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
             items: {
               where: discipline ? { discipline } : undefined,
               include: {
-                rapTimeSchedule: true,
+                timeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
               },
               orderBy: { order: "asc" },
@@ -124,50 +124,50 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
     });
 
     // item tanpa group (groupId null)
-    const ungroupedItems = await prisma.rapItem.findMany({
+    const ungroupedItems = await prisma.rabItem.findMany({
       where: {
         projectId,
         groupId: null,
         ...(discipline ? { discipline } : {}),
       },
       include: {
-        rapTimeSchedule: true,
+        timeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
       },
       orderBy: { order: "asc" },
     });
 
-    const rapItems = [];
+    const rabItems = [];
     groups.forEach((group) => {
-      rapItems.push(
+      rabItems.push(
         ...group.items.map((it) => ({
           ...it,
           groupName: group.name.toUpperCase(),
         })),
       );
       (group.children || []).forEach((sub) => {
-        rapItems.push(
+        rabItems.push(
           ...sub.items.map((it) => ({ ...it, groupName: sub.name })),
         );
       });
     });
-    rapItems.push(
+    rabItems.push(
       ...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })),
     );
 
     const parentIds = new Set(
-      rapItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
+      rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
     );
 
-    const totalContract = rapItems.reduce((sum, it) => {
+    const totalContract = rabItems.reduce((sum, it) => {
       const hasChildren = parentIds.has(it.bvItem?.id);
       if (hasChildren) return sum;
       return sum + Number(it.rapTotalPrice);
     }, 0);
 
-    const maxWeek = rapItems.reduce((max, it) => {
-      if (!it.rapTimeSchedule) return max;
-      return Math.max(max, it.rapTimeSchedule.endWeek);
+    const maxWeek = rabItems.reduce((max, it) => {
+      if (!it.timeSchedule) return max;
+      return Math.max(max, it.timeSchedule.endWeek);
     }, 0);
 
     const weekDates = [];
@@ -183,7 +183,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       weekDates.push({ week: w, start, end });
     }
 
-    const items = rapItems.map((it) => {
+    const items = rabItems.map((it) => {
       const isChild = !!it.bvItem?.parentBvItemId;
       const hasChildren = parentIds.has(it.bvItem?.id);
 
@@ -193,8 +193,8 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
           : 0;
 
       const weeklyWeight = {};
-      if (it.rapTimeSchedule && !hasChildren) {
-        const { startWeek, endWeek } = it.rapTimeSchedule;
+      if (it.timeSchedule && !hasChildren) {
+        const { startWeek, endWeek } = it.timeSchedule;
         const span = endWeek - startWeek + 1;
         const perWeek = weight / span;
         for (let w = startWeek; w <= endWeek; w++) {
@@ -203,7 +203,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       }
 
       return {
-        rapItemId: it.id,
+        rabItemId: it.id,
         name: it.name,
         paymentUnit: it.paymentUnit,
         volume: it.volume,
@@ -211,8 +211,8 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         satuanHarga: it.rapUnitPrice,
         weight,
 
-        startWeek: it.rapTimeSchedule?.startWeek ?? null,
-        endWeek: it.rapTimeSchedule?.endWeek ?? null,
+        startWeek: it.timeSchedule?.startWeek ?? null,
+        endWeek: it.timeSchedule?.endWeek ?? null,
         weeklyWeight,
         groupId: it.groupId,
         groupName: it.groupName,
