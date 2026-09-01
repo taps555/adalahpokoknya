@@ -10,22 +10,22 @@ const RED_INFO = "#c0117a";
 const BORDER = "#999999";
 
 const PAGE_MARGIN = 30;
-const PAGE_WIDTH = 841.89; // A4 LANDSCAPE
-const PAGE_HEIGHT = 595.28;
+const PAGE_WIDTH = 595.28; // A4 PORTRAIT
+const PAGE_HEIGHT = 841.89;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 
 const COL = {
-  no: 24,
-  keterangan: 90,
-  foto: 250,
-  ukuran: 110,
+  no: 20,
+  keterangan: 70,
+  foto: 230,
+  ukuran: 80,
   analisa: 0,
 };
 COL.analisa = CONTENT_WIDTH - COL.no - COL.keterangan - COL.foto - COL.ukuran;
 
-// Grid foto: 4 kolom, tinggi tiap thumbnail tetap kecil biar muat banyak (maks 20/area)
-const PHOTO_GRID_COLS = 2; // Diubah menjadi 2 kolom (kiri dan kanan)
-const PHOTO_CELL_H = 75; // Disesuaikan menjadi lebih tinggi (misal 100) karena foto sekarang lebih lebar. Silakan ubah jika kurang pas.
+// Grid foto: 2 kolom (kiri dan kanan), foto diperbesar
+const PHOTO_GRID_COLS = 2;
+const PHOTO_CELL_H = 140;
 const PHOTO_GRID_PAD = 2;
 const PHOTO_GRID_GAP = 3;
 
@@ -134,7 +134,7 @@ function drawTableHeader(doc, y) {
 function ensureSpace(doc, y, needed, onNewPage) {
   const bottomLimit = PAGE_HEIGHT - PAGE_MARGIN;
   if (y + needed > bottomLimit) {
-    doc.addPage({ size: "A4", layout: "landscape", margin: PAGE_MARGIN });
+    doc.addPage({ size: "A4", layout: "portrait", margin: PAGE_MARGIN });
     let ny = PAGE_MARGIN;
     if (onNewPage) ny = onNewPage(doc, ny);
     return ny;
@@ -198,6 +198,8 @@ function drawPhotoGrid(doc, area, x, y, width) {
         width: cellW,
         height: PHOTO_CELL_H,
         fit: [cellW, PHOTO_CELL_H],
+        align: "center",
+        valign: "center",
       });
       doc.rect(cx, cy, cellW, PHOTO_CELL_H).stroke("#cccccc");
     } else {
@@ -370,7 +372,7 @@ function computePhotoCapacityPerChunk(maxHeight) {
 // ==========================================
 // 1 baris area penuh (dispatcher)
 // ==========================================
-function drawAreaRow(doc, area, index, y) {
+function drawAreaRow(doc, area, index, y, reserveBottom = 0) {
   const fotoH = photoGridHeight(area, COL.foto);
   const ukuranH = ukuranColumnHeight(area.dimensions);
   const analisaH = analisaColumnHeight(doc, area, COL.analisa);
@@ -381,24 +383,30 @@ function drawAreaRow(doc, area, index, y) {
   });
 
   const rowH = Math.max(fotoH, ukuranH, analisaH, ketH) + 10;
-  const maxFresh = maxContentHeightFreshPage() - 10;
+  const maxFresh = maxContentHeightFreshPage() - 10 - reserveBottom;
 
-  if (rowH <= maxFresh) {
-    // Muat di 1 halaman (current atau fresh) -> jalur normal, aman.
+  const bottomLimit = PAGE_HEIGHT - PAGE_MARGIN - reserveBottom;
+  const remainingOnCurrentPage = bottomLimit - y;
+
+  if (rowH <= remainingOnCurrentPage) {
+    // Muat di sisa halaman saat ini -> jalur normal, aman.
     return drawAreaRowSingle(doc, area, index, y, rowH);
   }
 
-  // Row lebih tinggi dari 1 halaman penuh -> WAJIB di-split.
-  // NOTE: split ini nge-handle kasus fotonya kebanyakan (kasus paling umum).
-  // Kalau suatu saat teks UKURAN atau ANALISA sendirian aja udah lebih
-  // tinggi dari 1 halaman (jarang, tapi mungkin), itu belum ke-cover di sini
-  // -> perlu split terpisah kalau kejadian, bilang aja nanti.
-  return drawAreaRowSplit(doc, area, index, y, {
-    ukuranH,
-    analisaH,
-    ketH,
-    maxFresh,
-  });
+  // Tidak muat di sisa halaman saat ini -> masuk mode split (otomatis akan mengisi sisa kertas dulu jika muat)
+  return drawAreaRowSplit(
+    doc,
+    area,
+    index,
+    y,
+    {
+      ukuranH,
+      analisaH,
+      ketH,
+      maxFresh,
+    },
+    reserveBottom,
+  );
 }
 
 // ==========================================
@@ -408,7 +416,7 @@ function drawAreaRow(doc, area, index, y) {
 function drawAreaRowSingle(doc, area, index, y, rowH) {
   const { x0, x1, x2, x3, x4, xEnd } = colX();
 
-  y = ensureSpace(doc, y, rowH + 40, (d, ny) => drawTableHeader(d, ny));
+  y = ensureSpace(doc, y, rowH, (d, ny) => drawTableHeader(d, ny));
 
   const originalBottomMargin = doc.page.margins.bottom;
   doc.page.margins.bottom = -9999;
@@ -457,16 +465,16 @@ function drawAreaRowSingle(doc, area, index, y, rowH) {
 // ==========================================
 // Jalur split: row lebih tinggi dari 1 halaman -> foto dipecah per chunk
 // ==========================================
-function maxContentHeightContinuationPage() {
+function maxContentHeightContinuationPage(reserveBottom = 0) {
   // Halaman lanjutan gak ada pita header pink, jadi ruangnya lebih lega
   // dibanding halaman pertama yang harus nyisain tempat buat header.
-  return PAGE_HEIGHT - PAGE_MARGIN * 2;
+  return PAGE_HEIGHT - PAGE_MARGIN * 2 - reserveBottom;
 }
 
-function drawAreaRowSplit(doc, area, index, y, heights) {
+function drawAreaRowSplit(doc, area, index, y, heights, reserveBottom = 0) {
   const { x0, x1, x2, x3, x4, xEnd } = colX();
   const photos = getPhotoList(area);
-  const bottomLimit = PAGE_HEIGHT - PAGE_MARGIN;
+  const bottomLimit = PAGE_HEIGHT - PAGE_MARGIN - reserveBottom;
 
   // Ruang yang MASIH ADA di halaman sekarang (y ini posisi setelah header
   // yang udah kepasang duluan sama caller / streamSurveyPdf).
@@ -491,12 +499,12 @@ function drawAreaRowSplit(doc, area, index, y, heights) {
   const needNewPage = remainingOnCurrentPage < minFirstChunkH;
 
   if (needNewPage) {
-    doc.addPage({ size: "A4", layout: "landscape", margin: PAGE_MARGIN });
+    doc.addPage({ size: "A4", layout: "portrait", margin: PAGE_MARGIN });
     y = drawTableHeader(doc, PAGE_MARGIN);
   }
 
   const maxFreshFirst = needNewPage ? heights.maxFresh : remainingOnCurrentPage;
-  const maxFreshCont = maxContentHeightContinuationPage() - 10;
+  const maxFreshCont = maxContentHeightContinuationPage(reserveBottom) - 10;
 
   const capacityFirstChunk = computePhotoCapacityPerChunk(maxFreshFirst);
   const capacityContChunk = computePhotoCapacityPerChunk(maxFreshCont);
@@ -577,7 +585,7 @@ function drawAreaRowSplit(doc, area, index, y, heights) {
     firstChunk = false;
 
     if (photoIdx < photos.length) {
-      doc.addPage({ size: "A4", layout: "landscape", margin: PAGE_MARGIN });
+      doc.addPage({ size: "A4", layout: "portrait", margin: PAGE_MARGIN });
       y = PAGE_MARGIN; // lanjutan: tanpa header
     }
   }
@@ -623,7 +631,7 @@ function drawMetaInfo(doc, survey, y) {
 function streamSurveyPdf(survey, outStream) {
   const doc = new PDFDocument({
     size: "A4",
-    layout: "landscape",
+    layout: "portrait",
     margin: PAGE_MARGIN,
     bufferPages: true,
   });
@@ -650,7 +658,8 @@ function streamSurveyPdf(survey, outStream) {
   y = drawTableHeader(doc, y);
 
   (survey.areas || []).forEach((area, i) => {
-    y = drawAreaRow(doc, area, i, y);
+    const isLast = i === (survey.areas || []).length - 1;
+    y = drawAreaRow(doc, area, i, y, isLast ? 90 : 0);
   });
 
   y = ensureSpace(doc, y, 90, (d, ny) => ny);
