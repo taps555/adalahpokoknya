@@ -159,6 +159,15 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
     );
 
+    const parentRapSum = {};
+    rabItems.forEach((it) => {
+      const pId = it.bvItem?.parentBvItemId;
+      if (pId) {
+        parentRapSum[pId] =
+          (parentRapSum[pId] || 0) + Number(it.rapTotalPrice || 0);
+      }
+    });
+
     const totalContract = rabItems.reduce((sum, it) => {
       const hasChildren = parentIds.has(it.bvItem?.id);
       if (hasChildren) return sum;
@@ -187,9 +196,13 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       const isChild = !!it.bvItem?.parentBvItemId;
       const hasChildren = parentIds.has(it.bvItem?.id);
 
+      const actualRapTotal = hasChildren
+        ? parentRapSum[it.bvItem?.id] || 0
+        : Number(it.rapTotalPrice);
+
       const weight =
         !hasChildren && totalContract > 0
-          ? (Number(it.rapTotalPrice) / totalContract) * 100
+          ? (actualRapTotal / totalContract) * 100
           : 0;
 
       const weeklyWeight = {};
@@ -207,7 +220,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         name: it.name,
         paymentUnit: it.paymentUnit,
         volume: it.volume,
-        rapTotalPrice: it.rapTotalPrice,
+        rapTotalPrice: actualRapTotal,
         satuanHarga: it.rapUnitPrice,
         weight,
 

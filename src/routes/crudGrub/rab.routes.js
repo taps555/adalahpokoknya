@@ -8,13 +8,6 @@ const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
-router.post("/projects/:projectId/rab-items", async (req, res) => {
-  return res.status(400).json({
-    error:
-      "RAB item hanya bisa dibuat lewat BV. Gunakan POST /bv-items/:id/link-to-rab.",
-  });
-});
-
 router.get("/projects/:projectId/rab-items", async (req, res) => {
   try {
     const { projectId } = req.params;

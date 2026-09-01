@@ -497,19 +497,24 @@ model ComplaintItem {
   category           ComplaintCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   order              Int
   defectList         String
+  
+  // Field untuk nanti (sudah aman karena opsional/default)
   repairDate         DateTime?
   status             Boolean           @default(false)
   repairDefectReport String?
 
-  photos ComplaintPhoto[]
+  photos             ComplaintPhoto[]
 }
 
 model ComplaintPhoto {
-  id     String        @id @default(cuid())
-  itemId String
-  item   ComplaintItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  url    String
-  order  Int
+  id      String        @id @default(cuid())
+  itemId  String
+  item    ComplaintItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  url     String
+  order   Int
+  
+  // TAMBAHAN BARU: Penanda foto
+  type    String        @default("BEFORE") // Isinya bisa "BEFORE" atau "AFTER"
 }
 
 // Tambahkan di dalam model Project

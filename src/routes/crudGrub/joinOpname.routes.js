@@ -33,7 +33,7 @@ const upload = multer({ storage: storage });
 
 router.put(
   "/rab-items/:id/progress",
-  upload.array("foto", 50), // Bat maksimal 5 foto (sesuaikan kebutuhan)
+  upload.array("foto", 50),
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -50,18 +50,31 @@ router.put(
         return res.status(404).json({ error: "Item RAB tidak ditemukan." });
       }
 
-      // Tangkap array URL foto jika ada file yang diunggah
-      const photoUrls =
+      // Foto baru yang barusan diupload
+      const newPhotoUrls =
         req.files && req.files.length > 0
           ? req.files.map((file) => `/uploads/progress/${file.filename}`)
-          : undefined;
+          : [];
 
       const normalizedDate = new Date(date);
       normalizedDate.setUTCHours(0, 0, 0, 0);
 
+      // Ambil dulu record existing di tanggal ini (kalau ada)
+      const existingProgress = await prisma.dailyProgress.findUnique({
+        where: {
+          rabItemId_date: { rabItemId: id, date: normalizedDate },
+        },
+      });
+
+      // Gabung foto lama + foto baru
+      const mergedPhotoUrls = [
+        ...(existingProgress?.photoUrls || []),
+        ...newPhotoUrls,
+      ];
+
       const updateData = { progressPercent: Number(progressPercent) };
-      if (photoUrls && photoUrls.length > 0) {
-        updateData.photoUrls = photoUrls; // Ubah dari photoUrl menjadi photoUrls
+      if (mergedPhotoUrls.length > 0) {
+        updateData.photoUrls = mergedPhotoUrls;
       }
 
       const createData = {
@@ -69,8 +82,8 @@ router.put(
         date: normalizedDate,
         progressPercent: Number(progressPercent),
       };
-      if (photoUrls && photoUrls.length > 0) {
-        createData.photoUrls = photoUrls;
+      if (mergedPhotoUrls.length > 0) {
+        createData.photoUrls = mergedPhotoUrls;
       }
 
       const progress = await prisma.dailyProgress.upsert({
@@ -93,7 +106,6 @@ router.put(
     }
   },
 );
-
 module.exports = router;
 
 /** GET /projects/:projectId/join-opname — breakdown progress harian per item */
@@ -172,10 +184,19 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
     );
 
+    const parentRapSum = {};
+    rabItems.forEach((it) => {
+      const pId = it.bvItem?.parentBvItemId;
+      if (pId) {
+        parentRapSum[pId] =
+          (parentRapSum[pId] || 0) + Number(it.rapTotalPrice || 0);
+      }
+    });
+
     const totalContract = rabItems.reduce((sum, it) => {
       const hasChildren = parentIds.has(it.bvItem?.id);
       if (hasChildren) return sum;
-      return sum + Number(it.rabTotalPrice);
+      return sum + Number(it.rapTotalPrice);
     }, 0);
 
     // total hari = maxWeek dari TimeSchedule x 7
@@ -206,18 +227,22 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
 
     const items = rabItems.map((it) => {
       const hasChildren = parentIds.has(it.bvItem?.id);
+
+      const actualRapTotal = hasChildren
+        ? parentRapSum[it.bvItem?.id] || 0
+        : Number(it.rapTotalPrice);
+
       const weight =
         !hasChildren && totalContract > 0
-          ? (Number(it.rabTotalPrice) / totalContract) * 100
+          ? (actualRapTotal / totalContract) * 100
           : 0;
 
-      // [UPDATE 1]: Ubah Map agar menyimpan object (percent & photoUrl)
       const progressByDate = new Map(
         (it.dailyProgress || []).map((p) => [
           new Date(p.date).toISOString().slice(0, 10),
           {
             percent: Number(p.progressPercent),
-            photoUrl: p.photoUrl || null,
+            photoUrls: p.photoUrls || [],
           },
         ]),
       );
@@ -226,17 +251,16 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       const dailyBreakdown = days.map((day) => {
         const key = day.date.toISOString().slice(0, 10);
 
-        // [UPDATE 2]: Ekstrak percent dan photoUrl dari pData
         const pData = hasChildren ? null : progressByDate.get(key);
         const progress = pData ? pData.percent : 0;
-        const photoUrl = pData ? pData.photoUrl : null;
+        const photoUrls = pData ? pData.photoUrls : [];
 
         sumProgress += progress;
         return {
           dayNumber: day.dayNumber,
           date: day.date,
           progress,
-          photoUrl, // [UPDATE 3]: Kirim photoUrl ke Frontend
+          photoUrls,
           bobot: weight * (progress / 100),
           volume: (progress / 100) * Number(it.volume),
         };
@@ -249,7 +273,8 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         name: it.name,
         paymentUnit: it.paymentUnit,
         volume: it.volume,
-        rabTotalPrice: it.rabTotalPrice,
+        rapTotalPrice: actualRapTotal,
+        satuanHarga: it.rapUnitPrice,
         weight,
         groupId: it.groupId,
         groupName: it.groupName,

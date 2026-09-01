@@ -1,13 +1,13 @@
 "use strict";
 const express = require("express");
 const router = express.Router();
-const prisma = require("../../lib/prisma"); // Pastikan letak path folder prisma Anda benar
+const prisma = require("../../lib/prisma");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { streamComplaintPdf } = require("../exportToFile/complainView.routes");
 
-const MAX_PHOTOS_PER_ITEM = 20;
+const MAX_PHOTOS_PER_TYPE = 20;
 
 // ==========================================
 // KONFIGURASI MULTER UNTUK FOTO COMPLAINT
@@ -25,9 +25,7 @@ const complaintStorage = multer.diskStorage({
     cb(null, "complaint-" + uniqueSuffix + path.extname(file.originalname));
   },
 });
-// Foto per ITEM (baris defect), bukan per kategori.
-// Frontend hitung itemIndex GLOBAL (flat, lintas kategori), bukan per-kategori.
-// Pola field: `photo_{itemGlobalIndex}_{photoIndex}`, maks 20 foto per item.
+
 const uploadComplaint = multer({ storage: complaintStorage });
 
 // ==========================================
@@ -44,9 +42,6 @@ function deletePhotoFiles(photoUrls) {
   }
 }
 
-// Ratain semua item dari semua kategori jadi 1 array urut,
-// biar dapet index global yang match sama fieldname `photo_{itemGlobalIndex}_{photoIndex}`
-// yang dikirim frontend.
 function flattenItemsWithGlobalIndex(categories) {
   const flat = [];
   (categories || []).forEach((category, categoryIndex) => {
@@ -102,23 +97,29 @@ router.post(
 
       const flatItems = flattenItemsWithGlobalIndex(categories);
 
-      // Validasi jumlah foto per item SEBELUM proses simpan apapun
+      // Validasi jumlah foto before & after per item
+      // Validasi jumlah foto before & after per item
       for (const {
         item,
         globalIndex,
         categoryIndex,
         itemIndexInCategory,
       } of flatItems) {
-        const count = req.files.filter((f) =>
-          f.fieldname.startsWith(`photo_${globalIndex}_`),
+        const countBefore = req.files.filter((f) =>
+          f.fieldname.startsWith(`photoBefore_${globalIndex}_`),
         ).length;
-        if (count > MAX_PHOTOS_PER_ITEM) {
+        const countAfter = req.files.filter((f) =>
+          f.fieldname.startsWith(`photoAfter_${globalIndex}_`),
+        ).length;
+
+        if (
+          countBefore > MAX_PHOTOS_PER_TYPE ||
+          countAfter > MAX_PHOTOS_PER_TYPE
+        ) {
           return res.status(400).json({
             error: `Kategori ke-${categoryIndex + 1} item ke-${
               itemIndexInCategory + 1
-            } (${
-              item.defectList || "-"
-            }) punya ${count} foto, maksimal ${MAX_PHOTOS_PER_ITEM} foto per item.`,
+            } (${item.defectList || "-"}) melebihi batas maksimal ${MAX_PHOTOS_PER_TYPE} foto per tipe (before/after).`,
           });
         }
       }
@@ -134,24 +135,47 @@ router.post(
               );
               const globalIndex = flatEntry.globalIndex;
 
-              const itemPhotoFiles = req.files
-                .filter((f) => f.fieldname.startsWith(`photo_${globalIndex}_`))
-                .sort((a, b) => {
-                  const orderA = Number(a.fieldname.split("_")[2] || 0);
-                  const orderB = Number(b.fieldname.split("_")[2] || 0);
-                  return orderA - orderB;
-                });
+              // 1. Proses Foto Before
+              const itemPhotoBeforeFiles = req.files
+                .filter((f) =>
+                  f.fieldname.startsWith(`photoBefore_${globalIndex}_`),
+                )
+                .sort(
+                  (a, b) =>
+                    Number(a.fieldname.split("_")[2] || 0) -
+                    Number(b.fieldname.split("_")[2] || 0),
+                )
+                .map((f) => ({
+                  url: `/uploads/complaints/${f.filename}`,
+                  type: "BEFORE",
+                }));
 
-              const photosToCreate = itemPhotoFiles.map((f, i) => ({
-                url: `/uploads/complaints/${f.filename}`,
-                order: i,
-              }));
+              // 2. Proses Foto After
+              const itemPhotoAfterFiles = req.files
+                .filter((f) =>
+                  f.fieldname.startsWith(`photoAfter_${globalIndex}_`),
+                )
+                .sort(
+                  (a, b) =>
+                    Number(a.fieldname.split("_")[2] || 0) -
+                    Number(b.fieldname.split("_")[2] || 0),
+                )
+                .map((f) => ({
+                  url: `/uploads/complaints/${f.filename}`,
+                  type: "AFTER",
+                }));
+
+              // Gabungkan dan berikan urutan (order)
+              const photosToCreate = [
+                ...itemPhotoBeforeFiles,
+                ...itemPhotoAfterFiles,
+              ].map((p, i) => ({ url: p.url, type: p.type, order: i }));
 
               return {
                 order: itemIndexInCategory,
                 defectList: item.defectList,
                 repairDate: item.repairDate ? new Date(item.repairDate) : null,
-                status: !!item.status,
+                status: !!item.status, // Boolean
                 repairDefectReport: item.repairDefectReport || null,
                 photos: { create: photosToCreate },
               };
@@ -237,7 +261,7 @@ router.get("/projects/:projectId/complaints", async (req, res) => {
 });
 
 // ==========================================
-// GET: DETAIL 1 COMPLAINT (buat edit form / view)
+// GET: DETAIL 1 COMPLAINT
 // ==========================================
 router.get("/complaints/:id", async (req, res) => {
   try {
@@ -271,11 +295,7 @@ router.get("/complaints/:id", async (req, res) => {
 });
 
 // ==========================================
-// PUT: UPDATE COMPLAINT REPORT (replace categories lama)
-// Frontend kirim tiap item existing dengan field `existingPhotoUrls`
-// (array url foto lama yg TETAP dipertahankan). Foto baru tetap lewat
-// field `photo_{itemGlobalIndex}_{photoIndex}`. Foto lama yg tidak
-// dikirim ulang di existingPhotoUrls akan dihapus dari DB + disk.
+// PUT: UPDATE COMPLAINT REPORT
 // ==========================================
 router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
   try {
@@ -288,7 +308,7 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
     }
 
     const parsedData = JSON.parse(req.body.complaintData);
-    const { timeScheduleId, categories } = parsedData;
+    const { categories } = parsedData;
 
     const existingComplaint = await prisma.complaintReport.findUnique({
       where: { id },
@@ -303,38 +323,55 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
 
     const flatItems = flattenItemsWithGlobalIndex(categories);
 
-    // Validasi jumlah foto per item (foto lama yg dipertahankan + foto baru)
+    // Validasi jumlah foto before & after per item
+    // Validasi jumlah foto before & after per item
+    // Validasi jumlah foto before & after per item
+    // Validasi jumlah foto before & after per item
     for (const {
       item,
       globalIndex,
       categoryIndex,
       itemIndexInCategory,
     } of flatItems) {
-      const newCount = req.files.filter((f) =>
-        f.fieldname.startsWith(`photo_${globalIndex}_`),
+      const newCountBefore = req.files.filter((f) =>
+        f.fieldname.startsWith(`photoBefore_${globalIndex}_`),
       ).length;
-      const keepCount = (item.existingPhotoUrls || []).length;
-      if (newCount + keepCount > MAX_PHOTOS_PER_ITEM) {
+      const keepCountBefore = (item.existingPhotoBeforeUrls || []).length;
+
+      const newCountAfter = req.files.filter((f) =>
+        f.fieldname.startsWith(`photoAfter_${globalIndex}_`),
+      ).length;
+      const keepCountAfter = (item.existingPhotoAfterUrls || []).length;
+
+      if (
+        newCountBefore + keepCountBefore > MAX_PHOTOS_PER_TYPE ||
+        newCountAfter + keepCountAfter > MAX_PHOTOS_PER_TYPE
+      ) {
         return res.status(400).json({
-          error: `Kategori ke-${categoryIndex + 1} item ke-${
-            itemIndexInCategory + 1
-          } (${
+          error: `Kategori ke-${categoryIndex + 1} item ke-${itemIndexInCategory + 1} (${
             item.defectList || "-"
-          }) punya ${newCount + keepCount} foto, maksimal ${MAX_PHOTOS_PER_ITEM} foto per item.`,
+          }) melebihi batas maksimal ${MAX_PHOTOS_PER_TYPE} foto per tipe (before/after).`,
         });
       }
     }
 
-    // Kumpulkan url foto lama yg TIDAK dipertahankan (buat dihapus dari disk)
+    // Kumpulkan foto yang tidak dikirim lagi (untuk dihapus dari disk)
     const urlsToDelete = [];
     for (const oldCategory of existingComplaint.categories) {
       for (const oldItem of oldCategory.items) {
         const matchingNewItem = flatItems.find(
           (f) => f.item.id && f.item.id === oldItem.id,
         );
-        const keepUrls = matchingNewItem?.item.existingPhotoUrls || [];
+        const keepUrlsBefore =
+          matchingNewItem?.item.existingPhotoBeforeUrls || [];
+        const keepUrlsAfter =
+          matchingNewItem?.item.existingPhotoAfterUrls || [];
+
+        // Gabungkan semua URL yang ingin dipertahankan untuk dicek
+        const allKeepUrls = [...keepUrlsBefore, ...keepUrlsAfter];
+
         for (const oldPhoto of oldItem.photos) {
-          if (!keepUrls.includes(oldPhoto.url)) {
+          if (!allKeepUrls.includes(oldPhoto.url)) {
             urlsToDelete.push(oldPhoto.url);
           }
         }
@@ -352,28 +389,63 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
             );
             const globalIndex = flatEntry.globalIndex;
 
-            const newItemPhotoFiles = req.files
-              .filter((f) => f.fieldname.startsWith(`photo_${globalIndex}_`))
-              .sort((a, b) => {
-                const orderA = Number(a.fieldname.split("_")[2] || 0);
-                const orderB = Number(b.fieldname.split("_")[2] || 0);
-                return orderA - orderB;
-              })
-              .map((f) => ({ url: `/uploads/complaints/${f.filename}` }));
+            // 1. Proses Foto Before (File baru & yang dipertahankan)
+            const newItemPhotoBeforeFiles = req.files
+              .filter((f) =>
+                f.fieldname.startsWith(`photoBefore_${globalIndex}_`),
+              )
+              .sort(
+                (a, b) =>
+                  Number(a.fieldname.split("_")[2] || 0) -
+                  Number(b.fieldname.split("_")[2] || 0),
+              )
+              .map((f) => ({
+                url: `/uploads/complaints/${f.filename}`,
+                type: "BEFORE",
+              }));
 
-            const keptPhotos = (item.existingPhotoUrls || []).map((url) => ({
-              url,
-            }));
-
-            const photosToCreate = [...keptPhotos, ...newItemPhotoFiles].map(
-              (p, i) => ({ url: p.url, order: i }),
+            const keptPhotosBefore = (item.existingPhotoBeforeUrls || []).map(
+              (url) => ({
+                url,
+                type: "BEFORE",
+              }),
             );
+
+            // 2. Proses Foto After (File baru & yang dipertahankan)
+            const newItemPhotoAfterFiles = req.files
+              .filter((f) =>
+                f.fieldname.startsWith(`photoAfter_${globalIndex}_`),
+              )
+              .sort(
+                (a, b) =>
+                  Number(a.fieldname.split("_")[2] || 0) -
+                  Number(b.fieldname.split("_")[2] || 0),
+              )
+              .map((f) => ({
+                url: `/uploads/complaints/${f.filename}`,
+                type: "AFTER",
+              }));
+
+            const keptPhotosAfter = (item.existingPhotoAfterUrls || []).map(
+              (url) => ({
+                url,
+                type: "AFTER",
+              }),
+            );
+
+            // Gabungkan semua foto dan setel order
+            const photosToCreate = [
+              ...keptPhotosBefore,
+              ...newItemPhotoBeforeFiles,
+              ...keptPhotosAfter,
+              ...newItemPhotoAfterFiles,
+            ].map((p, i) => ({ url: p.url, type: p.type, order: i }));
 
             return {
               order: itemIndexInCategory,
               defectList: item.defectList,
               repairDate: item.repairDate ? new Date(item.repairDate) : null,
-              status: !!item.status,
+              status: !!item.status, // Boolean
               repairDefectReport: item.repairDefectReport || null,
               photos: { create: photosToCreate } || null,
             };
@@ -388,8 +460,6 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
       },
     );
 
-    // Hapus semua kategori lama (cascade hapus items & photos di DB),
-    // lalu buat ulang kategori baru — dalam 1 transaksi biar atomic.
     const updatedComplaint = await prisma.$transaction(async (tx) => {
       await tx.complaintCategory.deleteMany({
         where: { complaintReportId: id },
@@ -415,8 +485,6 @@ router.put("/complaints/:id", uploadComplaint.any(), async (req, res) => {
       });
     });
 
-    // Hapus file fisik SETELAH transaksi DB sukses, biar gak orphan
-    // kalau ternyata transaksinya gagal di tengah jalan.
     deletePhotoFiles(urlsToDelete);
 
     res.json({
@@ -454,7 +522,6 @@ router.delete("/complaints/:id", async (req, res) => {
       category.items.flatMap((item) => item.photos.map((p) => p.url)),
     );
 
-    // categories/items/photos ikut kehapus lewat cascade delete di schema Prisma
     await prisma.complaintReport.delete({ where: { id } });
 
     deletePhotoFiles(urlsToDelete);
@@ -469,6 +536,9 @@ router.delete("/complaints/:id", async (req, res) => {
   }
 });
 
+// ==========================================
+// FUNGSI PDF (GET & STREAM)
+// ==========================================
 async function getComplaintForPdf(id) {
   const complaint = await prisma.complaintReport.findUnique({
     where: { id },
