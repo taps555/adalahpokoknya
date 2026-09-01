@@ -881,6 +881,156 @@ router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
   }
 });
 
+router.post("/bv-items-bulk/sync", async (req, res) => {
+  try {
+    const { itemIds } = req.body;
+
+    if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Tidak ada item yang dipilih untuk disinkronkan." });
+    }
+
+    const results = await prisma.$transaction(async (tx) => {
+      let syncedCount = 0;
+
+      // Ambil hanya item BV yang sudah pernah di-link
+      const bvItems = await tx.bvItem.findMany({
+        where: {
+          id: { in: itemIds },
+          linkedRabItemId: { not: null },
+        },
+        include: { linkedRabItem: true },
+        orderBy: { createdAt: "asc" },
+      });
+
+      for (const bvItem of bvItems) {
+        const vol = Number(bvItem.totalVolume) || 0;
+        let rapUnitPrice = Number(bvItem.linkedRabItem.rapUnitPrice || 0);
+        let overheadPct = Number(
+          bvItem.linkedRabItem.overheadPercent ||
+            bvItem.linkedRabItem.overhead ||
+            0,
+        );
+        let componentUpdate;
+
+        // Proses AHSP jika item menggunakan master
+        if (bvItem.sourceJobTypeId) {
+          const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
+          if (calc) {
+            overheadPct = calc.jobType.overhead
+              ? Number(calc.jobType.overhead)
+              : overheadPct;
+
+            const componentRows = Object.entries(calc.breakdown).flatMap(
+              ([section, items]) =>
+                items.map((item) => ({
+                  name: item.name,
+                  unit: item.unit,
+                  section,
+                  coefficient: item.coefficient,
+                  unitPrice: item.unitPrice,
+                  lineTotal: item.lineTotal,
+                })),
+            );
+
+            rapUnitPrice = componentRows.reduce(
+              (sum, comp) => sum + Number(comp.lineTotal),
+              0,
+            );
+            componentUpdate = { deleteMany: {}, create: componentRows };
+          }
+        }
+
+        // Kalkulasi Total
+        const nilaiOverhead = rapUnitPrice * (overheadPct / 100);
+        const rabUnitPrice = rapUnitPrice + nilaiOverhead;
+
+        // Reposisi Parent/Child jika diperlukan
+        if (bvItem.parentBvItemId) {
+          const parentBv = await tx.bvItem.findUnique({
+            where: { id: bvItem.parentBvItemId },
+            select: { linkedRabItemId: true },
+          });
+
+          if (parentBv?.linkedRabItemId) {
+            const parentRab = await tx.rabItem.findUnique({
+              where: { id: parentBv.linkedRabItemId },
+              select: { order: true, groupId: true, projectId: true },
+            });
+
+            if (parentRab) {
+              const correctOrder = parentRab.order + 1;
+              const currentOrder = bvItem.linkedRabItem.order;
+
+              if (currentOrder !== correctOrder) {
+                await tx.rabItem.update({
+                  where: { id: bvItem.linkedRabItemId },
+                  data: { order: -1 },
+                });
+
+                if (currentOrder < correctOrder) {
+                  await tx.rabItem.updateMany({
+                    where: {
+                      projectId: parentRab.projectId,
+                      groupId: parentRab.groupId,
+                      order: { gt: currentOrder, lte: correctOrder },
+                    },
+                    data: { order: { decrement: 1 } },
+                  });
+                } else {
+                  await tx.rabItem.updateMany({
+                    where: {
+                      projectId: parentRab.projectId,
+                      groupId: parentRab.groupId,
+                      order: { gte: correctOrder, lt: currentOrder },
+                    },
+                    data: { order: { increment: 1 } },
+                  });
+                }
+
+                await tx.rabItem.update({
+                  where: { id: bvItem.linkedRabItemId },
+                  data: { order: correctOrder },
+                });
+              }
+            }
+          }
+        }
+
+        // Eksekusi Update ke Database
+        await tx.rabItem.update({
+          where: { id: bvItem.linkedRabItemId },
+          data: {
+            name: bvItem.name,
+            paymentUnit: bvItem.paymentUnit || "-",
+            overheadPercent: overheadPct,
+            volume: vol,
+            rapUnitPrice: rapUnitPrice,
+            rapTotalPrice: rapUnitPrice * vol,
+            rabUnitPrice: rabUnitPrice,
+            rabTotalPrice: rabUnitPrice * vol,
+            ...(componentUpdate ? { components: componentUpdate } : {}),
+          },
+        });
+
+        syncedCount++;
+      }
+
+      return syncedCount;
+    });
+
+    res.json({
+      message: `Sukses! ${results} item BV berhasil disinkronkan kembali ke RAB.`,
+    });
+  } catch (error) {
+    console.error("Error Bulk Sync BV to RAB:", error);
+    res.status(500).json({
+      error: error.message || "Gagal melakukan sinkronisasi massal.",
+    });
+  }
+});
+
 router.post("/bv-items/:id/sync", async (req, res) => {
   try {
     const { id } = req.params;
@@ -888,6 +1038,7 @@ router.post("/bv-items/:id/sync", async (req, res) => {
       where: { id },
       include: { linkedRabItem: true },
     });
+
     if (!bvItem)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
     if (!bvItem.linkedRabItem)
@@ -895,19 +1046,27 @@ router.post("/bv-items/:id/sync", async (req, res) => {
         .status(400)
         .json({ error: "Item BV ini belum di-link ke RAB manapun." });
 
-    const vol = Number(bvItem.totalVolume);
-    let rapUnitPrice = Number(bvItem.linkedRabItem.rapUnitPrice);
-    let overheadPct = bvItem.linkedRabItem.overhead;
+    const vol = Number(bvItem.totalVolume) || 0;
+
+    // Ambil nilai bawaan dari RAB saat ini
+    let rapUnitPrice = Number(bvItem.linkedRabItem.rapUnitPrice || 0);
+    let overheadPct = Number(
+      bvItem.linkedRabItem.overheadPercent ||
+        bvItem.linkedRabItem.overhead ||
+        0,
+    );
     let componentUpdate;
 
+    // 🔥 PERBAIKAN AHSP: Hitung Modal Murni dari Komponen
     if (bvItem.sourceJobTypeId) {
       const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
       if (calc) {
-        rapUnitPrice = calc.total;
-        overheadPct = calc.jobType.overhead;
-        componentUpdate = {
-          deleteMany: {},
-          create: Object.entries(calc.breakdown).flatMap(([section, items]) =>
+        overheadPct = calc.jobType.overhead
+          ? Number(calc.jobType.overhead)
+          : overheadPct;
+
+        const componentRows = Object.entries(calc.breakdown).flatMap(
+          ([section, items]) =>
             items.map((item) => ({
               name: item.name,
               unit: item.unit,
@@ -916,15 +1075,27 @@ router.post("/bv-items/:id/sync", async (req, res) => {
               unitPrice: item.unitPrice,
               lineTotal: item.lineTotal,
             })),
-          ),
+        );
+
+        // rapUnitPrice (Modal) hanya dihitung dari jumlah total komponen bahan/alat/upah
+        rapUnitPrice = componentRows.reduce(
+          (sum, comp) => sum + Number(comp.lineTotal),
+          0,
+        );
+
+        componentUpdate = {
+          deleteMany: {},
+          create: componentRows,
         };
       }
     }
 
-    const rabUnitPrice = Number(bvItem.linkedRabItem.rabUnitPrice);
+    // 🔥 PERBAIKAN HARGA JUAL: Kalkulasi ulang RAB
+    const nilaiOverhead = rapUnitPrice * (overheadPct / 100);
+    const rabUnitPrice = rapUnitPrice + nilaiOverhead;
 
     const updated = await prisma.$transaction(async (tx) => {
-      // reposisi order kalau item ini child dan posisinya sekarang salah
+      // Reposisi order kalau item ini child dan posisinya sekarang salah
       if (bvItem.parentBvItemId) {
         const parentBv = await tx.bvItem.findUnique({
           where: { id: bvItem.parentBvItemId },
@@ -937,55 +1108,59 @@ router.post("/bv-items/:id/sync", async (req, res) => {
             select: { order: true, groupId: true, projectId: true },
           });
 
-          const correctOrder = parentRab.order + 1;
-          const currentOrder = bvItem.linkedRabItem.order;
+          if (parentRab) {
+            const correctOrder = parentRab.order + 1;
+            const currentOrder = bvItem.linkedRabItem.order;
 
-          if (currentOrder !== correctOrder) {
-            // lepas dulu slot lama biar ga tabrakan pas geser
-            await tx.rabItem.update({
-              where: { id: bvItem.linkedRabItemId },
-              data: { order: -1 },
-            });
-
-            if (currentOrder < correctOrder) {
-              // pindah maju: item di antara posisi lama & baru mundur 1
-              await tx.rabItem.updateMany({
-                where: {
-                  projectId: parentRab.projectId,
-                  groupId: parentRab.groupId,
-                  order: { gt: currentOrder, lte: correctOrder },
-                },
-                data: { order: { decrement: 1 } },
+            if (currentOrder !== correctOrder) {
+              // lepas dulu slot lama biar ga tabrakan pas geser
+              await tx.rabItem.update({
+                where: { id: bvItem.linkedRabItemId },
+                data: { order: -1 },
               });
-            } else {
-              // pindah mundur: item di antara posisi baru & lama maju 1
-              await tx.rabItem.updateMany({
-                where: {
-                  projectId: parentRab.projectId,
-                  groupId: parentRab.groupId,
-                  order: { gte: correctOrder, lt: currentOrder },
-                },
-                data: { order: { increment: 1 } },
+
+              if (currentOrder < correctOrder) {
+                // pindah maju: item di antara posisi lama & baru mundur 1
+                await tx.rabItem.updateMany({
+                  where: {
+                    projectId: parentRab.projectId,
+                    groupId: parentRab.groupId,
+                    order: { gt: currentOrder, lte: correctOrder },
+                  },
+                  data: { order: { decrement: 1 } },
+                });
+              } else {
+                // pindah mundur: item di antara posisi baru & lama maju 1
+                await tx.rabItem.updateMany({
+                  where: {
+                    projectId: parentRab.projectId,
+                    groupId: parentRab.groupId,
+                    order: { gte: correctOrder, lt: currentOrder },
+                  },
+                  data: { order: { increment: 1 } },
+                });
+              }
+
+              await tx.rabItem.update({
+                where: { id: bvItem.linkedRabItemId },
+                data: { order: correctOrder },
               });
             }
-
-            await tx.rabItem.update({
-              where: { id: bvItem.linkedRabItemId },
-              data: { order: correctOrder },
-            });
           }
         }
       }
 
+      // Update Data Utama RAB
       return tx.rabItem.update({
         where: { id: bvItem.linkedRabItemId },
         data: {
           name: bvItem.name,
-          paymentUnit: bvItem.paymentUnit,
-          overhead: overheadPct,
+          paymentUnit: bvItem.paymentUnit || "-",
+          overheadPercent: overheadPct, // <-- Pastikan pakai field overheadPercent
           volume: vol,
-          rapUnitPrice,
+          rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,
+          rabUnitPrice: rabUnitPrice,
           rabTotalPrice: rabUnitPrice * vol,
           ...(componentUpdate ? { components: componentUpdate } : {}),
         },
@@ -995,7 +1170,7 @@ router.post("/bv-items/:id/sync", async (req, res) => {
 
     res.json({
       message:
-        "RAB berhasil disinkronkan dengan BV terbaru (nama, satuan, RAP, volume, posisi)",
+        "RAB berhasil disinkronkan dengan BV terbaru (nama, satuan, RAP, RAB, volume, posisi)",
       data: updated,
     });
   } catch (error) {
