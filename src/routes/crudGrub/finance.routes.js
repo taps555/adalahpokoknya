@@ -17,16 +17,81 @@ router.get(
   // authorizeRoles("SUPER_ADMIN", "FINANCE", "PURCHASING", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
+      // 1. TARIK DATA DARI DATABASE BESERTA RELASINYA (SAMPAI KE NAMA TOKO)
       const requests = await prisma.materialRequest.findMany({
         include: {
           project: { select: { name: true, location: true } },
           items: {
             orderBy: { id: "asc" },
+            include: {
+              // Nyedot data PO Item untuk melihat barang ini dibeli di PO mana saja
+              poItems: {
+                include: {
+                  po: {
+                    include: {
+                      supplier: { select: { name: true } }, // Ambil nama tokonya!
+                    },
+                  },
+                },
+              },
+            },
           },
         },
         orderBy: { createdAt: "desc" },
       });
-      res.json(requests);
+
+      // 2. PROSES PEMBELAHAN ITEM (SPLIT BERDASARKAN TOKO)
+      const transformedRequests = requests.map((request) => {
+        let splitItems = []; // Array baru untuk menampung item yang sudah dipecah
+
+        request.items.forEach((item) => {
+          let totalPoQty = 0;
+
+          // SKENARIO A: Barang ini sudah pernah di-PO (Bisa dari 1 toko atau lebih)
+          if (item.poItems && item.poItems.length > 0) {
+            item.poItems.forEach((poItem) => {
+              // Asumsi field jumlah barang di PurchaseOrderItem Anda bernama 'qty'
+              const qtyDiToko = poItem.qty || 0;
+              totalPoQty += qtyDiToko;
+
+              splitItems.push({
+                ...item, // Copy sisa data asli (groupName, jobName, dll)
+                id: `${item.id}_${poItem.id}`, // Bikin ID unik
+                mrItemId: item.id, // ID asli RAB
+                estimatedVolume: qtyDiToko, // VOLUME DIPECAH SESUAI PESANAN TOKO
+                // TAMBAHAN DATA UNTUK ORANG LAPANGAN:
+                supplierName:
+                  poItem.po?.supplier?.name || "Toko Tidak Diketahui",
+                poNumber: poItem.po?.poNumber || "Draft PO",
+              });
+            });
+          }
+
+          // SKENARIO B: Hitung sisa volume yang BELUM di-PO
+          const sisaVolume = item.estimatedVolume - totalPoQty;
+
+          // Jika masih ada sisa (atau belum di-PO sama sekali), buatkan 1 baris khusus
+          if (sisaVolume > 0) {
+            splitItems.push({
+              ...item,
+              id: `${item.id}_sisa`,
+              mrItemId: item.id,
+              estimatedVolume: sisaVolume, // Sisa volume
+              supplierName: "⏳ Belum di-PO",
+              poNumber: "-",
+            });
+          }
+        });
+
+        // Kembalikan data request, tapi 'items'-nya pakai yang sudah kita pecah
+        return {
+          ...request,
+          items: splitItems,
+        };
+      });
+
+      // 3. KIRIM KE FRONTEND
+      res.json(transformedRequests);
     } catch (error) {
       console.error("Get Finance Data Error:", error);
       res
