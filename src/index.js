@@ -61,9 +61,9 @@ app.use("/api", require("./routes/crudGrub/survey.routes"));
 
 app.use("/api", require("./routes/crudGrub/complain.routes"));
 app.use("/api", require("./routes/crudGrub/bast.routes"));
-app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api", require("./routes/crudGrub/lapangan.routes"));
 app.use("/api", require("./routes/crudGrub/rab.routes"));
+app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 
 app.use((err, req, res, next) => {
