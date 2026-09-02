@@ -378,17 +378,31 @@ router.post("/po", verifyToken, async (req, res) => {
           taxNominal: Number(taxNominal || 0),
           grandTotal: Number(grandTotal || 0),
           items: {
-            create: items.map((item) => ({
-              materialRequestId: item.materialRequestId, // Relasi ke barang RAB
-              description: item.description,
-              description2: item.description2 || null,
-              qty: Number(item.qty),
-              unit: item.unit,
-              unitPrice: Number(item.unitPrice), // Harga Deal (Diskon)
-              disc1Percent: Number(item.disc1Percent || 0),
-              disc2Nominal: Number(item.disc2Nominal || 0),
-              total: Number(item.total),
-            })),
+            create: items.map((item) => {
+              // 🔥 JURUS PENCUCIAN ID:
+              // Kalau ID dari frontend kosong, string kosong, "null", atau "undefined", paksa jadi null beneran!
+              let mrId = item.materialRequestId;
+              if (
+                !mrId ||
+                mrId === "" ||
+                mrId === "null" ||
+                mrId === "undefined"
+              ) {
+                mrId = null;
+              }
+
+              return {
+                materialRequestId: mrId, // <-- Pakai ID yang sudah dicuci
+                description: item.description || "Tanpa Deskripsi",
+                description2: item.description2 || null,
+                qty: Number(item.qty || 0),
+                unit: item.unit || "-",
+                unitPrice: Number(item.unitPrice || 0),
+                disc1Percent: Number(item.disc1Percent || 0),
+                disc2Nominal: Number(item.disc2Nominal || 0),
+                total: Number(item.total || 0),
+              };
+            }),
           },
         },
         include: { items: true },

@@ -863,16 +863,78 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    const headers = await prisma.materialRequest.findMany({
-      where: { projectId },
-      include: { items: true },
+    // 1. TARIK DATA + JOIN KE PO & SUPPLIER
+    const requests = await prisma.materialRequest.findMany({
+      where: { projectId: projectId },
+      include: {
+        project: { select: { name: true, location: true } },
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            poItems: {
+              include: {
+                purchaseOrder: {
+                  include: { supplier: { select: { name: true } } },
+                },
+              },
+            },
+          },
+        },
+      },
       orderBy: { createdAt: "desc" },
     });
 
-    res.json(headers);
+    // 2. SIHIR PEMBELAH ITEM BERDASARKAN TOKO
+    const transformedRequests = requests.map((request) => {
+      let splitItems = [];
+
+      request.items.forEach((item) => {
+        let totalPoQty = 0;
+
+        if (item.poItems && item.poItems.length > 0) {
+          item.poItems.forEach((poItem) => {
+            const qtyDiToko = poItem.qty || 0;
+            totalPoQty += qtyDiToko;
+
+            splitItems.push({
+              ...item,
+              id: `${item.id}_${poItem.id}`, // ID unik untuk frontend
+              mrItemId: item.id, // ID asli untuk disave
+              estimatedVolume: qtyDiToko, // Volume sesuai pesanan toko
+              supplierName:
+                poItem.po?.supplier?.name ||
+                poItem.purchaseOrder?.supplier?.name ||
+                "Toko Tidak Diketahui",
+              poNumber:
+                poItem.po?.poNumber ||
+                poItem.purchaseOrder?.poNumber ||
+                "Draft PO",
+            });
+          });
+        }
+
+        // Sisa yang belum di-PO
+        const sisaVolume = item.estimatedVolume - totalPoQty;
+        if (sisaVolume > 0) {
+          splitItems.push({
+            ...item,
+            id: `${item.id}_sisa`,
+            mrItemId: item.id,
+            estimatedVolume: sisaVolume,
+            supplierName: "⏳ Belum di-PO", // INI YANG AKAN MUNCUL WARNA MERAH NANTI
+            poNumber: "-",
+          });
+        }
+      });
+
+      return { ...request, items: splitItems };
+    });
+
+    // 3. KIRIM DATA YANG SUDAH DIPECAH KE FRONTEND
+    res.json(transformedRequests);
   } catch (error) {
-    console.error("Error List MaterialRequest:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    console.error("Error Get Lapangan:", error);
+    res.status(500).json({ error: "Gagal mengambil data Lapangan." });
   }
 });
 
