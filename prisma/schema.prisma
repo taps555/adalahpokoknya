@@ -197,6 +197,10 @@ model Project {
   pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id])  // <-- TAMBAH
   pairedWith      Project? @relation("ProjectPair")  // <-- TAMBAH
 
+
+  // Relasi ke Purchase Order (Fase 2)
+  purchaseOrders  PurchaseOrder[]
+
   
 
   createdAt  DateTime @default(now())
@@ -613,9 +617,90 @@ model MaterialRequestItem {
   // -- KOLOM FINANCE (Untuk dikerjakan di Fase 2 nanti) --
   isCompleted     Boolean  @default(false) 
   orderedVolume   Float    @default(0)     
-  catatanFinance  String?  @db.Text        
+  catatanFinance  String?  @db.Text      
+  // Relasi ke barang di Surat PO (Fase 2)
+  poItems         PurchaseOrderItem[]  
   
   // -- KOLOM PELAKSANA (Untuk dikerjakan di Fase 2 nanti) --
   tanggalOnsite   DateTime? 
   updateLapangan  String?  @db.Text        
+}
+
+// ==========================================
+// FASE 2: MODUL PURCHASE ORDER (PO)
+// ==========================================
+
+// 1. MASTER DATA SUPPLIER (Untuk field "Nama Supplier", "Attn", "No. Telepon")
+model Supplier {
+  id          String          @id @default(uuid())
+  name        String          // Nama Supplier (Toko)
+  address     String?
+  phone       String?         // No. Telepon
+  contactName String?         // Attn (Orang yang dihubungi)
+  orders      PurchaseOrder[] 
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+// 2. KEPALA SURAT PO (Header & Footer form Anda)
+model PurchaseOrder {
+  id              String   @id @default(uuid())
+  poNumber        String   @unique // No. Transaksi (Contoh: PO/GLD/09/2026/014)
+  
+  // Header Info
+  supplierId      String
+  supplier        Supplier @relation(fields: [supplierId], references: [id])
+  attn            String?  // Attn
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id])
+  kategori        String?  // Kategori (Contoh: Gaji Tukang / Material)
+  tanggal         DateTime // Tanggal PO
+  deliveryDate    DateTime?// Delivery Date
+  perusahaan      String?  @default("PT DIVES JAYA PERKASA")
+  status          String   @default("Belum Approve") // Status PO
+
+  // Summary Totals (Kanan Bawah)
+  subTotal        Float    @default(0)
+  globalDiscount  Float    @default(0) // Discount (Nominal)
+  taxNominal      Float    @default(0) // PPh 1.75% / PPN (Nominal)
+  grandTotal      Float    @default(0) // Total Akhir
+
+  // Footer Info (Kiri Bawah & Kanan Bawah)
+  penerimaBarang  String?  // Penerima Barang
+  caraPembayaran  String?  // Cara Pembayaran
+  jadwalPenagihan String?  // Jadwal Penagihan
+  noTelepon       String?  // No. Telepon
+  kodePoReferensi String?  // Kode PO
+  keterangan      String?  // Keterangan
+
+  items           PurchaseOrderItem[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// 3. RINCIAN BARANG PO (Tabel bagian tengah form Anda)
+model PurchaseOrderItem {
+  id                String   @id @default(uuid())
+  
+  poId              String
+  purchaseOrder     PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  
+  // 👉 INI KUNCI OTOMATISASINYA: Menyambungkan barang PO ke barang RAB (PR)
+  materialRequestId String?
+  materialRequest   MaterialRequestItem? @relation(fields: [materialRequestId], references: [id])
+
+  // Data Tabel
+  code              String?  // Code
+  description       String   // Description (Nama Barang)
+  description2      String?  // Description 2 (Spesifikasi tambahan)
+  qty               Float    // Qty (Volume Beli)
+  unit              String   // Unit (Satuan)
+  unitPrice         Float    // Unit Price (Harga Deal per satuan)
+  disc1Percent      Float    @default(0) // Disc 1 %
+  disc2Nominal      Float    @default(0) // Disc 2 
+  total             Float    // Total (Subtotal baris ini)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
