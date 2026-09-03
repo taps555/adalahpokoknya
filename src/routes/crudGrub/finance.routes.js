@@ -50,16 +50,15 @@ router.get(
           // SKENARIO A: Barang ini sudah pernah di-PO (Bisa dari 1 toko atau lebih)
           if (item.poItems && item.poItems.length > 0) {
             item.poItems.forEach((poItem) => {
-              // Asumsi field jumlah barang di PurchaseOrderItem Anda bernama 'qty'
               const qtyDiToko = poItem.qty || 0;
               totalPoQty += qtyDiToko;
 
               splitItems.push({
-                ...item, // Copy sisa data asli (groupName, jobName, dll)
-                id: `${item.id}_${poItem.id}`, // Bikin ID unik
-                mrItemId: item.id, // ID asli RAB
-                estimatedVolume: qtyDiToko, // VOLUME DIPECAH SESUAI PESANAN TOKO
-                // TAMBAHAN DATA UNTUK ORANG LAPANGAN:
+                ...item,
+                id: `${item.id}_${poItem.id}`,
+                mrItemId: item.id,
+                estimatedVolume: qtyDiToko,
+                orderedVolume: qtyDiToko, // ⬅️ baru: baris ini udah full order, sisa jadi 0
                 supplierName:
                   poItem.po?.supplier?.name || "Toko Tidak Diketahui",
                 poNumber: poItem.po?.poNumber || "Draft PO",
@@ -67,16 +66,15 @@ router.get(
             });
           }
 
-          // SKENARIO B: Hitung sisa volume yang BELUM di-PO
           const sisaVolume = item.estimatedVolume - totalPoQty;
 
-          // Jika masih ada sisa (atau belum di-PO sama sekali), buatkan 1 baris khusus
           if (sisaVolume > 0) {
             splitItems.push({
               ...item,
               id: `${item.id}_sisa`,
               mrItemId: item.id,
-              estimatedVolume: sisaVolume, // Sisa volume
+              estimatedVolume: sisaVolume,
+              orderedVolume: 0, // ⬅️ baru: baris sisa belum ke-order sama sekali
               supplierName: "⏳ Belum di-PO",
               poNumber: "-",
             });

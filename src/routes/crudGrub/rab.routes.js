@@ -898,9 +898,10 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
 
             splitItems.push({
               ...item,
-              id: `${item.id}_${poItem.id}`, // ID unik untuk frontend
-              mrItemId: item.id, // ID asli untuk disave
-              estimatedVolume: qtyDiToko, // Volume sesuai pesanan toko
+              id: `${item.id}_${poItem.id}`,
+              mrItemId: item.id,
+              estimatedVolume: qtyDiToko,
+              orderedVolume: qtyDiToko, // ⬅️ baru
               supplierName:
                 poItem.po?.supplier?.name ||
                 poItem.purchaseOrder?.supplier?.name ||
@@ -913,7 +914,6 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
           });
         }
 
-        // Sisa yang belum di-PO
         const sisaVolume = item.estimatedVolume - totalPoQty;
         if (sisaVolume > 0) {
           splitItems.push({
@@ -921,7 +921,8 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
             id: `${item.id}_sisa`,
             mrItemId: item.id,
             estimatedVolume: sisaVolume,
-            supplierName: "⏳ Belum di-PO", // INI YANG AKAN MUNCUL WARNA MERAH NANTI
+            orderedVolume: 0, // ⬅️ baru
+            supplierName: "⏳ Belum di-PO",
             poNumber: "-",
           });
         }
