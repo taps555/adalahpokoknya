@@ -6,6 +6,9 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { streamComplaintPdf } = require("../exportToFile/complainView.routes");
+const {
+  streamComplaintPdff,
+} = require("../exportToFile/complainView(bast_2).routes");
 
 const MAX_PHOTOS_PER_TYPE = 20;
 
@@ -600,6 +603,74 @@ router.get("/complaints/:id/pdf/download", async (req, res) => {
     streamComplaintPdf(complaint, res);
   } catch (error) {
     console.error("Error Download Complaint PDF:", error);
+    res.status(500).json({ error: "Gagal membuat PDF complaint." });
+  }
+});
+
+// ==========================================
+// FUNGSI PDF COMPLAINT KE-2 (GET & STREAM)
+// ==========================================
+async function getComplaintForPdf2(id) {
+  const complaint = await prisma.complaintReport.findUnique({
+    where: { id },
+    include: {
+      project: true,
+      categories: {
+        orderBy: { order: "asc" },
+        include: {
+          items: {
+            orderBy: { order: "asc" },
+            include: { photos: { orderBy: { order: "asc" } } },
+          },
+        },
+      },
+    },
+  });
+  if (!complaint) return null;
+  complaint.periode = await computePeriode(complaint.project);
+  return complaint;
+}
+
+router.get("/complaints2/:id/pdf/view", async (req, res) => {
+  try {
+    const complaint = await getComplaintForPdf2(req.params.id);
+    if (!complaint)
+      return res
+        .status(404)
+        .json({ error: "Laporan complaint tidak ditemukan." });
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="complaint-${req.params.id}.pdf"`,
+    });
+    streamComplaintPdff(complaint, res);
+  } catch (error) {
+    console.error("Error View Complaint2 PDF:", error);
+    res.status(500).json({ error: "Gagal membuat PDF complaint." });
+  }
+});
+
+router.get("/complaints2/:id/pdf/download", async (req, res) => {
+  try {
+    const complaint = await getComplaintForPdf2(req.params.id);
+    if (!complaint)
+      return res
+        .status(404)
+        .json({ error: "Laporan complaint tidak ditemukan." });
+
+    const fileName =
+      `Complaint-${complaint.project?.name || "Report"}.pdf`.replace(
+        /\s+/g,
+        "_",
+      );
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${fileName}"`,
+    });
+    streamComplaintPdff(complaint, res);
+  } catch (error) {
+    console.error("Error Download Complaint2 PDF:", error);
     res.status(500).json({ error: "Gagal membuat PDF complaint." });
   }
 });
