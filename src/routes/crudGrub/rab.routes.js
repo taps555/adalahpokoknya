@@ -777,17 +777,13 @@ router.put(
             ? Number(item.orderedVolume)
             : Number(existing.orderedVolume);
 
-        let status;
-        if (newOrderedVolume <= 0) status = "PENDING";
-        else if (newOrderedVolume < Number(existing.estimatedVolume))
-          status = "PARTIAL";
-        else status = "COMPLETED";
+        // status DIHAPUS dari sini — sekarang ditentukan dari receivedVolume
+        // lewat endpoint /material-requests/items/:id/receive (input lapangan)
 
         const updated = await prisma.materialRequestItem.update({
           where: { id: item.id },
           data: {
             orderedVolume: newOrderedVolume,
-            status,
             ...(item.catatanFinance !== undefined
               ? { catatanFinance: item.catatanFinance }
               : {}),
@@ -858,85 +854,5 @@ router.post(
     }
   },
 );
-
-router.get("/projects/:projectId/material-requests", async (req, res) => {
-  try {
-    const { projectId } = req.params;
-
-    // 1. TARIK DATA + JOIN KE PO & SUPPLIER
-    const requests = await prisma.materialRequest.findMany({
-      where: { projectId: projectId },
-      include: {
-        project: { select: { name: true, location: true } },
-        items: {
-          orderBy: { id: "asc" },
-          include: {
-            poItems: {
-              include: {
-                purchaseOrder: {
-                  include: { supplier: { select: { name: true } } },
-                },
-              },
-            },
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    // 2. SIHIR PEMBELAH ITEM BERDASARKAN TOKO
-    const transformedRequests = requests.map((request) => {
-      let splitItems = [];
-
-      request.items.forEach((item) => {
-        let totalPoQty = 0;
-
-        if (item.poItems && item.poItems.length > 0) {
-          item.poItems.forEach((poItem) => {
-            const qtyDiToko = poItem.qty || 0;
-            totalPoQty += qtyDiToko;
-
-            splitItems.push({
-              ...item,
-              id: `${item.id}_${poItem.id}`,
-              mrItemId: item.id,
-              estimatedVolume: qtyDiToko,
-              orderedVolume: qtyDiToko, // ⬅️ baru
-              supplierName:
-                poItem.po?.supplier?.name ||
-                poItem.purchaseOrder?.supplier?.name ||
-                "Toko Tidak Diketahui",
-              poNumber:
-                poItem.po?.poNumber ||
-                poItem.purchaseOrder?.poNumber ||
-                "Draft PO",
-            });
-          });
-        }
-
-        const sisaVolume = item.estimatedVolume - totalPoQty;
-        if (sisaVolume > 0) {
-          splitItems.push({
-            ...item,
-            id: `${item.id}_sisa`,
-            mrItemId: item.id,
-            estimatedVolume: sisaVolume,
-            orderedVolume: 0, // ⬅️ baru
-            supplierName: "⏳ Belum di-PO",
-            poNumber: "-",
-          });
-        }
-      });
-
-      return { ...request, items: splitItems };
-    });
-
-    // 3. KIRIM DATA YANG SUDAH DIPECAH KE FRONTEND
-    res.json(transformedRequests);
-  } catch (error) {
-    console.error("Error Get Lapangan:", error);
-    res.status(500).json({ error: "Gagal mengambil data Lapangan." });
-  }
-});
 
 module.exports = router;

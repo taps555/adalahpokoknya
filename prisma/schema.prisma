@@ -638,28 +638,23 @@ model MaterialRequestItem {
   pricePerUnit    Float
   totalPrice      Float
   volumePekerjaan Float?
-  status ProcurementStatus @default(PENDING)
+  status          ProcurementStatus @default(PENDING)
 
-
-  
   // -- JADWAL & ALOKASI (Otomatis dari Sistem) --
   scheduleRange   String?  // Contoh: "W1 - W4"
-  groupName        String?
-  jobName          String?
+  groupName       String?
+  jobName         String?
   
   // -- KOLOM CATATAN (Berdasarkan Role) --
   catatanPerencana String? @db.Text
   
-  // -- KOLOM FINANCE (Untuk dikerjakan di Fase 2 nanti) --
+  // -- KOLOM FINANCE --
   isCompleted     Boolean  @default(false) 
   orderedVolume   Float    @default(0)     
   catatanFinance  String?  @db.Text      
-  // Relasi ke barang di Surat PO (Fase 2)
   poItems         PurchaseOrderItem[]  
   
-  // -- KOLOM PELAKSANA (Untuk dikerjakan di Fase 2 nanti) --
-  tanggalOnsite   DateTime? 
-  updateLapangan  String?  @db.Text        
+  // (Kolom lapangan sudah berhasil dihilangkan dari sini)
 }
 
 // ==========================================
@@ -729,7 +724,7 @@ model PurchaseOrder {
 }
 
 
-
+  
 model PurchaseOrderItem {
   id                String   @id @default(uuid())
   poId              String
@@ -747,6 +742,43 @@ model PurchaseOrderItem {
   disc2Nominal      Float    @default(0)
   total             Float
 
+  // ✅ KOLOM LAPANGAN PINDAH KE SINI:
+  tanggalOnsite     DateTime? 
+  updateLapangan    String?  @db.Text
+  receivedVolume    Float    @default(0)     
+  catatanRusak      String?  @db.Text        
+
+  deliveryReceipts  DeliveryReceipt[]
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+}
+
+// ==========================================
+// TABEL BARU: RIWAYAT SURAT JALAN (LEVEL 2)
+// ==========================================
+model DeliveryReceipt {
+  id              String   @id @default(cuid())
+  
+  // Relasi ke PurchaseOrderItem (Barang dari PO mana yang dikirim?)
+  poItemId        String
+  poItem          PurchaseOrderItem @relation(fields: [poItemId], references: [id], onDelete: Cascade)
+  
+  tanggal         DateTime @default(now())
+  nomorSJ         String
+  
+  // Volume yang datang HANYA PADA pengiriman INI saja
+  volumeDiterima  Float    
+  
+  // Catatan khusus untuk pengiriman ini (misal: "2 pecah")
+  catatan         String?  @db.Text
+  
+  // Simpan foto URL (Bisa simpan JSON array jika fotonya banyak)
+  fotoUrls        String?  @db.Text 
+  
+  // Fitur Gembok (Menambal Celah #3: Edit Bisu-Bisu)
+  isVerified      Boolean  @default(false)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }

@@ -11,93 +11,213 @@ const { verifyToken, authorizeRoles } = require("../../middleware/auth"); // Ses
  * GET /api/finance/material-requests
  * Mengambil semua daftar permintaan barang untuk Dasbor Finance
  */
-router.get(
-  "/material-requests",
-  // verifyToken,
-  // authorizeRoles("SUPER_ADMIN", "FINANCE", "PURCHASING", "PROJECT_MANAGER"),
-  async (req, res) => {
-    try {
-      // 1. TARIK DATA DARI DATABASE BESERTA RELASINYA (SAMPAI KE NAMA TOKO)
-      const requests = await prisma.materialRequest.findMany({
-        include: {
-          project: { select: { name: true, location: true } },
-          items: {
-            orderBy: { id: "asc" },
-            include: {
-              // Nyedot data PO Item untuk melihat barang ini dibeli di PO mana saja
-              poItems: {
-                include: {
-                  po: {
-                    include: {
-                      supplier: { select: { name: true } }, // Ambil nama tokonya!
-                    },
-                  },
-                },
+router.get("/material-requests", async (req, res) => {
+  try {
+    const requests = await prisma.materialRequest.findMany({
+      include: {
+        project: { select: { name: true, location: true } },
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            poItems: {
+              include: {
+                purchaseOrder: { include: { supplier: true } },
               },
             },
           },
         },
-        orderBy: { createdAt: "desc" },
-      });
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
-      // 2. PROSES PEMBELAHAN ITEM (SPLIT BERDASARKAN TOKO)
-      const transformedRequests = requests.map((request) => {
-        let splitItems = []; // Array baru untuk menampung item yang sudah dipecah
+    const transformedRequests = requests.map((request) => {
+      let splitItems = [];
 
-        request.items.forEach((item) => {
-          let totalPoQty = 0;
+      request.items.forEach((item) => {
+        let totalPoQty = 0;
+        let totalReceivedQty = 0; // Total barang yg udah sampai dari semua toko
 
-          // SKENARIO A: Barang ini sudah pernah di-PO (Bisa dari 1 toko atau lebih)
-          if (item.poItems && item.poItems.length > 0) {
-            item.poItems.forEach((poItem) => {
-              const qtyDiToko = poItem.qty || 0;
-              totalPoQty += qtyDiToko;
+        // SKENARIO 1: BARANG SUDAH DI-PO (MUNCUL PER TOKO)
+        if (item.poItems && item.poItems.length > 0) {
+          item.poItems.forEach((poItem) => {
+            const qtyDiToko = poItem.qty || 0;
+            totalPoQty += qtyDiToko;
+            totalReceivedQty += poItem.receivedVolume || 0;
 
-              splitItems.push({
-                ...item,
-                id: `${item.id}_${poItem.id}`,
-                mrItemId: item.id,
-                estimatedVolume: qtyDiToko,
-                orderedVolume: qtyDiToko, // ⬅️ baru: baris ini udah full order, sisa jadi 0
-                supplierName:
-                  poItem.po?.supplier?.name || "Toko Tidak Diketahui",
-                poNumber: poItem.po?.poNumber || "Draft PO",
-              });
-            });
-          }
-
-          const sisaVolume = item.estimatedVolume - totalPoQty;
-
-          if (sisaVolume > 0) {
             splitItems.push({
               ...item,
-              id: `${item.id}_sisa`,
+              id: `${item.id}_${poItem.id}`, // ID unik untuk UI (React/Vue key)
               mrItemId: item.id,
-              estimatedVolume: sisaVolume,
-              orderedVolume: 0, // ⬅️ baru: baris sisa belum ke-order sama sekali
-              supplierName: "⏳ Belum di-PO",
-              poNumber: "-",
-            });
-          }
-        });
+              poItemId: poItem.id, // 👇 ID ini yang dipake Lapangan buat update
 
-        // Kembalikan data request, tapi 'items'-nya pakai yang sudah kita pecah
-        return {
-          ...request,
-          items: splitItems,
-        };
+              estimatedVolume: qtyDiToko, // Di UI baris ini, targetnya adalah qty PO
+              orderedVolume: qtyDiToko,
+
+              // 👇 AMBIL DATA REAL DARI SURAT JALAN / PO INI
+              tanggalOnsite: poItem.tanggalOnsite,
+              receivedVolume: poItem.receivedVolume,
+              catatanRusak: poItem.catatanRusak,
+              updateLapangan: poItem.updateLapangan,
+
+              procurementStatus:
+                poItem.receivedVolume >= qtyDiToko
+                  ? "COMPLETED"
+                  : poItem.receivedVolume > 0
+                    ? "PARTIAL"
+                    : "PENDING",
+              supplierName:
+                poItem.purchaseOrder?.supplier?.name || "Toko Tidak Diketahui",
+              poNumber: poItem.purchaseOrder?.poNumber || "Draft PO",
+            });
+          });
+        }
+
+        // SKENARIO 2: SISA BARANG YANG BELUM DIBELI FINANCE
+        const belumDipesan = item.estimatedVolume - totalPoQty;
+
+        if (belumDipesan > 0) {
+          splitItems.push({
+            ...item,
+            id: `${item.id}_sisa`,
+            mrItemId: item.id,
+            poItemId: null, // Baris sisa ga punya PO, ga bisa diupdate lapangan
+            estimatedVolume: belumDipesan,
+            orderedVolume: 0,
+
+            // 👇 OVERRIDE AGAR BARIS SISA SELALU BERSIH (FIX BUG GAMBAR 3)
+            tanggalOnsite: null,
+            receivedVolume: 0,
+            catatanRusak: null,
+            updateLapangan: null,
+
+            procurementStatus: "PENDING",
+            supplierName: "⏳ Belum di-PO",
+            poNumber: "-",
+          });
+        }
       });
 
-      // 3. KIRIM KE FRONTEND
-      res.json(transformedRequests);
-    } catch (error) {
-      console.error("Get Finance Data Error:", error);
-      res
-        .status(500)
-        .json({ error: "Terjadi kesalahan saat mengambil data Finance." });
-    }
-  },
-);
+      return { ...request, items: splitItems };
+    });
+
+    res.json(transformedRequests);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Gagal mengambil data." });
+  }
+});
+
+router.get("/projects/:projectId/material-requests", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    const requests = await prisma.materialRequest.findMany({
+      where: { projectId: projectId },
+      include: {
+        project: { select: { name: true, location: true } },
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            poItems: {
+              include: { purchaseOrder: { include: { supplier: true } } },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const transformedRequests = requests.map((request) => {
+      let splitItems = [];
+
+      request.items.forEach((item) => {
+        // 1. Hitung total qty PO & total qty FISIK DITERIMA
+        let totalPoQty = 0;
+        let totalReceivedQty = 0; // 🔥 KITA TAMBAHKAN INI
+        if (item.poItems && item.poItems.length > 0) {
+          totalPoQty = item.poItems.reduce((sum, po) => sum + (po.qty || 0), 0);
+          totalReceivedQty = item.poItems.reduce(
+            (sum, po) => sum + (po.receivedVolume || 0),
+            0,
+          ); // 🔥 KITA HITUNG BARANG BAGUSNYA
+        }
+
+        // 2. Tentukan status Finance Global (Logika Baru)
+        let financeStatus = "PENDING";
+        if (item.isCompleted) {
+          financeStatus = "COMPLETED"; // Paksa selesai (Tutup Pembelian)
+        } else if (
+          totalPoQty > 0 &&
+          Number(totalReceivedQty.toFixed(4)) >=
+            Number(item.estimatedVolume.toFixed(4))
+        ) {
+          // 🔥 HANYA COMPLETED JIKA BARANG FISIK BAGUS SUDAH 100%
+          financeStatus = "COMPLETED";
+        } else if (totalPoQty > 0) {
+          financeStatus = "PARTIAL"; // Ada PO, tapi fisik kurang/rusak
+        }
+
+        // ... (KODE KE BAWAHNYA TETAP SAMA SEPERTI SEBELUMNYA)
+
+        // SKENARIO 1: BARANG YANG SUDAH DI-PO
+        if (item.poItems && item.poItems.length > 0) {
+          item.poItems.forEach((poItem) => {
+            const qtyDiToko = poItem.qty || 0;
+            splitItems.push({
+              ...item,
+              id: `${item.id}_${poItem.id}`,
+              mrItemId: item.id,
+              poItemId: poItem.id,
+              estimatedVolume: qtyDiToko,
+              orderedVolume: qtyDiToko,
+              tanggalOnsite: poItem.tanggalOnsite,
+              receivedVolume: poItem.receivedVolume,
+              catatanRusak: poItem.catatanRusak,
+              updateLapangan: poItem.updateLapangan,
+
+              procurementStatus: financeStatus,
+              isForceClosed: item.isCompleted, // 👈 Bawa status ini ke Frontend
+              supplierName:
+                poItem.purchaseOrder?.supplier?.name || "Toko Tidak Diketahui",
+              poNumber: poItem.purchaseOrder?.poNumber || "Draft PO",
+            });
+          });
+        }
+
+        // SKENARIO 2: SISA BARANG
+        let belumDipesan = item.estimatedVolume - totalPoQty;
+        belumDipesan = Number(belumDipesan.toFixed(4));
+
+        // 🔥 2. HILANGKAN BARIS SISA JIKA SUDAH DI-FORCE CLOSE
+        if (belumDipesan > 0 && !item.isCompleted) {
+          splitItems.push({
+            ...item,
+            id: `${item.id}_sisa`,
+            mrItemId: item.id,
+            poItemId: null,
+            estimatedVolume: belumDipesan,
+            orderedVolume: 0,
+            tanggalOnsite: null,
+            receivedVolume: 0,
+            catatanRusak: null,
+            updateLapangan: null,
+            procurementStatus: financeStatus,
+            isForceClosed: item.isCompleted,
+            supplierName: "⏳ Belum di-PO",
+            poNumber: "-",
+          });
+        }
+      });
+
+      return { ...request, items: splitItems };
+    });
+
+    res.json(transformedRequests);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Gagal mengambil data." });
+  }
+});
 
 /**
  * PUT /api/finance/material-requests/items/:id
@@ -129,6 +249,39 @@ router.put(
     }
   },
 );
+
+router.put("/material-requests/items/:id/receive", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { receivedVolume, catatanRusak } = req.body;
+    const mrItem = await prisma.materialRequestItem.findUnique({
+      where: { id },
+    });
+    if (!mrItem) return res.status(404).json({ error: "Item tidak ditemukan" });
+
+    const rv = Number(receivedVolume);
+    let newStatus = "PENDING",
+      isCompleted = false;
+    if (rv >= mrItem.estimatedVolume) {
+      newStatus = "COMPLETED";
+      isCompleted = true;
+    } else if (rv > 0) newStatus = "PARTIAL";
+
+    const updated = await prisma.materialRequestItem.update({
+      where: { id },
+      data: {
+        receivedVolume: rv,
+        catatanRusak,
+        status: newStatus,
+        isCompleted,
+      },
+    });
+    res.json({ message: "Data penerimaan disimpan", data: updated });
+  } catch (error) {
+    console.error("Update Receive Error:", error);
+    res.status(500).json({ error: "Gagal update penerimaan barang" });
+  }
+});
 
 // =====================================================================
 // FASE 2: MODUL PURCHASE ORDER (PO) & MASTER SUPPLIER
@@ -351,7 +504,7 @@ router.post("/po", verifyToken, async (req, res) => {
           where: { id: item.materialRequestId },
         });
         if (!mrItem) continue;
-        const sisa = mrItem.estimatedVolume - (mrItem.orderedVolume || 0);
+        const sisa = mrItem.estimatedVolume - (mrItem.receivedVolume || 0);
         if (Number(item.qty) > sisa) {
           throw new Error(
             `Qty untuk "${mrItem.itemName}" melebihi sisa kebutuhan (${sisa})`,
@@ -431,25 +584,9 @@ router.post("/po", verifyToken, async (req, res) => {
           const newOrderedVolume =
             (mrItem.orderedVolume || 0) + Number(item.qty);
 
-          let newStatus = "PENDING";
-          let isCompleted = false;
-
-          // Pengecekan otomatis berdasarkan Enum ProcurementStatus
-          if (newOrderedVolume >= mrItem.estimatedVolume) {
-            newStatus = "COMPLETED";
-            isCompleted = true;
-          } else if (newOrderedVolume > 0) {
-            newStatus = "PARTIAL";
-          }
-
-          // Update ke tabel MaterialRequestItem
           await tx.materialRequestItem.update({
             where: { id: item.materialRequestId },
-            data: {
-              orderedVolume: newOrderedVolume,
-              status: newStatus,
-              isCompleted: isCompleted,
-            },
+            data: { orderedVolume: newOrderedVolume },
           });
         }
       }
@@ -611,7 +748,7 @@ router.put("/po/:id", verifyToken, async (req, res) => {
           where: { id: item.materialRequestId },
         });
         if (!mrItem) continue;
-        const sisa = mrItem.estimatedVolume - (mrItem.orderedVolume || 0);
+        const sisa = mrItem.estimatedVolume - (mrItem.receivedVolume || 0);
         if (Number(item.qty) > sisa) {
           throw new Error(
             `Qty untuk "${mrItem.itemName}" melebihi sisa kebutuhan (${sisa})`,
@@ -668,22 +805,10 @@ router.put("/po/:id", verifyToken, async (req, res) => {
         if (!mrItem) continue;
 
         const newOrderedVolume = (mrItem.orderedVolume || 0) + Number(item.qty);
-        let newStatus = "PENDING";
-        let isCompleted = false;
-        if (newOrderedVolume >= mrItem.estimatedVolume) {
-          newStatus = "COMPLETED";
-          isCompleted = true;
-        } else if (newOrderedVolume > 0) {
-          newStatus = "PARTIAL";
-        }
 
         await tx.materialRequestItem.update({
           where: { id: item.materialRequestId },
-          data: {
-            orderedVolume: newOrderedVolume,
-            status: newStatus,
-            isCompleted,
-          },
+          data: { orderedVolume: newOrderedVolume },
         });
       }
 
