@@ -9,7 +9,7 @@ const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
 
-const uploadDir = path.join(__dirname, "public/uploads/surat-jalan");
+const uploadDir = path.join(__dirname, "./public/uploads/surat-jalan");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
