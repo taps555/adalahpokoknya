@@ -411,4 +411,33 @@ router.post("/surat-jalan/bulk", async (req, res) => {
       .json({ error: "Gagal menyimpan data borongan Surat Jalan." });
   }
 });
+
+// ==========================================
+// API AMBIL RIWAYAT SURAT JALAN PER BARANG
+// ==========================================
+// ==========================================
+// API AMBIL RIWAYAT SURAT JALAN PER BARANG
+// ==========================================
+router.get("/surat-jalan/:poItemId", async (req, res) => {
+  try {
+    const { poItemId } = req.params;
+
+    // Cek di terminal/console backend kamu, ID apa yang sebenarnya dicari?
+    console.log("Mencari Riwayat untuk ID Barang:", poItemId);
+
+    const riwayat = await prisma.deliveryReceipt.findMany({
+      // 🔥 Jaga-jaga kalau tipe datanya Int, kita ubah jadi angka
+      where: {
+        poItemId: isNaN(poItemId) ? poItemId : parseInt(poItemId),
+      },
+      orderBy: { tanggal: "asc" },
+    });
+
+    console.log("Data ditemukan:", riwayat.length, "baris");
+    res.json(riwayat);
+  } catch (error) {
+    console.error("Error get riwayat:", error);
+    res.status(500).json({ error: "Gagal mengambil riwayat Surat Jalan" });
+  }
+});
 module.exports = router;
