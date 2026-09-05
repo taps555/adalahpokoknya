@@ -228,7 +228,9 @@ function computeRowHeight(doc, item, COL) {
     width: COL.report - 8,
     fontSize: 8,
   });
-  const fotoH = photoGridHeight((item.photos || []).length);
+  const fotoH = photoGridHeight(
+    (item.photos || []).filter((p) => p.type === "BEFORE").length,
+  );
   return Math.max(MIN_ROW_H, defectH + 10, reportH + 10, fotoH);
 }
 
@@ -257,8 +259,8 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
   // DEFECT LIST
   doc.text(item.defectList || "-", X.x1 + 4, y + 6, { width: COL.defect - 8 });
 
-  // FOTO
-  const photos = item.photos || [];
+  // FOTO (HANYA BEFORE)
+  const photos = (item.photos || []).filter((p) => p.type === "BEFORE");
   if (photos.length === 0) {
     doc
       .fontSize(10)
