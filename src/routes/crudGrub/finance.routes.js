@@ -614,6 +614,42 @@ router.post("/po", verifyToken, async (req, res) => {
  * GET /api/finance/po
  * Mengambil daftar semua Surat PO untuk ditampilkan di tabel
  */
+/**
+ * GET /api/finance/po/supplier/:supplierId
+ * Mengambil SEMUA PO berdasarkan 1 Supplier untuk Cetak PDF Massal
+ */
+router.get("/po/supplier/:supplierId", verifyToken, async (req, res) => {
+  try {
+    const pos = await prisma.purchaseOrder.findMany({
+      where: {
+        supplierId: req.params.supplierId,
+        // status: "APPROVED" // (Opsional) Buka komen ini kalau cuma mau nge-print PO yang udah di-Approve
+      },
+      include: {
+        supplier: true,
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            materialRequest: { select: { groupName: true, jobName: true } },
+          },
+        },
+      },
+      orderBy: { tanggal: "asc" }, // Urutkan dari PO tanggal terlama ke terbaru
+    });
+
+    if (!pos || pos.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "Tidak ada data PO untuk supplier ini" });
+    }
+
+    res.json(pos);
+  } catch (error) {
+    console.error("Get PO by Supplier Error:", error);
+    res.status(500).json({ error: "Gagal mengambil data PO gabungan" });
+  }
+});
+
 router.get("/po", verifyToken, async (req, res) => {
   try {
     const pos = await prisma.purchaseOrder.findMany({
