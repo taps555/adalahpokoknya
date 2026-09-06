@@ -57,11 +57,11 @@ router.put("/rab-items/:id", async (req, res) => {
       const updatedInduk = await prisma.rabItem.update({
         where: { id },
         data: {
-          volume: null,
-          rapUnitPrice: null,
-          rapTotalPrice: null,
-          rabUnitPrice: null,
-          rabTotalPrice: null, // Totalnya dikosongkan (nanti dihitung SUM di Frontend saat render)
+          volume: 0,
+          rapUnitPrice: 0,
+          rapTotalPrice: 0,
+          rabUnitPrice: 0,
+          rabTotalPrice: 0, // Totalnya dikosongkan (nanti dihitung SUM di Frontend saat render)
 
           // Tetap izinkan update hal-hal administratif (misal pindah Grup)
           ...(groupId !== undefined ? { groupId: groupId || null } : {}),

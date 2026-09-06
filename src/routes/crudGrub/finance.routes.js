@@ -288,184 +288,6 @@ router.put("/material-requests/items/:id/receive", async (req, res) => {
 // =====================================================================
 
 /**
- * GET /api/finance/suppliers
- * Ambil semua daftar supplier untuk Dropdown di frontend
- */
-
-/**
- * GET /api/finance/suppliers
- * List semua supplier
- */
-router.get("/suppliers", async (req, res) => {
-  try {
-    const suppliers = await prisma.supplier.findMany({
-      orderBy: { name: "asc" },
-    });
-    res.json(suppliers);
-  } catch (error) {
-    console.error("Get Suppliers Error:", error);
-    res.status(500).json({ error: "Gagal mengambil data toko/supplier" });
-  }
-});
-
-/**
- * GET /api/finance/suppliers/:id
- * Detail satu supplier
- */
-router.get("/suppliers/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const supplier = await prisma.supplier.findUnique({ where: { id } });
-
-    if (!supplier) {
-      return res.status(404).json({ error: "Supplier tidak ditemukan" });
-    }
-    res.json(supplier);
-  } catch (error) {
-    console.error("Get Supplier Detail Error:", error);
-    res.status(500).json({ error: "Gagal mengambil detail supplier" });
-  }
-});
-
-/**
- * POST /api/finance/suppliers
- * Tambah supplier (Toko) baru
- */
-router.post("/suppliers", async (req, res) => {
-  try {
-    const {
-      name,
-      type,
-      address,
-      address2,
-      phone,
-      fax,
-      taxGroup,
-      npwp,
-      email,
-      contactName,
-      creditLimit,
-      bankAccount,
-      status,
-    } = req.body;
-
-    if (!name) {
-      return res.status(400).json({ error: "Nama supplier wajib diisi" });
-    }
-
-    // create dulu tanpa code, biar seq auto-increment kegenerate
-    const created = await prisma.supplier.create({
-      data: {
-        name,
-        type,
-        address,
-        address2,
-        phone,
-        fax,
-        taxGroup,
-        npwp,
-        email,
-        contactName,
-        creditLimit,
-        bankAccount,
-        status,
-      },
-    });
-
-    const code = String(created.seq).padStart(5, "0");
-
-    const newSupplier = await prisma.supplier.update({
-      where: { id: created.id },
-      data: { code },
-    });
-
-    res.json(newSupplier);
-  } catch (error) {
-    console.error("Create Supplier Error:", error);
-    res.status(500).json({ error: "Gagal menambah supplier baru" });
-  }
-});
-
-/**
- * PUT /api/finance/suppliers/:id
- * Update supplier
- */
-router.put("/suppliers/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      code,
-      name,
-      type,
-      address,
-      address2,
-      phone,
-      fax,
-      taxGroup,
-      npwp,
-      email,
-      contactName,
-      creditLimit,
-      bankAccount,
-      status,
-    } = req.body;
-
-    const updated = await prisma.supplier.update({
-      where: { id },
-      data: {
-        code,
-        name,
-        type,
-        address,
-        address2,
-        phone,
-        fax,
-        taxGroup,
-        npwp,
-        email,
-        contactName,
-        creditLimit,
-        bankAccount,
-        status,
-      },
-    });
-    res.json(updated);
-  } catch (error) {
-    console.error("Update Supplier Error:", error);
-    if (error.code === "P2002") {
-      return res.status(409).json({ error: "Kode supplier sudah dipakai" });
-    }
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Supplier tidak ditemukan" });
-    }
-    res.status(500).json({ error: "Gagal update supplier" });
-  }
-});
-
-/**
- * DELETE /api/finance/suppliers/:id
- * Hapus supplier
- */
-router.delete("/suppliers/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    await prisma.supplier.delete({ where: { id } });
-    res.json({ message: "Supplier berhasil dihapus" });
-  } catch (error) {
-    console.error("Delete Supplier Error:", error);
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Supplier tidak ditemukan" });
-    }
-    if (error.code === "P2003") {
-      return res
-        .status(409)
-        .json({ error: "Supplier tidak bisa dihapus, masih dipakai di PO" });
-    }
-    res.status(500).json({ error: "Gagal menghapus supplier" });
-  }
-});
-
-/**
  * POST /api/finance/po
  * Bikin Surat PO Baru (Dan update volume RAB otomatis)
  */
@@ -607,46 +429,6 @@ router.post("/po", verifyToken, async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     res.status(500).json({ error: "Gagal membuat surat PO." });
-  }
-});
-
-/**
- * GET /api/finance/po
- * Mengambil daftar semua Surat PO untuk ditampilkan di tabel
- */
-/**
- * GET /api/finance/po/supplier/:supplierId
- * Mengambil SEMUA PO berdasarkan 1 Supplier untuk Cetak PDF Massal
- */
-router.get("/po/supplier/:supplierId", verifyToken, async (req, res) => {
-  try {
-    const pos = await prisma.purchaseOrder.findMany({
-      where: {
-        supplierId: req.params.supplierId,
-        // status: "APPROVED" // (Opsional) Buka komen ini kalau cuma mau nge-print PO yang udah di-Approve
-      },
-      include: {
-        supplier: true,
-        items: {
-          orderBy: { id: "asc" },
-          include: {
-            materialRequest: { select: { groupName: true, jobName: true } },
-          },
-        },
-      },
-      orderBy: { tanggal: "asc" }, // Urutkan dari PO tanggal terlama ke terbaru
-    });
-
-    if (!pos || pos.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "Tidak ada data PO untuk supplier ini" });
-    }
-
-    res.json(pos);
-  } catch (error) {
-    console.error("Get PO by Supplier Error:", error);
-    res.status(500).json({ error: "Gagal mengambil data PO gabungan" });
   }
 });
 
@@ -864,6 +646,54 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     res.status(500).json({ error: "Gagal update PO." });
+  }
+});
+/**
+ * GET /api/finance/ahsp-mapping/suggest?itemName=...
+ * Cek apakah item ini sudah pernah di-mapping
+ */
+router.get("/ahsp-mapping/suggest", async (req, res) => {
+  try {
+    const raw = req.query.itemName;
+    if (!raw) return res.status(400).json({ error: "itemName wajib diisi" });
+
+    const itemName = raw.trim().toLowerCase();
+    const mapping = await prisma.ahspItemMapping.findUnique({
+      where: { itemName },
+      include: { supplierItem: { include: { supplier: true } } },
+    });
+
+    res.json(mapping || null);
+  } catch (error) {
+    console.error("Suggest Mapping Error:", error);
+    res.status(500).json({ error: "Gagal mencari mapping" });
+  }
+});
+
+/**
+ * POST /api/finance/ahsp-mapping
+ * Simpan/update mapping (upsert by itemName)
+ */
+router.post("/ahsp-mapping", async (req, res) => {
+  try {
+    const { itemName: raw, supplierItemId } = req.body;
+    if (!raw || !supplierItemId) {
+      return res
+        .status(400)
+        .json({ error: "itemName dan supplierItemId wajib diisi" });
+    }
+    const itemName = raw.trim().toLowerCase();
+
+    const mapping = await prisma.ahspItemMapping.upsert({
+      where: { itemName },
+      update: { supplierItemId },
+      create: { itemName, supplierItemId },
+    });
+
+    res.json(mapping);
+  } catch (error) {
+    console.error("Save Mapping Error:", error);
+    res.status(500).json({ error: "Gagal menyimpan mapping" });
   }
 });
 

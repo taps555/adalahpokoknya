@@ -574,6 +574,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     const result = await prisma.$transaction(async (tx) => {
       const finalGroupId = groupId || bvItem.groupId || null;
       let insertOrder;
+      let rabParentId = null;
 
       // --- LOGIKA ORDERING (TIDAK DIUBAH) ---
       if (bvItem.parentBvItemId) {
@@ -583,6 +584,27 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
         });
 
         if (parentBv?.linkedRabItemId) {
+          rabParentId = parentBv.linkedRabItemId;
+
+          // ==========================================
+          // UPDATE INDUK MENJADI HEADER KARENA PUNYA ANAK
+          // ==========================================
+          await tx.rabItem.update({
+            where: { id: rabParentId },
+            data: {
+              isHeaderOnly: true,
+              volume: 0,
+              rapUnitPrice: 0,
+              rapTotalPrice: 0,
+              rabUnitPrice: 0,
+              rabTotalPrice: 0,
+            },
+          });
+          await tx.bvItem.update({
+            where: { id: bvItem.parentBvItemId },
+            data: { isHeaderOnly: true },
+          });
+
           const parentRab = await tx.rabItem.findUnique({
             where: { id: parentBv.linkedRabItemId },
             select: { order: true },
@@ -627,6 +649,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
         data: {
           projectId: bvItem.projectId,
           groupId: finalGroupId,
+          parentId: rabParentId, // <-- Pastikan terhubung ke parent jika ada
           name: bvItem.name,
           paymentUnit: bvItem.paymentUnit || "-",
           category: finalCategory,

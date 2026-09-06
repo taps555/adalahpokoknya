@@ -586,14 +586,19 @@ enum ProcurementStatus {
   COMPLETED   // Semua kebutuhan sudah dibeli
 }
 
-enum SupplierType {
-  BAHAN
-  JASA
-}
 
+enum POStatus {
+  BELUM_APPROVE
+  APPROVED
+  REJECTED
+}
 enum TaxGroup {
   PPN
   NON_PPN
+}
+enum SupplierType {
+  BAHAN
+  JASA
 }
 
 enum SupplierStatus {
@@ -601,11 +606,6 @@ enum SupplierStatus {
   INACTIVE
 }
 
-enum POStatus {
-  BELUM_APPROVE
-  APPROVED
-  REJECTED
-}
 
 
 // =========================================================
@@ -680,10 +680,45 @@ model Supplier {
   bankAccount String?
   status      SupplierStatus? @default(ACTIVE)
   orders      PurchaseOrder[]
+  items       SupplierItem[]  
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 }
+model SupplierPriceHistory {
+  id             String   @id @default(uuid())
+  supplierItemId String
+  supplierItem   SupplierItem @relation(fields: [supplierItemId], references: [id])
+  price          Decimal
+  promoPrice     Decimal?
+  effectiveDate  DateTime @default(now())  // ganti periodMonth+periodYear
+  createdAt      DateTime @default(now())  // kapan row ini diinput ke sistem
 
+  @@index([supplierItemId, effectiveDate])
+}
+model SupplierItem {
+  id                String   @id @default(uuid())
+  supplierId        String
+  supplier          Supplier @relation(fields: [supplierId], references: [id])
+
+  itemName          String   // nama dasar, cth: "Amplas Klassik"
+  variantName       String?  // cth: "80", "100", "120" — null kalau item gak punya varian
+  unit              String
+  currentPrice      Decimal
+  currentPromoPrice Decimal?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  mapping           AhspItemMapping[]
+  priceHistory      SupplierPriceHistory[]
+}
+model AhspItemMapping {
+  id             String   @id @default(uuid())
+  itemName       String   @unique   // nama generik, dicocokkan ke MaterialRequestItem.itemName
+  supplierItemId String
+  supplierItem   SupplierItem @relation(fields: [supplierItemId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
 
 model PurchaseOrder {
   id              String   @id @default(uuid())

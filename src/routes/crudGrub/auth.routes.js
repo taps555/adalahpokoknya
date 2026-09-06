@@ -80,4 +80,6 @@ router.post("/login", async (req, res) => {
   }
 });
 
+//eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJjbXRpY2YybTUwMDAwamt1eHU0Nm1pb25nIiwicm9sZSI6IlNVUEVSX0FETUlOIiwibmFtZSI6InJhZGl0IiwiaWF0IjoxNzg4MzIyMzExLCJleHAiOjE3ODgzNjU1MTF9.xaCeBYEyPquTYlrMPeXWSvkCbMUnKd5scrGPSDJ4JJQ
+
 module.exports = router;

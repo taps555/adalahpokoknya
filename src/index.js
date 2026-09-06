@@ -52,7 +52,7 @@ app.use("/api", require("./routes/exportToFile/tsView.routes"));
 //shedule
 app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));
 
-//
+//ts
 app.use("/api", require("./routes/exportToFile/timeScheduleExport.routes"));
 
 app.use("/api", require("./routes/crudGrub/joinOpname.routes"));
@@ -63,6 +63,7 @@ app.use("/api", require("./routes/crudGrub/complain.routes"));
 app.use("/api", require("./routes/crudGrub/bast.routes"));
 app.use("/api", require("./routes/crudGrub/lapangan.routes"));
 app.use("/api", require("./routes/crudGrub/rab.routes"));
+app.use("/api", require("./routes/crudGrub/supplier.route"));
 app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 
