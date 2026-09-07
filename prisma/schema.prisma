@@ -46,7 +46,8 @@ model User {
   password  String   // password yang sudah di-hash
   name      String   // nama lengkap pegawai
   role      Role     @default(PERENCANA)
-  approvedPOs PurchaseOrder[] // 👈 masih perlu ditambah
+  approvedPOs PurchaseOrder[] @relation("ApprovedByUser")
+  rejectedPOs PurchaseOrder[] @relation("RejectedByUser")
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -737,8 +738,13 @@ model PurchaseOrder {
   status          POStatus @default(BELUM_APPROVE)
 
   approvedById    String?
-  approvedBy      User?    @relation(fields: [approvedById], references: [id])
+  approvedBy      User?    @relation("ApprovedByUser", fields: [approvedById], references: [id])
   approvedAt      DateTime?
+
+  rejectedById    String?
+  rejectedBy      User?    @relation("RejectedByUser", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectReason    String?
 
   subTotal        Float    @default(0)
   globalDiscount  Float    @default(0)

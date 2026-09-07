@@ -55,6 +55,9 @@ app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));
 //ts
 app.use("/api", require("./routes/exportToFile/timeScheduleExport.routes"));
 
+// material request pdf export
+app.use("/api", require("./routes/exportToFile/materialRequestExport.routes"));
+
 app.use("/api", require("./routes/crudGrub/joinOpname.routes"));
 
 app.use("/api", require("./routes/crudGrub/survey.routes"));

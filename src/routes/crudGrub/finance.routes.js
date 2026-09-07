@@ -495,7 +495,10 @@ router.put(
         data: {
           status: "APPROVED",
           approvedAt: new Date(),
-          approvedById: req.user?.id || null, // sesuaikan sama nama field user dari verifyToken
+          approvedById: req.user?.id || null,
+          rejectReason: null,
+          rejectedAt: null,
+          rejectedById: null,
         },
       });
       res.json({ message: "PO berhasil di-Approve!", po });
@@ -505,6 +508,81 @@ router.put(
         return res.status(404).json({ error: "PO tidak ditemukan" });
       }
       res.status(500).json({ error: "Gagal menyetujui PO" });
+    }
+  },
+);
+
+/**
+ * PUT /api/finance/po/:id/reject
+ * Mengubah status PO menjadi "REJECTED" dengan alasan
+ */
+router.put(
+  "/po/:id/reject",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OWNER"),
+  async (req, res) => {
+    try {
+      const { rejectReason } = req.body;
+      if (!rejectReason || String(rejectReason).trim() === "") {
+        return res.status(400).json({ error: "Alasan tolak wajib diisi." });
+      }
+
+      const existing = await prisma.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!existing) return res.status(404).json({ error: "PO tidak ditemukan" });
+      if (existing.status !== "BELUM_APPROVE") {
+        return res.status(400).json({ error: "Hanya PO BELUM_APPROVE yang bisa ditolak." });
+      }
+
+      const po = await prisma.purchaseOrder.update({
+        where: { id: req.params.id },
+        data: {
+          status: "REJECTED",
+          rejectedAt: new Date(),
+          rejectedById: req.user?.id || null,
+          rejectReason: String(rejectReason).trim(),
+        },
+      });
+      res.json({ message: "PO berhasil ditolak.", po });
+    } catch (error) {
+      console.error("Reject PO Error:", error);
+      res.status(500).json({ error: "Gagal menolak PO." });
+    }
+  },
+);
+
+/**
+ * PUT /api/finance/po/:id/cancel-reject
+ * Membatalkan penolakan, status kembali ke BELUM_APPROVE
+ */
+router.put(
+  "/po/:id/cancel-reject",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "OWNER"),
+  async (req, res) => {
+    try {
+      const existing = await prisma.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!existing) return res.status(404).json({ error: "PO tidak ditemukan" });
+      if (existing.status !== "REJECTED") {
+        return res.status(400).json({ error: "Hanya PO REJECTED yang bisa cancel reject." });
+      }
+
+      const po = await prisma.purchaseOrder.update({
+        where: { id: req.params.id },
+        data: {
+          status: "BELUM_APPROVE",
+          rejectedAt: null,
+          rejectedById: null,
+          rejectReason: null,
+        },
+      });
+      res.json({ message: "Penolakan PO dibatalkan.", po });
+    } catch (error) {
+      console.error("Cancel Reject PO Error:", error);
+      res.status(500).json({ error: "Gagal membatalkan penolakan PO." });
     }
   },
 );
@@ -597,6 +675,11 @@ router.put("/po/:id", verifyToken, async (req, res) => {
           globalDiscount: Number(globalDiscount || 0),
           taxNominal: Number(taxNominal || 0),
           grandTotal: Number(grandTotal || 0),
+          // Kalau PO sedang REJECTED dan di-edit, anggap revisi ulang
+          status: oldPO.status === "REJECTED" ? "BELUM_APPROVE" : undefined,
+          rejectReason: oldPO.status === "REJECTED" ? null : undefined,
+          rejectedAt: oldPO.status === "REJECTED" ? null : undefined,
+          rejectedById: oldPO.status === "REJECTED" ? null : undefined,
           items: {
             create: items.map((item) => ({
               materialRequestId: item.materialRequestId,
@@ -694,6 +777,62 @@ router.post("/ahsp-mapping", async (req, res) => {
   } catch (error) {
     console.error("Save Mapping Error:", error);
     res.status(500).json({ error: "Gagal menyimpan mapping" });
+  }
+});
+
+/**
+ * GET /api/finance/projects/:projectId/price-comparison
+ * Bandingkan harga estimasi (RAB) vs harga aktual (supplier) via mapping
+ */
+router.get("/finance/:projectId/price-comparison", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    const requests = await prisma.materialRequest.findMany({
+      where: { projectId },
+      include: { items: true },
+    });
+
+    const allItems = requests.flatMap((r) => r.items);
+
+    if (!allItems.length) {
+      return res.json([]);
+    }
+
+    const results = [];
+    for (const item of allItems) {
+      const key = item.itemName.trim().toLowerCase();
+
+      const mapping = await prisma.ahspItemMapping.findUnique({
+        where: { itemName: key },
+        include: { supplierItem: { include: { supplier: true } } },
+      });
+
+      const estimasi = item.pricePerUnit;
+      const aktual = mapping ? Number(mapping.supplierItem.currentPrice) : null;
+      const selisih = aktual !== null ? aktual - estimasi : null;
+      const selisihPercent =
+        aktual !== null && estimasi
+          ? Number(((selisih / estimasi) * 100).toFixed(1))
+          : null;
+
+      results.push({
+        materialRequestItemId: item.id,
+        itemName: item.itemName,
+        unit: item.unit,
+        estimasi,
+        aktual,
+        selisih,
+        selisihPercent,
+        supplierName: mapping?.supplierItem?.supplier?.name ?? null,
+        hasMapping: !!mapping,
+      });
+    }
+
+    res.json(results);
+  } catch (error) {
+    console.error("Price Comparison Error:", error);
+    res.status(500).json({ error: "Gagal membandingkan harga" });
   }
 });
 

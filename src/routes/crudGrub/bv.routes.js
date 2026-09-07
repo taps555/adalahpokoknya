@@ -3,100 +3,13 @@
 const express = require("express");
 const prisma = require("../../lib/prisma");
 const { calculateJobPrice } = require("../../services/calculateService");
+const {
+  buildBreakdownRows,
+  withStatus,
+} = require("../../services/bvCalculationService");
+const { computeAhspPricing } = require("../../services/ahspPricingService");
 
 const router = express.Router();
-
-function calcBreakdownSubtotal(b) {
-  // 1. Tarik nilai angkanya (kalau kosong jadikan 0)
-  const p = b.panjang != null && b.panjang !== "" ? Number(b.panjang) : 0;
-  const l = b.lebar != null && b.lebar !== "" ? Number(b.lebar) : 0;
-  const t = b.tinggi != null && b.tinggi !== "" ? Number(b.tinggi) : 0;
-  const luas = b.luas != null && b.luas !== "" ? Number(b.luas) : 0;
-  const keliling =
-    b.keliling != null && b.keliling !== "" ? Number(b.keliling) : 0;
-  const berat = b.berat != null && b.berat !== "" ? Number(b.berat) : 0;
-
-  // 2. Kita mulai baseVolume dari angka 1 (karena ini perkalian)
-  let baseVolume = 1;
-  let adaYangDicentang = false;
-
-  // 3. Kalikan HANYA JIKA dicentang (isXChecked = true)
-  if (b.isPChecked) {
-    baseVolume *= p;
-    adaYangDicentang = true;
-  }
-  if (b.isLChecked) {
-    baseVolume *= l;
-    adaYangDicentang = true;
-  }
-  if (b.isTChecked) {
-    baseVolume *= t;
-    adaYangDicentang = true;
-  }
-  if (b.isLuasChecked) {
-    baseVolume *= luas;
-    adaYangDicentang = true;
-  }
-  if (b.isKelChecked) {
-    baseVolume *= keliling;
-    adaYangDicentang = true;
-  }
-  if (b.isBeratChecked) {
-    baseVolume *= berat;
-    adaYangDicentang = true;
-  }
-
-  // Jika user sama sekali tidak mencentang apa-apa (misal borongan/ls), volume tetap 1
-  if (!adaYangDicentang) {
-    baseVolume = 1;
-  }
-
-  // 4. Hitung Sisi, Buah, dan Waste (Ini selalu dikalikan)
-  const s =
-    b.jumlahSisi != null && b.jumlahSisi !== "" ? Number(b.jumlahSisi) : 1;
-  const bh = b.jumlahBh != null && b.jumlahBh !== "" ? Number(b.jumlahBh) : 1;
-  const totalJumlah = s * bh;
-
-  const w = b.waste != null && b.waste !== "" ? Number(b.waste) / 100 : 0;
-  const wasteMultiplier = 1 + w;
-
-  return baseVolume * totalJumlah * wasteMultiplier;
-}
-
-function buildBreakdownRows(breakdowns) {
-  // Tidak butuh lagi paymentUnit untuk hitung rumus
-  return breakdowns.map((b) => {
-    const subTotal = calcBreakdownSubtotal(b);
-    return {
-      keterangan: b.keterangan || null,
-
-      panjang: b.panjang ?? null,
-      isPChecked: !!b.isPChecked, // Simpan status centang ke database
-
-      lebar: b.lebar ?? null,
-      isLChecked: !!b.isLChecked,
-
-      tinggi: b.tinggi ?? null,
-      isTChecked: !!b.isTChecked,
-
-      luas: b.luas ?? null,
-      isLuasChecked: !!b.isLuasChecked,
-
-      keliling: b.keliling ?? null,
-      isKelChecked: !!b.isKelChecked,
-
-      berat: b.berat ?? null,
-      isBeratChecked: !!b.isBeratChecked,
-
-      diameter: b.diameter ?? null, // Diameter ga ikut dikali, cuma dicatat
-      jumlahSisi: b.jumlahSisi ?? null,
-      jumlahBh: b.jumlahBh ?? null,
-      waste: b.waste ?? null,
-
-      subTotal,
-    };
-  });
-}
 
 /**
  * POST /projects/:projectId/bv-items
@@ -246,42 +159,6 @@ router.get("/projects/:projectId/bv-items", async (req, res) => {
       },
       orderBy: { createdAt: "asc" },
     });
-
-    function withStatus(it) {
-      let status = "BELUM_DILINK";
-
-      if (it.linkedRabItem) {
-        let same = false;
-
-        // ==========================================
-        // PENGECEKAN SINKRONISASI DIBEDAKAN
-        // ==========================================
-        if (it.isHeaderOnly) {
-          // Khusus Header: Cukup cek kesamaan NAMA saja (karena tidak ada volume/satuan)
-          same = it.name === it.linkedRabItem.name;
-        } else {
-          // Item Biasa: Cek nama, volume, dan satuan
-          same =
-            Number(it.totalVolume) === Number(it.linkedRabItem.volume) &&
-            it.name === it.linkedRabItem.name &&
-            it.paymentUnit === it.linkedRabItem.paymentUnit;
-        }
-
-        // Catatan: Saya ubah dari "SUDAH_SINKRON" jadi "SUDAH_DILINK"
-        // supaya cocok dengan kode tombol Frontend Anda!
-        status = same ? "SUDAH_DILINK" : "BELUM_SINKRON";
-      }
-
-      return {
-        ...it,
-        // ==========================================
-        // KITA HAPUS PENGECUALIAN NULL UNTUK HEADER
-        // ==========================================
-        linkStatus: status,
-
-        children: (it.children || []).map(withStatus),
-      };
-    }
 
     res.json(items.map(withStatus));
   } catch (error) {
@@ -496,71 +373,30 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
     }
 
     const vol = Number(bvItem.totalVolume);
-    let rapUnitPrice = 0;
-    let componentRows = [];
     let finalCategory = category || null;
     let finalReference = reference || null;
-    let overheadPct =
-      overhead != null && overhead !== "" ? Number(overhead) : 0;
-    let calculatedRabPrice = 0;
 
-    // ==========================================
-    // 1. JALUR MASTER AHSP
-    // ==========================================
-    if (bvItem.sourceJobTypeId) {
-      // (Pastikan fungsi calculateJobPrice bisa diakses di sini)
-      const calc = await calculateJobPrice(bvItem.sourceJobTypeId);
-      if (!calc)
-        return res
-          .status(404)
-          .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
+    const pricing = await computeAhspPricing({
+      sourceJobTypeId: bvItem.sourceJobTypeId,
+      customComponents: components,
+      overheadOverride:
+        overhead != null && overhead !== "" ? Number(overhead) : undefined,
+    });
 
-      overheadPct = calc.jobType.overhead
-        ? Number(calc.jobType.overhead)
-        : overheadPct;
-      finalCategory = category || calc.jobType.category;
-      finalReference = reference || calc.jobType.reference;
-
-      componentRows = Object.entries(calc.breakdown).flatMap(
-        ([section, items]) =>
-          items.map((item) => ({
-            name: item.name,
-            unit: item.unit,
-            section,
-            coefficient: item.coefficient,
-            unitPrice: item.unitPrice,
-            lineTotal: item.lineTotal,
-          })),
-      );
-
-      rapUnitPrice = componentRows.reduce(
-        (sum, comp) => sum + Number(comp.lineTotal),
-        0,
-      );
-      calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
+    if (bvItem.sourceJobTypeId && !pricing) {
+      return res
+        .status(404)
+        .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
     }
-    // ==========================================
-    // 2. JALUR CUSTOM
-    // ==========================================
-    else {
-      let baseTotal = 0;
-      if (Array.isArray(components) && components.length > 0) {
-        componentRows = components.map((c) => {
-          const lineTotal =
-            Number(c.coefficient || 0) * Number(c.unitPrice || 0);
-          baseTotal += lineTotal;
-          return {
-            name: c.name,
-            unit: c.unit,
-            section: c.section,
-            coefficient: c.coefficient,
-            unitPrice: c.unitPrice,
-            lineTotal,
-          };
-        });
-      }
-      rapUnitPrice = baseTotal;
-      calculatedRabPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
+
+    const rapUnitPrice = pricing.rapUnitPrice;
+    const overheadPct = pricing.overheadPct;
+    const calculatedRabPrice = pricing.rabUnitPrice;
+    const componentRows = pricing.componentRows || [];
+
+    if (bvItem.sourceJobTypeId) {
+      finalCategory = category || pricing.jobType.category;
+      finalReference = reference || pricing.jobType.reference;
     }
 
     // ==========================================

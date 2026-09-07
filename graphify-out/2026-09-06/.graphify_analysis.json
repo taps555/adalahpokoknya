@@ -862,13 +862,13 @@
       "degree": 9
     },
     {
-      "id": "src_parsers_ahspsheetparser_cellstr",
-      "label": "cellStr()",
+      "id": "src_services_rabexporthelper_buildrabsheet",
+      "label": "buildRabSheet()",
       "degree": 8
     },
     {
-      "id": "src_parsers_excelparser_parseexcelbuffer",
-      "label": "parseExcelBuffer()",
+      "id": "src_routes_exporttofile_tsview_routes_renderitemrow",
+      "label": "renderItemRow()",
       "degree": 8
     }
   ],
@@ -929,41 +929,8 @@
       "why": "cross-file semantic connection"
     }
   ],
-  "questions": [
-    {
-      "type": "bridge_node",
-      "question": "Why does `multer` connect `survey.routes.js` to `crudGrub/bast.routes.js`, `complain.routes.js`, `lapangan.routes.js`, `package.json`?",
-      "why": "High betweenness centrality (0.053) - this node is a cross-community bridge."
-    },
-    {
-      "type": "bridge_node",
-      "question": "Why does `exceljs` connect `exceljs` to `bvExport.routes.js`, `rabExport.routes.js`, `timeScheduleExportHelper.js`, `package.json`, `fullExport.routes.js`?",
-      "why": "High betweenness centrality (0.044) - this node is a cross-community bridge."
-    },
-    {
-      "type": "bridge_node",
-      "question": "Why does `pdfkit` connect `crudGrub/bast.routes.js` to `complain.routes.js`, `complainView(bast_2).routes.js`, `surveyView.routes.js`, `package.json`?",
-      "why": "High betweenness centrality (0.039) - this node is a cross-community bridge."
-    },
-    {
-      "type": "isolated_nodes",
-      "question": "What connects `MISSING_VALUE_TOKENS`, `{ parsePriceLine, parseCoefficientLine }`, `{ parseHspkText }` to the rest of the system?",
-      "why": "260 weakly-connected nodes found - possible documentation gaps or missing edges."
-    },
-    {
-      "type": "low_cohesion",
-      "question": "Should `upload.routes.js` be split into smaller, more focused modules?",
-      "why": "Cohesion score 0.07804878048780488 - nodes in this community are weakly interconnected."
-    },
-    {
-      "type": "low_cohesion",
-      "question": "Should `excelParser.js` be split into smaller, more focused modules?",
-      "why": "Cohesion score 0.13306451612903225 - nodes in this community are weakly interconnected."
-    },
-    {
-      "type": "low_cohesion",
-      "question": "Should `complain.routes.js` be split into smaller, more focused modules?",
-      "why": "Cohesion score 0.10098522167487685 - nodes in this community are weakly interconnected."
-    }
-  ]
+  "tokens": {
+    "input": 0,
+    "output": 0
+  }
 }

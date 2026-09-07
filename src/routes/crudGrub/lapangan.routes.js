@@ -50,6 +50,20 @@ router.put(
       if (!existing)
         return res.status(404).json({ error: "Item tidak ditemukan." });
 
+      // Cek semua PO item induk sudah APPROVED
+      const relatedPoItems = await prisma.purchaseOrderItem.findMany({
+        where: { materialRequestId: id },
+        include: { purchaseOrder: true },
+      });
+      const blockingPO = relatedPoItems.find(
+        (pi) => pi.purchaseOrder.status !== "APPROVED",
+      );
+      if (blockingPO) {
+        return res.status(400).json({
+          error: `Barang belum bisa diupdate lapangan. PO induk ${blockingPO.purchaseOrder.poNumber || blockingPO.purchaseOrder.id} belum di-approve.`,
+        });
+      }
+
       if (!existing.orderedVolume || existing.orderedVolume <= 0) {
         return res.status(400).json({
           error:
@@ -125,6 +139,22 @@ router.put(
 
         if (!existing) {
           skipped.push({ id: item.id, reason: "Item tidak ditemukan." });
+          continue;
+        }
+
+        // Cek semua PO item induk sudah APPROVED
+        const relatedPoItems = await prisma.purchaseOrderItem.findMany({
+          where: { materialRequestId: item.id },
+          include: { purchaseOrder: true },
+        });
+        const blockingPO = relatedPoItems.find(
+          (pi) => pi.purchaseOrder.status !== "APPROVED",
+        );
+        if (blockingPO) {
+          skipped.push({
+            id: item.id,
+            reason: `PO induk ${blockingPO.purchaseOrder.poNumber || blockingPO.purchaseOrder.id} belum di-approve.`,
+          });
           continue;
         }
 
@@ -204,13 +234,19 @@ router.put(
       // 1. Cek Surat Jalan (PO Item)
       const poItem = await prisma.purchaseOrderItem.findUnique({
         where: { id: poItemId },
-        include: { materialRequest: true }, // Ambil data RAB induknya sekalian
+        include: { materialRequest: true, purchaseOrder: true }, // Ambil data RAB induknya sekalian
       });
 
       if (!poItem) {
         return res
           .status(404)
           .json({ error: "Item Surat Jalan/PO tidak ditemukan." });
+      }
+
+      if (poItem.purchaseOrder.status !== "APPROVED") {
+        return res.status(400).json({
+          error: "PO belum di-approve. Barang belum boleh diterima.",
+        });
       }
 
       const updatedRv =
@@ -310,12 +346,19 @@ router.post(
       // Cek PO
       const poItem = await prisma.purchaseOrderItem.findUnique({
         where: { id: poItemId },
+        include: { purchaseOrder: true },
       });
 
       if (!poItem) {
         return res
           .status(404)
           .json({ error: "Barang pesanan tidak ditemukan." });
+      }
+
+      if (poItem.purchaseOrder.status !== "APPROVED") {
+        return res.status(400).json({
+          error: "PO belum di-approve. Surat Jalan belum boleh dibuat.",
+        });
       }
 
       // Simpan ke DB DeliveryReceipt
@@ -373,6 +416,19 @@ router.post("/surat-jalan/bulk", async (req, res) => {
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
         // 1. Simpan Riwayat Surat Jalan untuk masing-masing barang
+        const poItem = await tx.purchaseOrderItem.findUnique({
+          where: { id: item.poItemId },
+          include: { purchaseOrder: true },
+        });
+        if (!poItem) {
+          throw new Error(`PO Item ${item.poItemId} tidak ditemukan.`);
+        }
+        if (poItem.purchaseOrder.status !== "APPROVED") {
+          throw new Error(
+            `PO ${poItem.purchaseOrder.poNumber || poItem.purchaseOrder.id} belum di-approve.`,
+          );
+        }
+
         const newSJ = await tx.deliveryReceipt.create({
           data: {
             poItemId: item.poItemId,
