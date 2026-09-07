@@ -89,7 +89,12 @@ router.get("/:id", async (req, res, next) => {
   try {
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      include: { client: true, pairedProject: true },
+      include: { 
+        client: true, 
+        pairedProject: true,
+        rabItems: true,
+        purchaseOrders: true
+      },
     });
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan" });
