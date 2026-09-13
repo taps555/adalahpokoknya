@@ -388,20 +388,38 @@ router.post("/po", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Minimal 1 item PO harus diisi" });
     }
 
+    // Kumpulkan warning kalau ada item yang melebihi estimasi
+    const qtyWarnings = [];
+    for (const item of items) {
+      if (!item.materialRequestId) continue;
+      const mrItem = await prisma.materialRequestItem.findUnique({
+        where: { id: item.materialRequestId },
+      });
+      if (!mrItem) continue;
+      const sisa = mrItem.estimatedVolume - (mrItem.receivedVolume || 0);
+      if (Number(item.qty) > sisa) {
+        qtyWarnings.push(`"${mrItem.itemName}" melebihi sisa kebutuhan (${Number(item.qty).toFixed(2)} > ${sisa.toFixed(2)})`);
+      }
+    }
+
     const newPO = await prisma.$transaction(async (tx) => {
+      // 0. Sanitasi materialRequestId — filter ID yang tidak valid
+      const validMrIds = new Set();
       for (const item of items) {
-        if (!item.materialRequestId) continue;
-        const mrItem = await tx.materialRequestItem.findUnique({
-          where: { id: item.materialRequestId },
-        });
-        if (!mrItem) continue;
-        const sisa = mrItem.estimatedVolume - (mrItem.receivedVolume || 0);
-        if (Number(item.qty) > sisa) {
-          throw new Error(
-            `Qty untuk "${mrItem.itemName}" melebihi sisa kebutuhan (${sisa})`,
-          );
+        let mrId = item.materialRequestId;
+        if (!mrId || mrId === "" || mrId === "null" || mrId === "undefined" || String(mrId).startsWith("php_")) {
+          item.materialRequestId = null;
+          continue;
+        }
+        // Cek apakah ID benar-benar ada di database
+        const exists = await tx.materialRequestItem.findUnique({ where: { id: mrId }, select: { id: true } });
+        if (!exists) {
+          item.materialRequestId = null; // ID tidak valid, set null
+        } else {
+          validMrIds.add(mrId);
         }
       }
+
       // 1. create dulu tanpa poNumber, biar seq auto-increment kegenerate
       const created = await tx.purchaseOrder.create({
         data: {
@@ -425,13 +443,15 @@ router.post("/po", verifyToken, async (req, res) => {
           items: {
             create: items.map((item) => {
               // 🔥 JURUS PENCUCIAN ID:
-              // Kalau ID dari frontend kosong, string kosong, "null", atau "undefined", paksa jadi null beneran!
+              // Kalau ID dari frontend kosong, string kosong, "null", "undefined",
+              // atau berupa prefix "php_" (ID buatan frontend untuk habis pakai), paksa jadi null!
               let mrId = item.materialRequestId;
               if (
                 !mrId ||
                 mrId === "" ||
                 mrId === "null" ||
-                mrId === "undefined"
+                mrId === "undefined" ||
+                String(mrId).startsWith("php_")
               ) {
                 mrId = null;
               }
@@ -466,24 +486,24 @@ router.post("/po", verifyToken, async (req, res) => {
         include: { items: true },
       });
 
-      // 2. SIHIR OTOMATIS: Update Volume & Status di RAB
-      for (const item of items) {
-        if (!item.materialRequestId) continue;
-
-        const mrItem = await tx.materialRequestItem.findUnique({
-          where: { id: item.materialRequestId },
-        });
-
-        if (mrItem) {
-          const newOrderedVolume =
-            (mrItem.orderedVolume || 0) + Number(item.qty);
-
-          await tx.materialRequestItem.update({
-            where: { id: item.materialRequestId },
-            data: { orderedVolume: newOrderedVolume },
-          });
-        }
-      }
+      // 2. SIHIR OTOMATIS: Update Volume & Status di RAB — DINONAKTIFKAN
+      //    PO melebihi est volume hanya warning, tidak boleh mengubah RAB.
+      //    Penerimaan barang (receive) tetap update orderedVolume/receivedVolume.
+      //
+      // for (const item of items) {
+      //   if (!item.materialRequestId) continue;
+      //   const mrItem = await tx.materialRequestItem.findUnique({
+      //     where: { id: item.materialRequestId },
+      //   });
+      //   if (mrItem) {
+      //     const newOrderedVolume =
+      //       (mrItem.orderedVolume || 0) + Number(item.qty);
+      //     await tx.materialRequestItem.update({
+      //       where: { id: item.materialRequestId },
+      //       data: { orderedVolume: newOrderedVolume },
+      //     });
+      //   }
+      // }
 
       // 3. Tautkan PO HABIS_PAKAI ke permintaan lapangan (kalau ada)
       if (permintaanHabisPakaiId && (kategoriPO || "MATERIAL") === "HABIS_PAKAI") {
@@ -499,16 +519,18 @@ router.post("/po", verifyToken, async (req, res) => {
     res.json({
       message: "Berhasil! Surat PO tercipta dan status RAB terupdate otomatis.",
       data: newPO,
+      warnings: qtyWarnings.length ? qtyWarnings : undefined,
     });
   } catch (error) {
     console.error("Create PO Error:", error);
     if (error.code === "P2002") {
       return res.status(409).json({ error: "Nomor PO sudah dipakai" });
     }
-    if (error.message?.includes("melebihi sisa kebutuhan")) {
-      return res.status(400).json({ error: error.message });
+    if (error.code === "P2003") {
+      // Foreign key constraint violation
+      return res.status(400).json({ error: "Referensi data tidak valid (foreign key). Periksa supplier, project, atau material request ID." });
     }
-    res.status(500).json({ error: "Gagal membuat surat PO." });
+    res.status(500).json({ error: "Gagal membuat surat PO: " + error.message });
   }
 });
 
@@ -809,7 +831,37 @@ router.put(
           rejectedById: null,
         },
       });
-      res.json({ message: "PO berhasil di-Approve!", po });
+
+      // JANGAN buat PengajuanPembayaran baru otomatis di sini.
+      // Cukup finalkan PengajuanPembayaran yang sudah ada (kalau ada) biar
+      // statusnya sinkron dengan PO yang baru saja di-approve atasan.
+      const existingPengajuan = await prisma.pengajuanPembayaran.findFirst({
+        where: {
+          poId: req.params.id,
+          status: { notIn: ["REJECTED", "APPROVED"] },
+        },
+      });
+
+      let pengajuan = null;
+      if (existingPengajuan) {
+        pengajuan = await prisma.pengajuanPembayaran.update({
+          where: { id: existingPengajuan.id },
+          data: {
+            status: "APPROVED",
+            approvedById: req.user?.userId || null,
+            approvedAt: new Date(),
+            verifiedById: existing.verifiedById,
+            verifiedAt: existing.verifiedAt,
+            rejectReason: null,
+          },
+        });
+      }
+
+      res.json({
+        message: "PO berhasil di-Approve!",
+        po,
+        pengajuan,
+      });
     } catch (error) {
       console.error("Approve PO Error:", error);
       if (error.code === "P2025") {

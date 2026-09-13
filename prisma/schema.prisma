@@ -177,17 +177,19 @@ model Client {
 }
 
 model Project {
-  id         String     @id @default(cuid())
-  name       String
-  location   String
-  hspkPeriod Int
-  discipline Discipline // <-- TAMBAH, wajib diisi
-  grade      String? // <-- TAMBAH
-  startDate  DateTime? // <-- TAMBAH: tanggal mulai proyek, buat hitung tanggal per minggu TS
-  clientId   String
-  client     Client     @relation(fields: [clientId], references: [id])
-  rabItems   RabItem[]
-  bvItems    BvItem[]
+  id            String     @id @default(cuid())
+  name          String
+  location      String
+  hspkPeriod    Int
+  discipline    Discipline? // Dibuat opsional; proyek bisa bersifat campuran/general
+  grade         String?    // Grade lama (backward compatibility / general)
+  interiorGrade String?    // Grade HSPK untuk pekerjaan Interior
+  sipilGrade    String?    // Grade HSPK untuk pekerjaan Sipil
+  startDate     DateTime? // <-- TAMBAH: tanggal mulai proyek, buat hitung tanggal per minggu TS
+  clientId      String
+  client        Client     @relation(fields: [clientId], references: [id])
+  rabItems      RabItem[]
+  bvItems       BvItem[]
 
   rabStatus        RabStatus         @default(DRAFT)
   materialRequests MaterialRequest[]
@@ -331,6 +333,10 @@ model BvItem {
   name        String?
   keterangan  String?
   paymentUnit String?
+
+  // Label disiplin manual untuk BV item (INTERIOR/SIPIL/GENERAL). Kalau null,
+  // dianggap GENERAL.
+  disciplineLabel String? @default("GENERAL")
 
   totalVolume Decimal @db.Decimal(14, 4)
 

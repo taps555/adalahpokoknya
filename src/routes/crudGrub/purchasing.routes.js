@@ -315,9 +315,9 @@ router.get("/pengajuan-bayar/inbox-finance", async (req, res) => {
 router.get("/pengajuan-bayar/po-siap-ajukan", async (req, res) => {
   try {
     const { projectId } = req.query;
-    // PO yang sudah dilewatkan Finance (verified) — MENUNGGU_ATASAN
-    // atau sudah tuntas APPROVED.
-    const where = { status: { in: ["MENUNGGU_ATASAN", "APPROVED"] } };
+    // PO yang sudah di-approve atasan saja yang bisa jadi sumber pengajuan bayar.
+    // PO MENUNGGU_ATASAN belum final, jadi tidak muncul di sini.
+    const where = { status: "APPROVED" };
     if (projectId) where.projectId = projectId;
 
     const pos = await prisma.purchaseOrder.findMany({
@@ -364,8 +364,8 @@ router.get("/pengajuan-bayar/po-siap-ajukan", async (req, res) => {
 router.get("/pengajuan-bayar/riwayat-pembelian", async (req, res) => {
   try {
     const { projectId } = req.query;
-    // Sudah lewat Finance (ada verifiedAt) — inilah yang berhak dilihat atasan.
-    const where = { status: { in: ["MENUNGGU_ATASAN", "APPROVED"] } };
+    // Tampilkan semua PO sebagai riwayat pemesanan (kecuali draft internal)
+    const where = {};
     if (projectId) where.projectId = projectId;
 
     const pos = await prisma.purchaseOrder.findMany({
@@ -396,6 +396,49 @@ router.get("/pengajuan-bayar/riwayat-pembelian", async (req, res) => {
   } catch (error) {
     console.error("Get Riwayat Pembelian Error:", error);
     res.status(500).json({ error: "Gagal mengambil riwayat pembelian" });
+  }
+});
+
+/**
+ * GET /api/pengajuan-bayar/po-approved?projectId=xxx
+ * PO berstatus APPROVED beserta itemnya + pengajuanPembayaran yang sudah ada
+ * (kalau ada). Dipakai frontend untuk tabel "Daftar Pengajuan Bayar" yang
+ * menampilkan NOMOR PO sebagai info utama (nomor PPB jadi info sekunder).
+ */
+router.get("/pengajuan-bayar/po-approved", async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const where = { status: "APPROVED" };
+    if (projectId) where.projectId = projectId;
+
+    const pos = await prisma.purchaseOrder.findMany({
+      where,
+      include: {
+        supplier: { select: { id: true, name: true } },
+        project: { select: { id: true, name: true } },
+        approvedBy: { select: { id: true, name: true } },
+        verifiedBy: { select: { id: true, name: true } },
+        items: {
+          orderBy: { id: "asc" },
+          include: {
+            materialRequest: { select: { groupName: true, jobName: true } },
+          },
+        },
+        pengajuanPembayaran: {
+          include: {
+            verifiedBy: { select: { id: true, name: true } },
+            approvedBy: { select: { id: true, name: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+      },
+      orderBy: { approvedAt: "desc" },
+    });
+
+    res.json(pos);
+  } catch (error) {
+    console.error("Get PO Approved Error:", error);
+    res.status(500).json({ error: "Gagal mengambil PO approved" });
   }
 });
 
@@ -465,6 +508,28 @@ router.post("/pengajuan-bayar", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Supplier wajib diisi" });
     }
 
+    // Kalau pengajuan terkait PO yang sudah final (APPROVED), langsung finalkan
+    // pengajuan bayarnya karena finance sudah approve PO dan atasan sudah approve PO.
+    let initialStatus = "PENDING";
+    let verifiedById = null;
+    let verifiedAt = null;
+    let approvedById = null;
+    let approvedAt = null;
+
+    if (poId) {
+      const po = await prisma.purchaseOrder.findUnique({
+        where: { id: poId },
+        select: { status: true, verifiedById: true, verifiedAt: true, approvedById: true, approvedAt: true },
+      });
+      if (po?.status === "APPROVED") {
+        initialStatus = "APPROVED";
+        verifiedById = po.verifiedById;
+        verifiedAt = po.verifiedAt;
+        approvedById = po.approvedById;
+        approvedAt = po.approvedAt;
+      }
+    }
+
     const created = await prisma.pengajuanPembayaran.create({
       data: {
         supplierId: finalSupplierId,
@@ -474,6 +539,11 @@ router.post("/pengajuan-bayar", verifyToken, async (req, res) => {
         totalTagihan: Number(totalTagihan || 0),
         catatan,
         items: items || undefined,
+        status: initialStatus,
+        verifiedById,
+        verifiedAt,
+        approvedById,
+        approvedAt,
       },
     });
 
@@ -547,36 +617,13 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
 router.put(
   "/pengajuan-bayar/:id/verify",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("SUPER_ADMIN"),
   async (req, res) => {
     try {
-      const { catatanFinance } = req.body || {};
       const existing = await prisma.pengajuanPembayaran.findUnique({
         where: { id: req.params.id },
       });
-      if (!existing)
-        return res
-          .status(404)
-          .json({ error: "Pengajuan pembayaran tidak ditemukan" });
-      if (existing.status !== "PENDING") {
-        return res.status(400).json({
-          error: `Hanya pengajuan status PENDING yang bisa diverifikasi. Sekarang: ${existing.status}`,
-        });
-      }
-
-      const pengajuan = await prisma.pengajuanPembayaran.update({
-        where: { id: req.params.id },
-        data: {
-          status: "APPROVED_FINANCE",
-          verifiedById: req.user?.userId || null,
-          verifiedAt: new Date(),
-          catatanFinance: catatanFinance ? String(catatanFinance).trim() : null,
-        },
-      });
-      res.json({
-        message: "Pengajuan diverifikasi Finance, menunggu persetujuan atasan.",
-        data: pengajuan,
-      });
+      return res.status(400).json({ error: "Pengajuan bayar tidak perlu verifikasi Finance. Langsung approve atasan." });
     } catch (error) {
       console.error("Verify Pengajuan Error:", error);
       if (error.code === "P2025") {
@@ -626,6 +673,22 @@ router.put(
           rejectReason: null,
         },
       });
+
+      // Sinkronkan status PO terkait menjadi APPROVED jika belum
+      if (existing.poId) {
+        await prisma.purchaseOrder.update({
+          where: { id: existing.poId },
+          data: {
+            status: "APPROVED",
+            approvedById: req.user?.userId || null,
+            approvedAt: new Date(),
+            rejectReason: null,
+            rejectedAt: null,
+            rejectedById: null,
+          },
+        });
+      }
+
       res.json({ message: "Pengajuan bayar di-approve", data: pengajuan });
     } catch (error) {
       console.error("Approve Pengajuan Bayar Error:", error);
@@ -711,6 +774,19 @@ router.put(
           catatan: String(reason).trim(),
         },
       });
+
+      // Kalau pengajuan ditolak, PO terkait kembali ke MENUNGGU_ATASAN agar bisa diajukan ulang
+      if (existing.poId) {
+        await prisma.purchaseOrder.update({
+          where: { id: existing.poId },
+          data: {
+            status: "MENUNGGU_ATASAN",
+            approvedById: null,
+            approvedAt: null,
+          },
+        });
+      }
+
       res.json({ message: "Pengajuan bayar ditolak", data: pengajuan });
     } catch (error) {
       console.error("Reject Pengajuan Bayar Error:", error);

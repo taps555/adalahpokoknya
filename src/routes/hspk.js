@@ -41,6 +41,30 @@ router.get("/categories", async (req, res, next) => {
   }
 });
 
+// GET /api/hspk/grades?period=2026&discipline=INTERIOR
+// Daftar grade yang tersedia untuk periode dan disiplin tertentu.
+router.get('/grades', async (req, res, next) => {
+  try {
+    const { period, discipline } = req.query;
+    if (!period) return res.status(400).json({ error: 'period wajib diisi' });
+    if (!discipline) return res.status(400).json({ error: 'discipline wajib diisi' });
+
+    const rows = await prisma.jobType.findMany({
+      where: {
+        period: Number(period),
+        discipline,
+        grade: { not: null },
+      },
+      distinct: ['grade'],
+      select: { grade: true },
+      orderBy: { grade: 'asc' },
+    });
+    res.json(rows.map(r => r.grade));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/hspk/jobtypes?period=2026&search=dinding&category=A
 // Preview/cari daftar jenis pekerjaan (AHSP) untuk periode tertentu.
 // Berguna untuk memastikan data yang dipilih memang lengkap sebelum

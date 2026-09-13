@@ -5,17 +5,15 @@ const router = express.Router();
 const prisma = require("../lib/prisma");
 
 // POST /api/projects
-// body: { name, location, hspkPeriod, clientId? , clientName? }
-// - clientId dipakai kalau user pilih client yang sudah ada
-// - clientName dipakai kalau user pilih "Client Baru"
+// body: { name, location, hspkPeriod, interiorGrade, sipilGrade, clientId?, clientName? }
 router.post("/", async (req, res, next) => {
   try {
     const {
       name,
       location,
       hspkPeriod,
-      discipline,
-      grade,
+      interiorGrade,
+      sipilGrade,
       clientId,
       clientName,
     } = req.body;
@@ -31,21 +29,32 @@ router.post("/", async (req, res, next) => {
         .status(400)
         .json({ error: "Periode data HSPK/AHSP wajib dipilih" });
     }
-    if (!discipline) {
-      return res.status(400).json({ error: "Disiplin wajib dipilih" });
+
+    const periodNum = Number(hspkPeriod);
+
+    // Validasi grade Interior
+    if (!interiorGrade) {
+      return res.status(400).json({ error: "Grade Interior wajib dipilih" });
+    }
+    const interiorExists = await prisma.jobType.findFirst({
+      where: { period: periodNum, discipline: "INTERIOR", grade: interiorGrade },
+    });
+    if (!interiorExists) {
+      return res.status(400).json({
+        error: `Data HSPK Interior periode ${periodNum} grade ${interiorGrade} tidak ditemukan`,
+      });
     }
 
-    // pastikan periode+disiplin+grade yang dipilih memang punya data di DB
-    const periodExists = await prisma.jobType.findFirst({
-      where: {
-        period: Number(hspkPeriod),
-        discipline,
-        ...(grade ? { grade } : {}),
-      },
+    // Validasi grade Sipil
+    if (!sipilGrade) {
+      return res.status(400).json({ error: "Grade Sipil wajib dipilih" });
+    }
+    const sipilExists = await prisma.jobType.findFirst({
+      where: { period: periodNum, discipline: "SIPIL", grade: sipilGrade },
     });
-    if (!periodExists) {
+    if (!sipilExists) {
       return res.status(400).json({
-        error: `Data HSPK/AHSP untuk periode ${hspkPeriod} - ${discipline}${grade ? " - " + grade : ""} tidak ditemukan di database`,
+        error: `Data HSPK Sipil periode ${periodNum} grade ${sipilGrade} tidak ditemukan`,
       });
     }
 
@@ -70,9 +79,12 @@ router.post("/", async (req, res, next) => {
       data: {
         name: name.trim(),
         location: location.trim(),
-        hspkPeriod: Number(hspkPeriod),
-        discipline,
-        grade: grade || null,
+        hspkPeriod: periodNum,
+        // Proyek bersifat general (campuran); disiplin kosong, grade disimpan terpisah.
+        discipline: null,
+        grade: null,
+        interiorGrade: interiorGrade || null,
+        sipilGrade: sipilGrade || null,
         clientId: finalClientId,
       },
       include: { client: true },
@@ -177,6 +189,8 @@ router.put("/:id", async (req, res, next) => {
       hspkPeriod,
       discipline,
       grade,
+      interiorGrade,
+      sipilGrade,
       clientId,
       clientName,
     } = req.body;
@@ -195,34 +209,41 @@ router.put("/:id", async (req, res, next) => {
     const data = {};
     if (name !== undefined) data.name = name.trim();
     if (location !== undefined) data.location = location.trim();
+    if (discipline !== undefined) data.discipline = discipline || null;
+    if (grade !== undefined) data.grade = grade || null;
+    if (interiorGrade !== undefined) data.interiorGrade = interiorGrade || null;
+    if (sipilGrade !== undefined) data.sipilGrade = sipilGrade || null;
 
-    const finalDiscipline =
-      discipline !== undefined ? discipline : existing.discipline;
     const finalPeriod =
       hspkPeriod !== undefined ? Number(hspkPeriod) : existing.hspkPeriod;
-    const finalGrade = grade !== undefined ? grade || null : existing.grade;
+    const finalInterior =
+      interiorGrade !== undefined ? interiorGrade || null : existing.interiorGrade;
+    const finalSipil =
+      sipilGrade !== undefined ? sipilGrade || null : existing.sipilGrade;
 
-    // validasi ulang cuma kalau period/discipline/grade berubah
-    if (
-      hspkPeriod !== undefined ||
-      discipline !== undefined ||
-      grade !== undefined
-    ) {
-      const periodExists = await prisma.jobType.findFirst({
-        where: {
-          period: finalPeriod,
-          discipline: finalDiscipline,
-          ...(finalGrade ? { grade: finalGrade } : {}),
-        },
+    data.hspkPeriod = finalPeriod;
+
+    // validasi data HSPK hanya kalau grade/periode berubah
+    if (hspkPeriod !== undefined || interiorGrade !== undefined) {
+      const interiorExists = await prisma.jobType.findFirst({
+        where: { period: finalPeriod, discipline: "INTERIOR", grade: finalInterior },
       });
-      if (!periodExists) {
+      if (!interiorExists && finalInterior) {
         return res.status(400).json({
-          error: `Data HSPK/AHSP untuk periode ${finalPeriod} - ${finalDiscipline}${finalGrade ? " - " + finalGrade : ""} tidak ditemukan di database`,
+          error: `Data HSPK Interior periode ${finalPeriod} grade ${finalInterior} tidak ditemukan`,
         });
       }
-      data.hspkPeriod = finalPeriod;
-      data.discipline = finalDiscipline;
-      data.grade = finalGrade;
+    }
+
+    if (hspkPeriod !== undefined || sipilGrade !== undefined) {
+      const sipilExists = await prisma.jobType.findFirst({
+        where: { period: finalPeriod, discipline: "SIPIL", grade: finalSipil },
+      });
+      if (!sipilExists && finalSipil) {
+        return res.status(400).json({
+          error: `Data HSPK Sipil periode ${finalPeriod} grade ${finalSipil} tidak ditemukan`,
+        });
+      }
     }
 
     if (clientId) {

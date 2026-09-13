@@ -2,8 +2,8 @@
 
 require("dotenv").config();
 const express = require("express");
+const path = require("path");
 const cors = require("cors");
-const path = require("path"); // ← tambah ini
 
 const uploadRoutes = require("./routes/upload.routes");
 const jobsRoutes = require("./routes/jobs.routes");
@@ -21,7 +21,11 @@ const bv = require("./routes/crudGrub/bv.routes");
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "..", "frontend")));
+
+// Static serve untuk frontend build
+// src/index.js -> backend/adalahpokoknya/src -> backend/adalahpokoknya -> backend -> projekbaru -> frontend/dist
+const FRONTEND_DIST = path.join(__dirname, "..", "..", "..", "frontend", "dist");
+app.use(express.static(FRONTEND_DIST));
 
 app.use(express.static("public"));
 
@@ -71,6 +75,14 @@ app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 app.use("/api", require("./routes/crudGrub/kanban.routes"));
 app.use("/api", require("./routes/crudGrub/purchasing.routes"));
+
+// SPA fallback: kirim index.html untuk route non-API
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(FRONTEND_DIST, 'index.html'), (err) => {
+    if (err) next(err);
+  });
+});
 
 app.use((err, req, res, next) => {
   if (err) {

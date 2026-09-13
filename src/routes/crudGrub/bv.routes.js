@@ -8,6 +8,9 @@ const {
   withStatus,
 } = require("../../services/bvCalculationService");
 const { computeAhspPricing } = require("../../services/ahspPricingService");
+const ExcelJS = require("exceljs");
+const { buildBvSheet } = require("../../services/bvExportHelper");
+const { buildRabSheet } = require("../../services/rabExportHelper");
 
 const router = express.Router();
 
@@ -1148,4 +1151,714 @@ router.post("/bv-items/:id/unlink", async (req, res) => {
       .json({ error: "Terjadi kesalahan pada server saat unlink." });
   }
 });
+// =========================================================
+// EXPORT BACKUP VOLUME + RAB KE EXCEL (6 SHEET dengan ExcelJS)
+// =========================================================
+const ROMAN = ["I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV"];
+
+function fmtRp(cell) { cell.numFmt = "#,##0"; }
+function fmtVol(cell) { cell.numFmt = "#,##0.00"; }
+
+function terbilang(n) {
+  n = Math.floor(Math.abs(Number(n) || 0));
+  const s = ["","satu","dua","tiga","empat","lima","enam","tujuh","delapan","sembilan","sepuluh","sebelas"];
+  if (n < 12) return s[n];
+  if (n < 20) return s[n-10] + " belas";
+  if (n < 100) { const t = Math.floor(n/10); return (t===1?"se":s[t]+" puluh ") + (n%10 ? s[n%10] : ""); }
+  if (n < 200) return "seratus " + terbilang(n-100);
+  if (n < 1000) { const t = Math.floor(n/100); return s[t] + " ratus " + terbilang(n%100); }
+  if (n < 2000) return "seribu " + terbilang(n-1000);
+  if (n < 1000000) { const t = Math.floor(n/1000); return terbilang(t) + " ribu " + terbilang(n%1000); }
+  if (n < 1000000000) { const t = Math.floor(n/1000000); return terbilang(t) + " juta " + terbilang(n%1000000); }
+  if (n < 1000000000000) { const t = Math.floor(n/1000000000); return terbilang(t) + " miliar " + terbilang(n%1000000000); }
+  return terbilang(Math.floor(n/1000000000000)) + " triliun " + terbilang(n%1000000000000);
+}
+function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+// --- BV sheet ---
+async function buildBvSheetXLSX(ws, projectId, project, labelFilter) {
+  const groups = await prisma.rabGroup.findMany({
+    where: { projectId, parentId: null },
+    include: {
+      bvItems: { where: { parentBvItemId: null }, include: { breakdowns: true, children: { include: { breakdowns: true }, orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "asc" } },
+      children: { include: { bvItems: { where: { parentBvItemId: null }, include: { breakdowns: true, children: { include: { breakdowns: true }, orderBy: { createdAt: "asc" } } }, orderBy: { createdAt: "asc" } } } },
+    },
+    orderBy: { order: "asc" },
+  });
+  const filterBv = (items) => items.filter(it => (it.disciplineLabel || "GENERAL").toUpperCase() === labelFilter);
+
+  ws.columns = [{width:6},{width:50},{width:10},{width:12},{width:25},{width:14},{width:2}];
+  ws.mergeCells("B2:F2");
+  ws.getCell("B2").value = "BACK UP VOLUME";
+  ws.getCell("B2").font = { bold: true, size: 14, name: "Arial" };
+  ws.getCell("B2").alignment = { horizontal: "center", vertical: "middle" };
+  ws.getCell("B2").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+  const info = [
+    ["Nama Kegiatan", project?.name || "-"],
+    ["Nama Pekerjaan", project?.client?.name || "-"],
+    ["Lokasi Pekerjaan", project?.location || "-"],
+    ["Tahun Anggaran", String(project?.hspkPeriod ?? "-")],
+  ];
+  let r = 4;
+  for (const [label, value] of info) {
+    ws.getCell(`B${r}`).value = label; ws.getCell(`B${r}`).font = { size: 10, name: "Arial" };
+    ws.getCell(`C${r}`).value = ":"; ws.getCell(`C${r}`).alignment = { horizontal: "center" };
+    ws.mergeCells(`D${r}:F${r}`); ws.getCell(`D${r}`).value = value; ws.getCell(`D${r}`).font = { size: 10, name: "Arial" };
+    r++;
+  }
+  const hr = 9;
+  const hdrs = ["NO","URAIAN PEKERJAAN","SATUAN","VOLUME","KETERANGAN","LABEL DISIPLIN"];
+  for (let c = 0; c < 6; c++) {
+    const cell = ws.getCell(hr, c+1);
+    cell.value = hdrs[c];
+    cell.font = { bold: true, size: 10, name: "Arial" };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+    cell.border = { top: {style:"medium"}, bottom: {style:"medium"}, left: {style: c===0?"medium":"thin"}, right: {style: c===5?"medium":"thin"} };
+  }
+  r = hr + 1;
+  let gi = 0;
+  for (const group of groups) {
+    const gBv = filterBv(group.bvItems || []);
+    const cBv = (group.children || []).flatMap(sub => filterBv(sub.bvItems || []));
+    if (gBv.length === 0 && cBv.length === 0) continue;
+    ws.getCell(`A${r}`).value = ROMAN[gi] || String(gi+1);
+    ws.getCell(`B${r}`).value = (group.name || "").toUpperCase();
+    ws.getRow(r).font = { bold: true, size: 10, name: "Arial" };
+    for (let c = 1; c <= 6; c++) ws.getCell(r, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8E8E8" } };
+    r++; gi++;
+    const walk = (items, depth) => {
+      let n = 1;
+      for (const it of items) {
+        const isChild = depth > 0;
+        ws.getCell(`A${r}`).value = isChild ? "" : String(n++);
+        ws.getCell(`A${r}`).alignment = { horizontal: "center", vertical: "middle" };
+        ws.getCell(`B${r}`).value = (isChild ? "  - " : "") + (it.name || "");
+        ws.getCell(`B${r}`).alignment = { vertical: "middle", wrapText: true };
+        ws.getCell(`C${r}`).value = it.isHeaderOnly ? "" : (it.paymentUnit || "");
+        ws.getCell(`C${r}`).alignment = { horizontal: "center" };
+        ws.getCell(`D${r}`).value = it.isHeaderOnly ? "" : Number(it.totalVolume || 0);
+        fmtVol(ws.getCell(`D${r}`));
+        ws.getCell(`D${r}`).alignment = { horizontal: "right" };
+        ws.getCell(`E${r}`).value = it.keterangan || "";
+        ws.getCell(`F${r}`).value = it.disciplineLabel || "GENERAL";
+        ws.getCell(`F${r}`).alignment = { horizontal: "center" };
+        for (let c = 1; c <= 6; c++) {
+          ws.getCell(r, c).font = { size: 10, name: "Arial" };
+          ws.getCell(r, c).border = { top: {style:"dotted"}, bottom: {style:"dotted"}, left: {style: c===1?"medium":"thin"}, right: {style: c===6?"medium":"thin"} };
+        }
+        r++;
+        if (it.children && it.children.length > 0) { const ch = filterBv(it.children); if (ch.length > 0) walk(ch, depth+1); }
+      }
+    };
+    walk(gBv, 0);
+    for (const sub of group.children || []) {
+      const si = filterBv(sub.bvItems || []);
+      if (si.length === 0) continue;
+      ws.getCell(`B${r}`).value = sub.name; ws.getRow(r).font = { bold: true, size: 10, name: "Arial" }; r++;
+      walk(si, 0);
+    }
+    r++;
+  }
+}
+
+// --- BQ (RAB) sheet — format profesional sama persis dengan gambar referensi ---
+async function buildBqSheetXLSX(ws, projectId, project, discFilter) {
+  function colRange(startCol, endCol) {
+    const cols = []; let c = startCol.charCodeAt(0); const end = endCol.charCodeAt(0);
+    while (c <= end) { cols.push(String.fromCharCode(c)); c++; }
+    return cols;
+  }
+  const groups = await prisma.rabGroup.findMany({
+    where: { projectId, parentId: null },
+    include: {
+      items: { include: { bvItem: { select: { id: true, parentBvItemId: true } } }, orderBy: { order: "asc" } },
+      children: { include: { items: { include: { bvItem: { select: { id: true, parentBvItemId: true } } }, orderBy: { order: "asc" } } } },
+    },
+    orderBy: { order: "asc" },
+  });
+  const filterItems = (items) => items.filter(it => {
+    if (discFilter === "GENERAL") return true;
+    const d = (it.discipline || "GENERAL").toUpperCase();
+    return d === discFilter;
+  });
+
+  // Layout kolom B-J (9 kolom + border kiri/kanan medium)
+  ws.columns = [
+    { width: 2 },   // A — margin
+    { width: 5 },   // B — NO
+    { width: 45 },  // C — ITEM PEKERJAAN
+    { width: 22 },  // D — SPESIFIKASI RINGKAS
+    { width: 7 },   // E — SAT
+    { width: 9 },   // F — VOL
+    { width: 16 },  // G — RAP Harga Satuan
+    { width: 18 },  // H — RAP Total Harga
+    { width: 16 },  // I — RAB Harga Satuan
+    { width: 18 },  // J — RAB Total Harga
+    { width: 2 },   // K — margin
+  ];
+
+  // Header blok: logo B2:C9, judul D2:J3
+  ws.mergeCells("B2:C9");
+  ws.mergeCells("D2:J3");
+  ws.getCell("D2").value = "RENCANA ANGGARAN BIAYA";
+  ws.getCell("D2").font = { bold: true, size: 16, name: "Arial" };
+  ws.getCell("D2").alignment = { horizontal: "center", vertical: "middle" };
+  ws.getCell("D2").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+  ws.getCell("D2").border = { top:{style:"medium"}, bottom:{style:"medium"}, left:{style:"medium"}, right:{style:"medium"} };
+
+  // Info project
+  const info = [
+    ["Nama Kegiatan", project?.name || "-"],
+    ["Nama Pekerjaan", project?.client?.name || "-"],
+    ["Lokasi Pekerjaan", project?.location || "-"],
+    ["Tahun Anggaran", String(project?.hspkPeriod ?? "-")],
+  ];
+  let r = 5;
+  for (const [label, value] of info) {
+    ws.getCell(`D${r}`).value = label; ws.getCell(`D${r}`).font = { size: 11, name: "Arial" };
+    ws.getCell(`E${r}`).value = ":"; ws.getCell(`E${r}`).alignment = { horizontal: "center" }; ws.getCell(`E${r}`).font = { size: 11 };
+    ws.mergeCells(`F${r}:J${r}`); ws.getCell(`F${r}`).value = value; ws.getCell(`F${r}`).font = { size: 11, name: "Arial" };
+    r++;
+  }
+
+  // Border header block
+  colRange("B", "J").forEach((col) => {
+    ws.getCell(`${col}2`).border = { ...ws.getCell(`${col}2`).border, top: { style: "medium" } };
+    ws.getCell(`${col}9`).border = { ...ws.getCell(`${col}9`).border, bottom: { style: "medium" } };
+  });
+  for (let row = 2; row <= 9; row++) {
+    ws.getCell(`B${row}`).border = { ...ws.getCell(`B${row}`).border, left: { style: "medium" } };
+    ws.getCell(`J${row}`).border = { ...ws.getCell(`J${row}`).border, right: { style: "medium" } };
+    ws.getCell(`D${row}`).border = { ...ws.getCell(`D${row}`).border, left: { style: "medium" } };
+  }
+
+  // Header tabel (2 baris)
+  const hr = 10;
+  ws.mergeCells(`B${hr}:B${hr+1}`); ws.getCell(`B${hr}`).value = "NO";
+  ws.mergeCells(`C${hr}:C${hr+1}`); ws.getCell(`C${hr}`).value = "ITEM PEKERJAAN";
+  ws.mergeCells(`D${hr}:D${hr+1}`); ws.getCell(`D${hr}`).value = "SPESIFIKASI RINGKAS";
+  ws.mergeCells(`E${hr}:E${hr+1}`); ws.getCell(`E${hr}`).value = "SAT.";
+  ws.mergeCells(`F${hr}:F${hr+1}`); ws.getCell(`F${hr}`).value = "VOL.";
+  ws.mergeCells(`G${hr}:H${hr}`); ws.getCell(`G${hr}`).value = "RAP";
+  ws.mergeCells(`I${hr}:J${hr}`); ws.getCell(`I${hr}`).value = "RAB";
+  ws.getCell(`G${hr+1}`).value = "HARGA SATUAN"; ws.getCell(`H${hr+1}`).value = "TOTAL HARGA";
+  ws.getCell(`I${hr+1}`).value = "HARGA SATUAN"; ws.getCell(`J${hr+1}`).value = "TOTAL HARGA";
+
+  // Style header tabel
+  for (let row = hr; row <= hr+1; row++) {
+    for (let col = 2; col <= 10; col++) {
+      const cell = ws.getCell(row, col);
+      cell.font = { bold: true, size: 10, name: "Arial" };
+      cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+      cell.border = {
+        top: { style: row === hr ? "medium" : "thin" },
+        bottom: { style: row === hr+1 ? "medium" : "thin" },
+        left: { style: col === 2 ? "medium" : "thin" },
+        right: { style: col === 10 ? "medium" : "thin" },
+      };
+    }
+  }
+  // RAP header pink, RAB header biru
+  ["G","H"].forEach(col => {
+    ws.getCell(`${col}${hr}`).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFFFC0CB"} };
+    ws.getCell(`${col}${hr+1}`).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFFFC0CB"} };
+  });
+  ["I","J"].forEach(col => {
+    ws.getCell(`${col}${hr}`).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFB0C4DE"} };
+    ws.getCell(`${col}${hr+1}`).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFB0C4DE"} };
+  });
+  // Garis vertikal pemisah antar blok
+  ws.getCell(`G${hr}`).border = { ...ws.getCell(`G${hr}`).border, left: { style: "medium" } };
+  ws.getCell(`G${hr+1}`).border = { ...ws.getCell(`G${hr+1}`).border, left: { style: "medium" } };
+  ws.getCell(`I${hr}`).border = { ...ws.getCell(`I${hr}`).border, left: { style: "medium" } };
+  ws.getCell(`I${hr+1}`).border = { ...ws.getCell(`I${hr+1}`).border, left: { style: "medium" } };
+
+  r = hr + 2;
+  let grandRap = 0, grandRab = 0;
+
+  const writeItem = (item, num, hasChildren) => {
+    const isChild = !!item.bvItem?.parentBvItemId;
+    ws.getCell(`B${r}`).value = num; ws.getCell(`B${r}`).alignment = { horizontal: "center", vertical: "middle" };
+    ws.getCell(`C${r}`).value = (isChild ? "- " : "") + (item.name || ""); ws.getCell(`C${r}`).alignment = { vertical: "middle", wrapText: true };
+    if (item.isByOwner) {
+      ["G","H","I","J"].forEach(col => { ws.getCell(`${col}${r}`).value = "By Owner"; ws.getCell(`${col}${r}`).alignment = { horizontal: "center" }; });
+      ws.getCell(`E${r}`).value = item.paymentUnit; ws.getCell(`F${r}`).value = Number(item.volume); fmtVol(ws.getCell(`F${r}`));
+      for (let col = 2; col <= 10; col++) ws.getCell(r, col).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFFFE985"} };
+    } else if (hasChildren) {
+      ["E","F","G","H","I","J"].forEach(col => { ws.getCell(`${col}${r}`).value = ""; });
+    } else {
+      ws.getCell(`D${r}`).value = item.reference || ""; ws.getCell(`D${r}`).alignment = { vertical: "middle" };
+      ws.getCell(`E${r}`).value = item.paymentUnit; ws.getCell(`E${r}`).alignment = { horizontal: "center", vertical: "middle" };
+      ws.getCell(`F${r}`).value = Number(item.volume); fmtVol(ws.getCell(`F${r}`)); ws.getCell(`F${r}`).alignment = { horizontal: "right", vertical: "middle" };
+      ws.getCell(`G${r}`).value = Number(item.rapUnitPrice); ws.getCell(`H${r}`).value = Number(item.rapTotalPrice);
+      ws.getCell(`I${r}`).value = Number(item.rabUnitPrice); ws.getCell(`J${r}`).value = Number(item.rabTotalPrice);
+      ["G","H","I","J"].forEach(col => { fmtRp(ws.getCell(`${col}${r}`)); ws.getCell(`${col}${r}`).alignment = { horizontal: "right", vertical: "middle" }; });
+    }
+    ws.getRow(r).font = { size: 10, name: "Arial" };
+    r++;
+  };
+
+  const sumRecursive = (group) => {
+    let rap = 0, rab = 0;
+    for (const it of filterItems(group.items || [])) { if (!it.isByOwner && !it.isHeaderOnly) { rap += Number(it.rapTotalPrice); rab += Number(it.rabTotalPrice); } }
+    for (const child of group.children || []) { const s = sumRecursive(child); rap += s.rap; rab += s.rab; }
+    return { rap, rab };
+  };
+
+  let gi = 0;
+  for (const group of groups) {
+    const gItems = filterItems(group.items || []);
+    const cGroups = (group.children || []).filter(sub => filterItems(sub.items || []).length > 0);
+    if (gItems.length === 0 && cGroups.length === 0) continue;
+    // Header kategori (Roman numeral)
+    ws.getCell(`B${r}`).value = ROMAN[gi] || String(gi+1);
+    ws.getCell(`C${r}`).value = (group.name || "").toUpperCase();
+    ws.mergeCells(`C${r}:F${r}`);
+    ws.getRow(r).font = { bold: true, size: 10, name: "Arial" };
+    for (let col = 2; col <= 10; col++) ws.getCell(r, col).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFE8E8E8"} };
+    r++; gi++;
+
+    const parentIds = new Set(gItems.map(it => it.bvItem?.parentBvItemId).filter(Boolean));
+    let n = 1;
+    for (let i = 0; i < gItems.length; i++) {
+      const item = gItems[i]; const isChild = !!item.bvItem?.parentBvItemId; const hasChildren = parentIds.has(item.bvItem?.id);
+      writeItem(item, isChild ? "" : String(n++), hasChildren);
+    }
+    for (const sub of group.children || []) {
+      const si = filterItems(sub.items || []); if (si.length === 0) continue;
+      ws.getCell(`B${r}`).value = String(n++); ws.getCell(`C${r}`).value = sub.name; ws.mergeCells(`C${r}:F${r}`);
+      ws.getRow(r).font = { bold: true, size: 10, name: "Arial" }; r++;
+      const spIds = new Set(si.map(it => it.bvItem?.parentBvItemId).filter(Boolean));
+      let sn = 1;
+      for (let i = 0; i < si.length; i++) {
+        const item = si[i]; const isChild = !!item.bvItem?.parentBvItemId; const hasChildren = spIds.has(item.bvItem?.id);
+        writeItem(item, isChild ? "" : String(sn++), hasChildren);
+      }
+    }
+    r++;
+    // Subtotal
+    const { rap, rab } = sumRecursive(group); grandRap += rap; grandRab += rab;
+    ws.getCell(`G${r}`).value = "Sub Total"; ws.getCell(`G${r}`).font = { italic: true, bold: true, size: 10, name: "Arial" }; ws.getCell(`G${r}`).alignment = { horizontal: "right" };
+    ws.getCell(`H${r}`).value = rap; fmtRp(ws.getCell(`H${r}`)); ws.getCell(`H${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`H${r}`).alignment = { horizontal: "right" };
+    ws.getCell(`I${r}`).value = "Sub Total"; ws.getCell(`I${r}`).font = { italic: true, bold: true, size: 10, name: "Arial" }; ws.getCell(`I${r}`).alignment = { horizontal: "right" };
+    ws.getCell(`J${r}`).value = rab; fmtRp(ws.getCell(`J${r}`)); ws.getCell(`J${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`J${r}`).alignment = { horizontal: "right" };
+    for (let col = 2; col <= 10; col++) ws.getCell(r, col).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFD9D9D9"} };
+    r++;
+  }
+
+  // Border solid thin untuk semua baris data
+  for (let row = hr+2; row <= r; row++) {
+    for (let col = 2; col <= 10; col++) {
+      ws.getCell(row, col).border = {
+        top: { style: "thin" },
+        bottom: { style: "thin" },
+        left: { style: col === 2 ? "medium" : "thin" },
+        right: { style: col === 10 ? "medium" : "thin" },
+      };
+    }
+    ws.getCell(row, 7).border = { ...ws.getCell(row, 7).border, left: { style: "medium" } }; // Garis pemisah RAP
+    ws.getCell(row, 9).border = { ...ws.getCell(row, 9).border, left: { style: "medium" } }; // Garis pemisah RAB
+  }
+
+  // GRAND TOTAL
+  ws.getCell(`G${r}`).value = "GRAND TOTAL RAP"; ws.getCell(`G${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`G${r}`).alignment = { horizontal: "right" };
+  ws.getCell(`H${r}`).value = grandRap; fmtRp(ws.getCell(`H${r}`)); ws.getCell(`H${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`H${r}`).alignment = { horizontal: "right" };
+  ws.getCell(`I${r}`).value = "GRAND TOTAL RAB"; ws.getCell(`I${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`I${r}`).alignment = { horizontal: "right" };
+  ws.getCell(`J${r}`).value = grandRab; fmtRp(ws.getCell(`J${r}`)); ws.getCell(`J${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`J${r}`).alignment = { horizontal: "right" };
+  for (let col = 2; col <= 10; col++) {
+    ws.getCell(r, col).fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFFFC0CB"} };
+    ws.getCell(r, col).border = { top:{style:"medium"}, bottom:{style:"thin"}, left:{style: col===2?"medium":"thin"}, right:{style: col===10?"medium":"thin"} };
+  }
+  r++;
+  // DIBULATKAN
+  ws.getCell(`I${r}`).value = "DIBULATKAN"; ws.getCell(`I${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`I${r}`).alignment = { horizontal: "right" };
+  ws.getCell(`J${r}`).value = Math.round(grandRab); fmtRp(ws.getCell(`J${r}`)); ws.getCell(`J${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`J${r}`).alignment = { horizontal: "right" };
+  for (let col = 2; col <= 10; col++) {
+    ws.getCell(r, col).border = { top:{style:"thin"}, bottom:{style:"medium"}, left:{style: col===2?"medium":"thin"}, right:{style: col===10?"medium":"thin"} };
+  }
+  r += 2;
+  // Terbilang
+  ws.getCell(`B${r}`).value = "Terbilang :"; ws.getCell(`B${r}`).font = { size: 10, name: "Arial" };
+  ws.mergeCells(`C${r}:J${r}`);
+  ws.getCell(`C${r}`).value = capitalize(terbilang(Math.round(grandRab))) + " rupiah";
+  ws.getCell(`C${r}`).font = { italic: true, size: 10, name: "Arial" };
+  r += 2;
+  // Tanggal & signature
+  const months = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+  const today = new Date();
+  ws.mergeCells(`H${r}:J${r}`);
+  ws.getCell(`H${r}`).value = `Surabaya, ${today.getDate()} ${months[today.getMonth()]} ${today.getFullYear()}`;
+  ws.getCell(`H${r}`).font = { size: 10, name: "Arial" }; ws.getCell(`H${r}`).alignment = { horizontal: "center" };
+  r++;
+  ws.getCell(`B${r}`).value = "Dibuat Oleh :"; ws.getCell(`B${r}`).font = { size: 10, name: "Arial" };
+  r += 2;
+  ws.mergeCells(`C${r}:E${r}`);
+  ws.getCell(`C${r}`).value = "PT. DIVES JAYA PERKASA"; ws.getCell(`C${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`C${r}`).alignment = { horizontal: "center" };
+  r += 3;
+  ws.mergeCells(`C${r}:E${r}`);
+  ws.getCell(`C${r}`).value = "JIMMY CHRISTIAN, S.Ds."; ws.getCell(`C${r}`).font = { bold: true, size: 10, name: "Arial" }; ws.getCell(`C${r}`).alignment = { horizontal: "center" };
+  ws.mergeCells(`G${r}:J${r}`);
+  ws.getCell(`G${r}`).value = "____________________"; ws.getCell(`G${r}`).font = { size: 10, name: "Arial" }; ws.getCell(`G${r}`).alignment = { horizontal: "center" };
+  r++;
+  ws.mergeCells(`C${r}:E${r}`);
+  ws.getCell(`C${r}`).value = "Direktur Utama"; ws.getCell(`C${r}`).font = { size: 10, name: "Arial" }; ws.getCell(`C${r}`).alignment = { horizontal: "center" };
+  ws.mergeCells(`G${r}:J${r}`);
+  ws.getCell(`G${r}`).value = "Mengetahui / Menyetujui"; ws.getCell(`G${r}`).font = { size: 10, name: "Arial" }; ws.getCell(`G${r}`).alignment = { horizontal: "center" };
+
+  // Set font semua sel ke Arial
+  ws.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => { cell.font = { ...cell.font, name: "Arial" }; });
+  });
+}
+
+// --- BV sheet: pakai bvExportHelper dengan filter disciplineLabel ---
+// Karena buildBvSheet mengambil semua groups, kita perlu filter bvItems per disciplineLabel.
+// Kita modifikasi approach: gunakan buildBvSheet langsung (ambil semua), tapi perlu filter.
+// Untuk simplicity, kita buat versi yang accept filter.
+async function buildBvSheetFiltered(wb, projectId, project, labelFilter) {
+  const ws = wb.addWorksheet(`BV ${labelFilter.charAt(0) + labelFilter.slice(1).toLowerCase()}`);
+  // Patch: sementara ambil semua data, nanti filter di helper
+  // Karena helper sudah complex, kita filter groups: hanya yang punya bvItems dengan label sesuai
+  const prismaLocal = require("../../lib/prisma");
+  const groups = await prismaLocal.rabGroup.findMany({
+    where: { projectId, parentId: null },
+    include: {
+      bvItems: {
+        where: { parentBvItemId: null },
+        include: {
+          breakdowns: true,
+          sourceJobType: true,
+          children: {
+            include: { breakdowns: true, sourceJobType: true },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
+      children: {
+        include: {
+          bvItems: {
+            where: { parentBvItemId: null },
+            include: {
+              breakdowns: true,
+              sourceJobType: true,
+              children: {
+                include: { breakdowns: true, sourceJobType: true },
+                orderBy: { createdAt: "asc" },
+              },
+            },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      },
+    },
+    orderBy: { order: "asc" },
+  });
+
+  // Filter: hanya groups yang punya bvItems (recursive) dengan label sesuai
+  // TAPI: untuk "GENERAL" — tampilkan SEMUA (interior + sipil + tanpa label)
+  const hasLabelRecursive = (items, label) => {
+    if (label === "GENERAL") return true; // General = semua
+    return items.some(it => {
+      const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
+      return lbl === label || (it.children && hasLabelRecursive(it.children, label));
+    });
+  };
+
+  const filterBvItemsRecursive = (items, label) => {
+    if (label === "GENERAL") return items; // General = tampilkan semua
+    return items.filter(it => {
+      const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
+      if (lbl === label) {
+        // Keep this item, but also filter its children
+        if (it.children) it.children = filterBvItemsRecursive(it.children, label);
+        return true;
+      }
+      // Check if any children match
+      if (it.children && hasLabelRecursive(it.children, label)) {
+        if (it.children) it.children = filterBvItemsRecursive(it.children, label);
+        return true;
+      }
+      return false;
+    });
+  };
+
+  // Filter groups
+  const filteredGroups = groups.map(group => {
+    const filteredBv = filterBvItemsRecursive([...(group.bvItems || [])], labelFilter);
+    const filteredChildren = (group.children || []).map(sub => {
+      const subFiltered = filterBvItemsRecursive([...(sub.bvItems || [])], labelFilter);
+      return { ...sub, bvItems: subFiltered };
+    }).filter(sub => sub.bvItems.length > 0);
+    return { ...group, bvItems: filteredBv, children: filteredChildren };
+  }).filter(group => (group.bvItems && group.bvItems.length > 0) || (group.children && group.children.length > 0));
+
+  // Sekarang panggil buildBvSheet tapi dengan data yang sudah difilter
+  // buildBvSheet mengambil dari prisma sendiri, jadi kita perlu approach berbeda
+  // Kita pakai versi inline yang sama persis formatnya
+  await buildBvSheetFromData(ws, filteredGroups, project);
+}
+
+// Versi buildBvSheet yang accept data sudah difilter (format sama persis dengan bvExportHelper)
+async function buildBvSheetFromData(ws, groups, project) {
+  const ROMAN = ["I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV"];
+  function autoFitColumn(ws, colLetter, minWidth = 1, maxWidth = 60) {
+    const col = ws.getColumn(colLetter);
+    let maxLen = minWidth;
+    col.eachCell({ includeEmpty: false }, (cell) => {
+      const len = String(cell.value ?? "").length;
+      if (len > maxLen) maxLen = len;
+    });
+    col.width = Math.min(maxLen + 2, maxWidth);
+  }
+  function colRange(startCol, endCol) {
+    const cols = []; let c = startCol.charCodeAt(0); const end = endCol.charCodeAt(0);
+    while (c <= end) { cols.push(String.fromCharCode(c)); c++; }
+    return cols;
+  }
+
+  ws.columns = [
+    {width:5},{width:6},{width:32},{width:7},{width:8},{width:20},
+    {width:9},{width:9},{width:9},{width:9},{width:9},{width:9},{width:9},
+    {width:8},{width:8},{width:9},{width:10},{width:8},{width:18},
+  ];
+
+  // Header block
+  ws.mergeCells("B2:E8");
+  ws.mergeCells("F2:R3");
+  ws.getCell("F2").value = "BACK UP VOLUME";
+  ws.getCell("F2").font = { bold: true, size: 15, name: "Arial" };
+  ws.getCell("F2").alignment = { horizontal: "center", vertical: "middle" };
+  ws.getCell("F2").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+  ws.getCell("F2").border = { bottom: { style: "medium" } };
+
+  const info = [
+    ["Nama Kegiatan", project?.name || "-"],
+    ["Nama Pekerjaan", project?.client?.name || "-"],
+    ["Lokasi Pekerjaan", project?.location || "-"],
+    ["Tahun Anggaran", String(project?.hspkPeriod ?? "-")],
+  ];
+
+  let r = 5;
+  for (const [label, value] of info) {
+    ws.getCell(`F${r}`).value = label; ws.getCell(`F${r}`).font = { size: 12, name: "Arial" };
+    ws.getCell(`G${r}`).value = ":"; ws.getCell(`G${r}`).alignment = { horizontal: "center" }; ws.getCell(`G${r}`).font = { size: 12 };
+    ws.mergeCells(`H${r}:R${r}`); ws.getCell(`H${r}`).value = value; ws.getCell(`H${r}`).font = { size: 12, name: "Arial" };
+    r++;
+  }
+
+  colRange("B", "S").forEach((col) => {
+    ws.getCell(`${col}2`).border = { ...ws.getCell(`${col}2`).border, top: { style: "medium" } };
+    ws.getCell(`${col}9`).border = { ...ws.getCell(`${col}9`).border, bottom: { style: "medium" } };
+  });
+  for (let row = 2; row <= 9; row++) {
+    ws.getCell(`B${row}`).border = { ...ws.getCell(`B${row}`).border, left: { style: "medium" } };
+    ws.getCell(`S${row}`).border = { ...ws.getCell(`S${row}`).border, right: { style: "medium" } };
+    ws.getCell(`F${row}`).border = { ...ws.getCell(`F${row}`).border, left: { style: "medium" } };
+  }
+
+  r = 11;
+  const hr = r;
+  // Header tabel — 2 baris
+  ws.mergeCells(`B${hr}:B${hr+1}`); ws.getCell(`B${hr}`).value = "NO";
+  ws.mergeCells(`C${hr}:C${hr+1}`); ws.getCell(`C${hr}`).value = "URAIAN PEKERJAAN";
+  ws.mergeCells(`D${hr}:E${hr}`); ws.getCell(`D${hr}`).value = "VOLUME";
+  ws.mergeCells(`F${hr}:F${hr+1}`); ws.getCell(`F${hr}`).value = "KETERANGAN";
+  ws.mergeCells(`G${hr}:G${hr+1}`); ws.getCell(`G${hr}`).value = "Panjang";
+  ws.mergeCells(`H${hr}:H${hr+1}`); ws.getCell(`H${hr}`).value = "Lebar";
+  ws.mergeCells(`I${hr}:I${hr+1}`); ws.getCell(`I${hr}`).value = "Tinggi";
+  ws.mergeCells(`J${hr}:J${hr+1}`); ws.getCell(`J${hr}`).value = "Luas";
+  ws.mergeCells(`K${hr}:K${hr+1}`); ws.getCell(`K${hr}`).value = "Keliling";
+  ws.mergeCells(`L${hr}:L${hr+1}`); ws.getCell(`L${hr}`).value = "Dia";
+  ws.mergeCells(`M${hr}:M${hr+1}`); ws.getCell(`M${hr}`).value = "Berat";
+  ws.mergeCells(`N${hr}:O${hr}`); ws.getCell(`N${hr}`).value = "Jumlah";
+  ws.mergeCells(`P${hr}:P${hr+1}`); ws.getCell(`P${hr}`).value = "Waste";
+  ws.mergeCells(`Q${hr}:R${hr}`); ws.getCell(`Q${hr}`).value = "TOTAL";
+  ws.mergeCells(`S${hr}:S${hr+1}`); ws.getCell(`S${hr}`).value = "LINK";
+
+  ws.getCell(`D${hr+1}`).value = "Sat.";
+  ws.getCell(`E${hr+1}`).value = "Vol.";
+  ws.getCell(`G${hr+1}`).value = "(m)";
+  ws.getCell(`H${hr+1}`).value = "(m)";
+  ws.getCell(`I${hr+1}`).value = "(m)";
+  ws.getCell(`J${hr+1}`).value = "(m2)";
+  ws.getCell(`K${hr+1}`).value = "(m1)";
+  ws.getCell(`L${hr+1}`).value = "(m2)";
+  ws.getCell(`M${hr+1}`).value = "(Kg)";
+  ws.getCell(`N${hr+1}`).value = "(Sisi)";
+  ws.getCell(`O${hr+1}`).value = "(Bh)";
+  ws.getCell(`P${hr+1}`).value = "(%)";
+  ws.getCell(`Q${hr+1}`).value = "Vol.";
+  ws.getCell(`R${hr+1}`).value = "Sat.";
+  ws.getCell(`S${hr+1}`).value = "E-COMMERCE INFO";
+
+  // Style header
+  for (let row = hr; row <= hr+1; row++) {
+    ws.getRow(row).eachCell({ includeEmpty: true }, (cell, col) => {
+      if (col >= 2) {
+        cell.font = { bold: true, size: 10, name: "Arial" };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+        cell.border = {
+          top: { style: row === hr ? "medium" : "thin" },
+          bottom: { style: row === hr+1 ? "medium" : "thin" },
+          left: { style: col === 2 ? "medium" : "thin" },
+          right: { style: col === 19 ? "medium" : "thin" },
+        };
+      }
+    });
+  }
+
+  r = hr + 2;
+
+  function writeItem(it, counterObj) {
+    const isHeader = !!it.isHeaderOnly;
+    const isChild = !!it.parentBvItemId;
+    const no = isHeader ? counterObj.n++ : isChild ? "" : counterObj.n++;
+    const namePrefix = isChild ? "- " : "";
+
+    ws.getCell(`B${r}`).value = no;
+    ws.getCell(`B${r}`).alignment = { horizontal: "center" };
+    ws.getCell(`C${r}`).value = namePrefix + (it.name || "");
+    if (isHeader) ws.getRow(r).font = { bold: true, name: "Arial" };
+
+    const hasChildren = (it.children || []).length > 0;
+    const breakdownList = it.breakdowns || [];
+    const hasBreakdown = breakdownList.length > 0;
+
+    if (!isHeader && !hasChildren) {
+      ws.getCell(`D${r}`).value = it.paymentUnit || "";
+      ws.getCell(`D${r}`).alignment = { horizontal: "center" };
+      ws.getCell(`E${r}`).value = Number(it.totalVolume);
+      ws.getCell(`E${r}`).alignment = { horizontal: "center" };
+      ws.getCell(`E${r}`).font = { bold: true, name: "Arial" };
+      ws.getCell(`Q${r}`).value = Number(it.totalVolume);
+      ws.getCell(`Q${r}`).alignment = { horizontal: "right" };
+      ws.getCell(`Q${r}`).font = { bold: true, name: "Arial" };
+      ws.getCell(`R${r}`).value = it.paymentUnit || "";
+      ws.getCell(`R${r}`).alignment = { horizontal: "center" };
+      ws.getCell(`S${r}`).value = it.ecommerceLink || "";
+    }
+
+    if (!isHeader && !hasChildren && hasBreakdown) {
+      r++;
+      let lastKeterangan = null;
+      breakdownList.forEach((b) => {
+        const ketText = (b.keterangan || "").trim();
+        const showKet = ketText !== lastKeterangan;
+        lastKeterangan = ketText;
+        if (!isChild || !ketText) r--;
+        ws.getCell(`F${r}`).value = showKet ? ketText : "";
+        ws.getCell(`G${r}`).value = b.panjang != null ? Number(b.panjang) : "";
+        ws.getCell(`H${r}`).value = b.lebar != null ? Number(b.lebar) : "";
+        ws.getCell(`I${r}`).value = b.tinggi != null ? Number(b.tinggi) : "";
+        ws.getCell(`J${r}`).value = b.luas != null ? Number(b.luas) : "";
+        ws.getCell(`K${r}`).value = b.keliling != null ? Number(b.keliling) : "";
+        ws.getCell(`L${r}`).value = b.diameter != null ? Number(b.diameter) : "";
+        ws.getCell(`M${r}`).value = b.berat != null ? Number(b.berat) : "";
+        ws.getCell(`N${r}`).value = b.jumlahSisi != null ? Number(b.jumlahSisi) : "";
+        ws.getCell(`O${r}`).value = b.jumlahBh != null ? Number(b.jumlahBh) : "";
+        ws.getCell(`P${r}`).value = b.waste != null && Number(b.waste) !== 0 ? Number(b.waste) : "";
+        ws.getCell(`Q${r}`).value = b.subTotal != null ? Number(b.subTotal) : "";
+        ws.getRow(r).eachCell({ includeEmpty: true }, (cell, col) => {
+          if (col >= 7 && col <= 16) { cell.alignment = { horizontal: "right" }; cell.font = { color: { argb: "FFFF0000" }, name: "Arial" }; }
+          else if (col === 6) { cell.alignment = { horizontal: "left" }; }
+        });
+        r++;
+      });
+    } else { r++; }
+
+    (it.children || []).forEach((child) => writeItem(child, counterObj));
+  }
+
+  groups.forEach((group, idx) => {
+    if (idx > 0) r++;
+    ws.getCell(`B${r}`).value = ROMAN[idx] || String(idx + 1);
+    colRange("B", "S").forEach((col) => {
+      ws.getCell(`${col}${r}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9D9D9" } };
+    });
+    ws.getCell(`C${r}`).value = (group.name || "").toUpperCase();
+    ws.getRow(r).font = { bold: true, name: "Arial" };
+    r++;
+    const counter = { n: 1 };
+    for (const it of (group.bvItems || [])) writeItem(it, counter);
+    for (const sub of (group.children || [])) {
+      ws.getCell(`B${r}`).value = String(counter.n++);
+      ws.getCell(`C${r}`).value = sub.name;
+      ws.getRow(r).font = { bold: true, name: "Arial" };
+      r++;
+      const subCounter = { n: 1 };
+      for (const it of (sub.bvItems || [])) writeItem(it, subCounter);
+    }
+  });
+
+  for (let row = hr + 2; row < r; row++) {
+    colRange("B", "S").forEach((col) => {
+      ws.getCell(`${col}${row}`).border = {
+        top: row === hr + 2 ? { style: "thin" } : { style: "dotted" },
+        bottom: { style: "dotted" },
+        left: { style: "thin" },
+        right: { style: "thin" },
+      };
+    });
+    ws.getCell(`B${row}`).border = { ...ws.getCell(`B${row}`).border, left: { style: "medium" } };
+    ws.getCell(`S${row}`).border = { ...ws.getCell(`S${row}`).border, right: { style: "medium" } };
+  }
+  colRange("B", "S").forEach((col) => {
+    const cell = ws.getCell(`${col}${r - 1}`);
+    cell.border = { ...cell.border, bottom: { style: "medium" } };
+  });
+
+  ["C", "F"].forEach((col) => autoFitColumn(ws, col));
+  ws.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      if (typeof cell.value === "number" && cell.col !== 2) { cell.numFmt = "#,##0.00"; }
+    });
+  });
+  ws.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => { cell.font = { ...cell.font, name: "Arial" }; });
+  });
+}
+
+// --- BQ sheet: pakai rabExportHelper dengan filter discipline ---
+// Sama seperti buildBqSheetXLSX di atas tapi kita sudah punya. Tetap pakai yang sudah ada.
+
+router.get("/projects/:projectId/bv-items/export-excel", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const project = await prisma.project.findUnique({ where: { id: projectId }, include: { client: true } });
+    if (!project) return res.status(404).json({ error: "Project tidak ditemukan" });
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "Dives Corp"; wb.created = new Date();
+
+    // BV sheets — format lengkap sama dengan web (19 kolom dengan breakdown)
+    await buildBvSheetFiltered(wb, projectId, project, "GENERAL");
+    await buildBvSheetFiltered(wb, projectId, project, "SIPIL");
+    await buildBvSheetFiltered(wb, projectId, project, "INTERIOR");
+
+    // BQ sheets — format RAB (NO, ITEM, SPESIFIKASI, SAT, VOL, RAP, RAB)
+    const bqSheets = [
+      ["BQ General", "GENERAL"],
+      ["BQ Sipil", "SIPIL"],
+      ["BQ Interior", "INTERIOR"],
+    ];
+    for (const [name, discFilter] of bqSheets) {
+      const ws = wb.addWorksheet(name);
+      await buildBqSheetXLSX(ws, projectId, project, discFilter);
+    }
+
+    const safeName = (project.name || "proyek").replace(/[^a-zA-Z0-9]/g, "_");
+    const filename = `BV_${safeName}.xlsx`;
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    const buffer = await wb.xlsx.writeBuffer();
+    res.send(buffer);
+  } catch (error) {
+    console.error("Export Excel BV Error:", error);
+    res.status(500).json({ error: "Gagal export Excel: " + error.message });
+  }
+});
+
 module.exports = router;
