@@ -70,6 +70,7 @@ app.use("/api", require("./routes/crudGrub/supplier.route"));
 app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 app.use("/api", require("./routes/crudGrub/kanban.routes"));
+app.use("/api", require("./routes/crudGrub/purchasing.routes"));
 
 app.use((err, req, res, next) => {
   if (err) {

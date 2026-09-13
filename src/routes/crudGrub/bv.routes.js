@@ -346,6 +346,141 @@ router.delete("/bv-items-bulk", async (req, res) => {
   }
 });
 
+// ===========================================================================
+// HELPER STRUKTUR — dipakai endpoint link & sync (single maupun massal)
+//
+// Masalah yang ditutup di sini:
+//  1. Anak BV yang induknya belum ter-link dulu selalu jadi baris yatim di
+//     RAB ( parentId null ) -> tampil lepas, tidak di bawah headernya.
+//  2. Reposisi anak memakai rumus parent.order + 1 untuk SEMUA anak, jadi
+//     kalau satu induk punya >1 anak, order-nya bentrok dan urutannya acak.
+// ===========================================================================
+
+/**
+ * Pastikan seluruh garis induk (ancestor) sebuah item BV sudah punya pasangan
+ * RAB. Induk yang belum terlink dibuatkan "cangkang header" lebih dulu (harga
+ * 0, isHeaderOnly true) supaya anak tidak pernah kehilangan headernya.
+ * Mengembalikan id RAB milik induk langsung.
+ */
+async function pastikanIndukTerlink(tx, bvItem) {
+  if (!bvItem.parentBvItemId) return null;
+
+  const parent = await tx.bvItem.findUnique({
+    where: { id: bvItem.parentBvItemId },
+  });
+  if (!parent) return null;
+  if (parent.linkedRabItemId) return parent.linkedRabItemId;
+
+  // naik dulu ke atas: kakek harus ada sebelum bapak dibuat
+  const grandParentRabId = await pastikanIndukTerlink(tx, parent);
+
+  const last = await tx.rabItem.findFirst({
+    where: { projectId: parent.projectId, groupId: parent.groupId ?? null },
+    orderBy: { order: "desc" },
+    select: { order: true },
+  });
+  const proj = await tx.project.findUnique({
+    where: { id: parent.projectId },
+    select: { discipline: true, grade: true },
+  });
+
+  const shell = await tx.rabItem.create({
+    data: {
+      projectId: parent.projectId,
+      groupId: parent.groupId ?? null,
+      parentId: grandParentRabId,
+      name: parent.name,
+      paymentUnit: parent.paymentUnit || "-",
+      volume: Number(parent.totalVolume) || 0,
+      isHeaderOnly: true,
+      discipline: proj?.discipline || null,
+      grade: proj?.grade || null,
+      overheadPercent: 0,
+      rapUnitPrice: 0,
+      rapTotalPrice: 0,
+      rabUnitPrice: 0,
+      rabTotalPrice: 0,
+      sourceJobTypeId: parent.sourceJobTypeId || null,
+      order: last ? last.order + 1 : 0,
+    },
+  });
+
+  await tx.bvItem.update({
+    where: { id: parent.id },
+    data: { linkedRabItemId: shell.id, isHeaderOnly: true },
+  });
+
+  if (grandParentRabId) {
+    const gpBv = await tx.bvItem.findUnique({
+      where: { id: parent.parentBvItemId },
+      select: { id: true },
+    });
+    if (gpBv) await rapikanAnak(tx, gpBv.id);
+  }
+
+  return shell.id;
+}
+
+/**
+ * Susun ulang SEMUA anak terlink dari satu induk BV: tempel parentId-nya ke
+ * header RAB induk, lalu beri order berurutan tepat di bawah header
+ * (parent.order + 1, +2, +3 ...) sesuai urutan dibuat. Induk otomatis jadi
+ * header. Dipakai setelah link/sync supaya posisi anak selalu ikut headernya.
+ */
+async function rapikanAnak(tx, indukBvId) {
+  const induk = await tx.bvItem.findUnique({
+    where: { id: indukBvId },
+    select: { linkedRabItemId: true, id: true },
+  });
+  if (!induk?.linkedRabItemId) return;
+
+  const header = await tx.rabItem.findUnique({
+    where: { id: induk.linkedRabItemId },
+    select: { id: true, order: true, groupId: true, projectId: true },
+  });
+  if (!header) return;
+
+  const anak = await tx.bvItem.findMany({
+    where: { parentBvItemId: induk.id, linkedRabItemId: { not: null } },
+    select: { linkedRabItemId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (anak.length === 0) return;
+
+  const idAnak = anak.map((a) => a.linkedRabItemId).filter(Boolean);
+
+  // tandai header supaya barisnya jadi induk, bukan item ber-harga
+  await tx.rabItem.update({
+    where: { id: header.id },
+    data: { isHeaderOnly: true },
+  });
+
+  // parkir dulu anak-anaknya biar tidak dihitung saat menggeser
+  await tx.rabItem.updateMany({
+    where: { id: { in: idAnak } },
+    data: { parentId: header.id, order: -1 },
+  });
+
+  // ruang kosongkan di bawah header sebanyak jumlah anak
+  await tx.rabItem.updateMany({
+    where: {
+      projectId: header.projectId,
+      groupId: header.groupId ?? null,
+      order: { gte: header.order + 1 },
+      id: { notIn: [header.id, ...idAnak] },
+    },
+    data: { order: { increment: idAnak.length } },
+  });
+
+  // tempatkan berurutan: header+1, header+2, dst
+  for (let i = 0; i < idAnak.length; i++) {
+    await tx.rabItem.update({
+      where: { id: idAnak[i] },
+      data: { order: header.order + 1 + i },
+    });
+  }
+}
+
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
 router.post("/bv-items/:id/link-to-rab", async (req, res) => {
   try {
@@ -412,53 +547,35 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       let insertOrder;
       let rabParentId = null;
 
-      // --- LOGIKA ORDERING (TIDAK DIUBAH) ---
+      // --- LOGIKA ORDERING ---
+      // Anak tidak boleh jadi yatim: kalau induknya belum ter-link,
+      // buat cangkang header RAB untuk induk (dan leluhurnya) lebih dulu.
       if (bvItem.parentBvItemId) {
-        const parentBv = await tx.bvItem.findUnique({
-          where: { id: bvItem.parentBvItemId },
-          select: { linkedRabItemId: true },
-        });
+        rabParentId = await pastikanIndukTerlink(tx, bvItem);
 
-        if (parentBv?.linkedRabItemId) {
-          rabParentId = parentBv.linkedRabItemId;
-
-          // ==========================================
-          // UPDATE INDUK MENJADI HEADER KARENA PUNYA ANAK
-          // ==========================================
-          await tx.rabItem.update({
-            where: { id: rabParentId },
-            data: {
-              isHeaderOnly: true,
-              volume: 0,
-              rapUnitPrice: 0,
-              rapTotalPrice: 0,
-              rabUnitPrice: 0,
-              rabTotalPrice: 0,
-            },
-          });
-          await tx.bvItem.update({
-            where: { id: bvItem.parentBvItemId },
-            data: { isHeaderOnly: true },
-          });
-
+        if (rabParentId) {
           const parentRab = await tx.rabItem.findUnique({
-            where: { id: parentBv.linkedRabItemId },
-            select: { order: true },
+            where: { id: rabParentId },
+            select: { order: true, groupId: true },
           });
 
-          const linkedSiblings = await tx.bvItem.findMany({
+          // anak menempel di akhir barisan saudara yang sudah ada
+          const maxSiblingOrder = await tx.bvItem.findMany({
             where: {
               parentBvItemId: bvItem.parentBvItemId,
               linkedRabItemId: { not: null },
             },
             include: { linkedRabItem: { select: { order: true } } },
           });
-
-          const maxSiblingOrder = linkedSiblings.length
-            ? Math.max(...linkedSiblings.map((s) => s.linkedRabItem.order))
+          const batas = maxSiblingOrder.length
+            ? Math.max(
+                ...maxSiblingOrder
+                  .map((s) => s.linkedRabItem?.order ?? -1)
+                  .filter((o) => o >= 0),
+              )
             : parentRab.order;
 
-          insertOrder = maxSiblingOrder + 1;
+          insertOrder = Math.max(batas, parentRab.order) + 1;
 
           await tx.rabItem.updateMany({
             where: {
@@ -481,6 +598,13 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
       }
 
       // --- CREATE PARENT DI TABEL RAB ---
+      // FIX: discipline dulu tidak pernah diisi (selalu null) walau project punya
+      // discipline. Diwarisi dari project supaya filter per-disiplin di FE bekerja.
+      const bvProject = await tx.project.findUnique({
+        where: { id: bvItem.projectId },
+        select: { discipline: true, grade: true },
+      });
+
       const rabItem = await tx.rabItem.create({
         data: {
           projectId: bvItem.projectId,
@@ -493,6 +617,8 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           overheadPercent: overheadPct, // <-- Pastikan overheadPercent
           volume: vol,
           isHeaderOnly: bvItem.isHeaderOnly || false,
+          discipline: bvProject?.discipline || null,
+          grade: bvProject?.grade || null,
 
           rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,
@@ -562,6 +688,9 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
               category: childCategory,
               overheadPercent: childOverhead,
               volume: childVol,
+              // FIX: warisi discipline project (dulu selalu null)
+              discipline: bvProject?.discipline || null,
+              grade: bvProject?.grade || null,
               rapUnitPrice: childRapSatuan,
               rapTotalPrice: childRapSatuan * childVol,
               rabUnitPrice: childRabSatuan,
@@ -583,39 +712,9 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
 
       // --- UPDATE URUTAN DAN PARENT ID UNTUK SEMUA ANAK ---
       // (Termasuk anak yang lama dan anak yang baru saja dibuat di atas)
-      const linkedChildren = await tx.bvItem.findMany({
-        where: { parentBvItemId: id, linkedRabItemId: { not: null } },
-        select: { linkedRabItemId: true },
-        orderBy: { createdAt: "asc" },
-      });
-
-      if (linkedChildren.length > 0) {
-        const childRabIds = linkedChildren.map((c) => c.linkedRabItemId);
-
-        // Pastikan parentId semua anak diset ke Induk yang baru terbuat
-        await tx.rabItem.updateMany({
-          where: { id: { in: childRabIds } },
-          data: { order: -1, parentId: rabItem.id },
-        });
-
-        // Geser semua item lain ke bawah untuk memberi ruang untuk anak-anak ini
-        await tx.rabItem.updateMany({
-          where: {
-            projectId: bvItem.projectId,
-            groupId: finalGroupId,
-            order: { gt: rabItem.order },
-          },
-          data: { order: { increment: childRabIds.length } },
-        });
-
-        // Urutkan anak-anak tepat di bawah induknya
-        for (let i = 0; i < childRabIds.length; i++) {
-          await tx.rabItem.update({
-            where: { id: childRabIds[i] },
-            data: { order: rabItem.order + 1 + i },
-          });
-        }
-      }
+      // Pakai helper supaya order anak berurutan (header+1, +2, +3), bukan
+      // semuanya rebutan di header+1 saat induk punya lebih dari satu anak.
+      await rapikanAnak(tx, id);
 
       // --- UPDATE PARENT BV ITEM ---
       const updatedBv = await tx.bvItem.update({
@@ -652,6 +751,7 @@ router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
 
     const results = await prisma.$transaction(async (tx) => {
       let linkedCount = 0;
+      const indukTersentuh = new Set();
 
       // 1. Ambil semua data BV yang diceklis sekaligus
       const bvItemsRaw = await tx.bvItem.findMany({
@@ -679,19 +779,29 @@ router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
         });
         const insertOrder = lastItem ? lastItem.order + 1 : 0;
 
-        // 4. Cari tahu siapa "Bapaknya" (Parent) di tabel RAB
+        // 4. Siapa "Bapaknya" di tabel RAB — kalau induknya belum ter-link
+        // (tidak ikut dicentang), buatkan cangkang header dulu supaya anak
+        // tidak jadi baris yatim tanpa header di RAB.
         let rabParentId = null;
         if (bvItem.parentBvItemId) {
-          const parentBv = await tx.bvItem.findUnique({
-            where: { id: bvItem.parentBvItemId },
-          });
-          // Jika Bapaknya di BV sudah sukses di-link ke RAB, tangkap ID RAB Bapaknya!
-          if (parentBv && parentBv.linkedRabItemId) {
-            rabParentId = parentBv.linkedRabItemId;
+          rabParentId = await pastikanIndukTerlink(tx, bvItem);
+          if (rabParentId) {
+            // induk ini akan dapat anak -> didaftarkan untuk dirapikan di
+            // akhir, supaya anak berbaris URUT di bawah header, bukan
+            // rebutan satu slot yang sama (order induk)
+            indukTersentuh.add(bvItem.parentBvItemId);
           }
+        } else {
+          // item ini sendiri mungkin induk dari anak yang ikut dicentang
+          indukTersentuh.add(bvItem.id);
         }
 
         // 5. Buat kembarannya di tabel RAB dengan struktur yang utuh
+        const bulkProject = await tx.project.findUnique({
+          where: { id: bvItem.projectId },
+          select: { discipline: true, grade: true },
+        });
+
         const newRab = await tx.rabItem.create({
           data: {
             projectId: bvItem.projectId,
@@ -708,6 +818,9 @@ router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
             paymentUnit: bvItem.paymentUnit || "-",
             volume: Number(bvItem.totalVolume) || 0,
             isHeaderOnly: bvItem.isHeaderOnly || false,
+            // FIX: warisi discipline project (dulu selalu null)
+            discipline: bulkProject?.discipline || null,
+            grade: bulkProject?.grade || null,
 
             overheadPercent: 0,
             rapUnitPrice: 0,
@@ -724,6 +837,13 @@ router.post("/bv-items-bulk/link-to-rab", async (req, res) => {
         });
 
         linkedCount++;
+      }
+
+      // Perapian akhir: semua anak menempel header + berbaris urut
+      // (header.order+1, +2, +3). Tanpa ini, beberapa anak bisa punya
+      // order SAMA dengan induknya.
+      for (const indukId of indukTersentuh) {
+        await rapikanAnak(tx, indukId);
       }
 
       return linkedCount;
@@ -752,6 +872,7 @@ router.post("/bv-items-bulk/sync", async (req, res) => {
 
     const results = await prisma.$transaction(async (tx) => {
       let syncedCount = 0;
+      const indukTersentuh = new Set();
 
       // Ambil hanya item BV yang sudah pernah di-link
       const bvItems = await tx.bvItem.findMany({
@@ -805,55 +926,19 @@ router.post("/bv-items-bulk/sync", async (req, res) => {
         const nilaiOverhead = rapUnitPrice * (overheadPct / 100);
         const rabUnitPrice = rapUnitPrice + nilaiOverhead;
 
-        // Reposisi Parent/Child jika diperlukan
+        // Reposisi Parent/Child: pastikan induk ter-link (bikin header kalau
+        // belum) lalu tempel parentId anak ke header itu. Perapian urutan
+        // dilakukan sekali di akhir loop lewat rapikanAnak.
         if (bvItem.parentBvItemId) {
-          const parentBv = await tx.bvItem.findUnique({
-            where: { id: bvItem.parentBvItemId },
-            select: { linkedRabItemId: true },
-          });
-
-          if (parentBv?.linkedRabItemId) {
-            const parentRab = await tx.rabItem.findUnique({
-              where: { id: parentBv.linkedRabItemId },
-              select: { order: true, groupId: true, projectId: true },
+          const rabParentId = await pastikanIndukTerlink(tx, bvItem);
+          if (rabParentId && bvItem.linkedRabItem.parentId !== rabParentId) {
+            await tx.rabItem.update({
+              where: { id: bvItem.linkedRabItemId },
+              data: { parentId: rabParentId },
             });
-
-            if (parentRab) {
-              const correctOrder = parentRab.order + 1;
-              const currentOrder = bvItem.linkedRabItem.order;
-
-              if (currentOrder !== correctOrder) {
-                await tx.rabItem.update({
-                  where: { id: bvItem.linkedRabItemId },
-                  data: { order: -1 },
-                });
-
-                if (currentOrder < correctOrder) {
-                  await tx.rabItem.updateMany({
-                    where: {
-                      projectId: parentRab.projectId,
-                      groupId: parentRab.groupId,
-                      order: { gt: currentOrder, lte: correctOrder },
-                    },
-                    data: { order: { decrement: 1 } },
-                  });
-                } else {
-                  await tx.rabItem.updateMany({
-                    where: {
-                      projectId: parentRab.projectId,
-                      groupId: parentRab.groupId,
-                      order: { gte: correctOrder, lt: currentOrder },
-                    },
-                    data: { order: { increment: 1 } },
-                  });
-                }
-
-                await tx.rabItem.update({
-                  where: { id: bvItem.linkedRabItemId },
-                  data: { order: correctOrder },
-                });
-              }
-            }
+            indukTersentuh.add(bvItem.parentBvItemId);
+          } else if (rabParentId) {
+            indukTersentuh.add(bvItem.parentBvItemId);
           }
         }
 
@@ -874,6 +959,13 @@ router.post("/bv-items-bulk/sync", async (req, res) => {
         });
 
         syncedCount++;
+      }
+
+      // Sekali perapian per induk yang tersentuh: anak-anak berbaris urut
+      // tepat di bawah header-nya (dulu tiap anak dihitung parent.order+1
+      // -> saling bentrok kalau induk punya >1 anak).
+      for (const indukId of indukTersentuh) {
+        await rapikanAnak(tx, indukId);
       }
 
       return syncedCount;
@@ -954,63 +1046,8 @@ router.post("/bv-items/:id/sync", async (req, res) => {
     const rabUnitPrice = rapUnitPrice + nilaiOverhead;
 
     const updated = await prisma.$transaction(async (tx) => {
-      // Reposisi order kalau item ini child dan posisinya sekarang salah
-      if (bvItem.parentBvItemId) {
-        const parentBv = await tx.bvItem.findUnique({
-          where: { id: bvItem.parentBvItemId },
-          select: { linkedRabItemId: true },
-        });
-
-        if (parentBv?.linkedRabItemId) {
-          const parentRab = await tx.rabItem.findUnique({
-            where: { id: parentBv.linkedRabItemId },
-            select: { order: true, groupId: true, projectId: true },
-          });
-
-          if (parentRab) {
-            const correctOrder = parentRab.order + 1;
-            const currentOrder = bvItem.linkedRabItem.order;
-
-            if (currentOrder !== correctOrder) {
-              // lepas dulu slot lama biar ga tabrakan pas geser
-              await tx.rabItem.update({
-                where: { id: bvItem.linkedRabItemId },
-                data: { order: -1 },
-              });
-
-              if (currentOrder < correctOrder) {
-                // pindah maju: item di antara posisi lama & baru mundur 1
-                await tx.rabItem.updateMany({
-                  where: {
-                    projectId: parentRab.projectId,
-                    groupId: parentRab.groupId,
-                    order: { gt: currentOrder, lte: correctOrder },
-                  },
-                  data: { order: { decrement: 1 } },
-                });
-              } else {
-                // pindah mundur: item di antara posisi baru & lama maju 1
-                await tx.rabItem.updateMany({
-                  where: {
-                    projectId: parentRab.projectId,
-                    groupId: parentRab.groupId,
-                    order: { gte: correctOrder, lt: currentOrder },
-                  },
-                  data: { order: { increment: 1 } },
-                });
-              }
-
-              await tx.rabItem.update({
-                where: { id: bvItem.linkedRabItemId },
-                data: { order: correctOrder },
-              });
-            }
-          }
-        }
-      }
-
       // Update Data Utama RAB
-      return tx.rabItem.update({
+      const hasil = await tx.rabItem.update({
         where: { id: bvItem.linkedRabItemId },
         data: {
           name: bvItem.name,
@@ -1025,6 +1062,24 @@ router.post("/bv-items/:id/sync", async (req, res) => {
         },
         include: { components: true },
       });
+
+      // Reposisi: kalau ini child, tempel ke header induknya (buat header
+      // kalau induk belum ter-link) lalu rapikan barisan saudaranya.
+      if (bvItem.parentBvItemId) {
+        const rabParentId = await pastikanIndukTerlink(tx, bvItem);
+        if (rabParentId && hasil.parentId !== rabParentId) {
+          await tx.rabItem.update({
+            where: { id: hasil.id },
+            data: { parentId: rabParentId },
+          });
+        }
+        await rapikanAnak(tx, bvItem.parentBvItemId);
+      }
+
+      // Kalau ini induk, anak-anaknya ikut dirapikan ke bawahnya
+      await rapikanAnak(tx, id);
+
+      return hasil;
     });
 
     res.json({

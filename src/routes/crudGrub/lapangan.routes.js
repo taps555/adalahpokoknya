@@ -9,7 +9,7 @@ const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
 
-const uploadDir = path.join(__dirname, "./public/uploads/surat-jalan");
+const uploadDir = path.join(__dirname, "../../../public/uploads/surat-jalan");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -27,182 +27,330 @@ const storage = multer.diskStorage({
   },
 });
 
-// Izinkan maksimal 5 foto sekali upload
-const upload = multer({ storage: storage });
+// Surat jalan supplier biasanya lebih dari 1 foto — kasih ruang sampai 10.
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
+});
 
-/** PUT /material-request-items/:id/lapangan-update
- * Update progress lapangan 1 item (tanggalOnsite, updateLapangan)
- * DEPENDENT: hanya bisa diupdate kalau status Finance minimal PARTIAL
- * (barang harus sudah mulai dibeli sebelum lapangan bisa lapor progres)
+// FE baru kirim multipart, tapi kalau ada klien kirim JSON biasa
+// (mis. foto sudah jadi URL), multer tidak parse body sama sekali.
+// Middleware ini hanya jalankan multer saat request-nya multipart.
+const maybeUpload = (req, res, next) => {
+  if (req.is("multipart/form-data")) {
+    return upload.array("fotoBukti", 10)(req, res, next);
+  }
+  next();
+};
+
+/**
+ * Helper: hitung ulang status MaterialRequestItem dari total receivedVolume
+ * seluruh PurchaseOrderItem miliknya. receivedVolume/status/isCompleted
+ * sekarang hidup di level PO item, MR item cuma nyimpen ringkasan.
  */
-router.put(
-  "/material-request-items/:id/lapangan-update",
+const syncMrItemStatus = async (mrItemId) => {
+  if (!mrItemId) return;
+  const mrItem = await prisma.materialRequestItem.findUnique({
+    where: { id: mrItemId },
+    include: { poItems: true },
+  });
+  if (!mrItem) return;
 
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { tanggalOnsite, updateLapangan, receivedVolume, catatanRusak } =
-        req.body;
+  const totalDiterima = mrItem.poItems.reduce(
+    (sum, pi) => sum + (pi.receivedVolume || 0),
+    0,
+  );
 
-      const existing = await prisma.materialRequestItem.findUnique({
-        where: { id },
-      });
-      if (!existing)
-        return res.status(404).json({ error: "Item tidak ditemukan." });
+  let status = "PENDING";
+  let isCompleted = false;
+  if (mrItem.estimatedVolume > 0 && totalDiterima >= mrItem.estimatedVolume) {
+    status = "COMPLETED";
+    isCompleted = true;
+  } else if (totalDiterima > 0) {
+    status = "PARTIAL";
+  }
 
-      // Cek semua PO item induk sudah APPROVED
-      const relatedPoItems = await prisma.purchaseOrderItem.findMany({
-        where: { materialRequestId: id },
+  await prisma.materialRequestItem.update({
+    where: { id: mrItemId },
+    data: { status, isCompleted },
+  });
+};
+
+/**
+ * Helper: cari PurchaseOrderItem dari bermacam bentuk ID yang dikirim FE.
+ * - poItemId langsung
+ * - id PO item langsung
+ * - UI key dari GET /finance/projects/:id/material-requests: "<mrItemId>_<poItemId>"
+ * - mrItemId (kalau MR item cuma punya 1 PO item)
+ */
+const resolvePoItem = async (payload) => {
+  const candidates = [payload.poItemId, payload.id].filter(Boolean);
+
+  for (const c of candidates) {
+    if (typeof c === "string" && c.includes("_")) {
+      const found = await prisma.purchaseOrderItem.findUnique({
+        where: { id: c.split("_").pop() },
         include: { purchaseOrder: true },
       });
-      const blockingPO = relatedPoItems.find(
-        (pi) => pi.purchaseOrder.status !== "APPROVED",
-      );
-      if (blockingPO) {
-        return res.status(400).json({
-          error: `Barang belum bisa diupdate lapangan. PO induk ${blockingPO.purchaseOrder.poNumber || blockingPO.purchaseOrder.id} belum di-approve.`,
+      if (found) return found;
+    }
+  }
+
+  for (const c of candidates) {
+    const found = await prisma.purchaseOrderItem.findUnique({
+      where: { id: c },
+      include: { purchaseOrder: true },
+    });
+    if (found) return found;
+  }
+
+  if (payload.mrItemId) {
+    const list = await prisma.purchaseOrderItem.findMany({
+      where: { materialRequestId: payload.mrItemId },
+      include: { purchaseOrder: true },
+    });
+    if (list.length === 1) return list[0];
+  }
+
+  return null;
+};
+
+/**
+ * Kolom lapangan yang boleh diubah lewat form manual.
+ * receivedVolume SENGAJA tidak ikut — volume diterima hanya boleh lahir dari
+ * Surat Jalan (bukti fisik). Kalau form manual bisa menulisnya, bukti itu
+ * kehilangan fungsi (dan kelebihan terima jadi bisa dipalsukan).
+ */
+const VOLUME_MANUAL_MSG =
+  "Volume diterima tidak bisa diisi dari form. Kirim Surat Jalan (foto bukti) supaya volumenya tercatat.";
+
+/** true kalau request mencoba menulis volume diterima lewat form manual. */
+const cobaTulisVolume = (body) =>
+  body && body.receivedVolume !== undefined && body.receivedVolume !== null && body.receivedVolume !== "";
+
+const buildLapanganData = (body) => {
+  const { tanggalOnsite, updateLapangan, catatanRusak } = body;
+  const data = {};
+  if (tanggalOnsite !== undefined) {
+    data.tanggalOnsite = tanggalOnsite ? new Date(tanggalOnsite) : null;
+  }
+  if (updateLapangan !== undefined) data.updateLapangan = updateLapangan;
+  if (catatanRusak !== undefined) data.catatanRusak = catatanRusak;
+  return data;
+};
+
+/**
+ * PUT /api/po-items/:poItemId/lapangan-update
+ * Update progress lapangan 1 baris barang.
+ * Kolom lapangan (tanggalOnsite, updateLapangan, receivedVolume, catatanRusak)
+ * ada di PurchaseOrderItem, bukan MaterialRequestItem.
+ */
+router.put("/po-items/:poItemId/lapangan-update", async (req, res) => {
+  try {
+    const { poItemId } = req.params;
+
+    const poItem = await prisma.purchaseOrderItem.findUnique({
+      where: { id: poItemId },
+      include: { purchaseOrder: true },
+    });
+    if (!poItem) {
+      return res.status(404).json({ error: "Barang PO tidak ditemukan." });
+    }
+
+    // Guard: PO induk harus APPROVED sebelum lapangan boleh lapor progres
+    if (poItem.purchaseOrder?.status !== "APPROVED") {
+      return res.status(400).json({
+        error: `Barang belum bisa diupdate lapangan. PO induk ${poItem.purchaseOrder?.poNumber || poItem.purchaseOrder?.id} belum di-approve.`,
+      });
+    }
+
+    // Volume hanya boleh lahir dari Surat Jalan, bukan form manual.
+    if (cobaTulisVolume(req.body)) {
+      return res.status(400).json({ error: VOLUME_MANUAL_MSG });
+    }
+
+    const updated = await prisma.purchaseOrderItem.update({
+      where: { id: poItemId },
+      data: buildLapanganData(req.body),
+    });
+
+    await syncMrItemStatus(poItem.materialRequestId);
+
+    res.json({ message: "Update lapangan berhasil.", data: updated });
+  } catch (error) {
+    console.error("Error Lapangan Update:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+/**
+ * PUT /api/po-items/lapangan-update-bulk
+ * Update progress lapangan banyak baris sekaligus.
+ * body: { items: [{ poItemId | id, mrItemId, tanggalOnsite, updateLapangan, catatanRusak }] }
+ * `receivedVolume` sengaja ditolak di sini — volumenya lewat Surat Jalan.
+ * Baris sisa yang belum di-PO / PO belum APPROVED masuk ke `skipped`.
+ */
+router.put("/po-items/lapangan-update-bulk", async (req, res) => {
+  try {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res
+        .status(400)
+        .json({ error: 'Field "items" wajib diisi (array).' });
+    }
+
+    const results = [];
+    const skipped = [];
+    const touchedMrItems = new Set();
+
+    for (const item of items) {
+      const poItem = await resolvePoItem(item);
+
+      if (!poItem) {
+        skipped.push({
+          id: item.poItemId || item.id,
+          reason:
+            "Barang PO tidak ditemukan. Baris sisa yang belum di-PO tidak bisa diupdate lapangan.",
         });
+        continue;
       }
 
-      if (!existing.orderedVolume || existing.orderedVolume <= 0) {
-        return res.status(400).json({
-          error:
-            "Barang belum di-PO oleh Finance. Update lapangan belum bisa dilakukan.",
+      if (poItem.purchaseOrder?.status !== "APPROVED") {
+        skipped.push({
+          id: poItem.id,
+          reason: `PO induk ${poItem.purchaseOrder?.poNumber || poItem.purchaseOrder?.id} belum di-approve.`,
         });
+        continue;
       }
 
-      // hitung status baru dari receivedVolume, kalau field ini dikirim
-      let statusData = {};
-      if (receivedVolume !== undefined) {
-        const rv = Number(receivedVolume);
-        let newStatus = "PENDING";
-        let isCompleted = false;
-        if (rv >= existing.estimatedVolume) {
-          newStatus = "COMPLETED";
-          isCompleted = true;
-        } else if (rv > 0) {
-          newStatus = "PARTIAL";
-        }
-        statusData = { receivedVolume: rv, status: newStatus, isCompleted };
+      if (cobaTulisVolume(item)) {
+        skipped.push({ id: poItem.id, reason: VOLUME_MANUAL_MSG });
+        continue;
       }
 
-      const updated = await prisma.materialRequestItem.update({
-        where: { id },
-        data: {
-          ...(tanggalOnsite !== undefined
-            ? { tanggalOnsite: tanggalOnsite ? new Date(tanggalOnsite) : null }
-            : {}),
-          ...(updateLapangan !== undefined ? { updateLapangan } : {}),
-          ...(catatanRusak !== undefined ? { catatanRusak } : {}),
-          ...statusData,
-        },
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id: poItem.id },
+        data: buildLapanganData(item),
       });
 
-      res.json({ message: "Update lapangan berhasil.", data: updated });
-    } catch (error) {
-      console.error("Error Lapangan Update:", error);
-      res
-        .status(500)
-        .json({ error: error.message || "Terjadi kesalahan pada server." });
+      if (poItem.materialRequestId) touchedMrItems.add(poItem.materialRequestId);
+      results.push(updated);
     }
-  },
-);
 
-/** PUT /material-request-items/lapangan-update-bulk
- * Update progress lapangan banyak item sekaligus
- * body: { items: [{ id, tanggalOnsite, updateLapangan }, ...] }
- * DEPENDENT: item dengan status PENDING otomatis dilewati (masuk skipped)
+    for (const mrItemId of touchedMrItems) {
+      await syncMrItemStatus(mrItemId);
+    }
+
+    res.json({
+      message: `Berhasil update lapangan ${results.length} item. Dilewati ${skipped.length} item.`,
+      data: results,
+      skipped,
+    });
+  } catch (error) {
+    console.error("Error Lapangan Update Bulk:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+/**
+ * ALIAS LAMA: PUT /api/material-request-items/:id/lapangan-update
+ * FE versi lama kirim mrItemId. Diteruskan ke baris PO-nya.
+ */
+router.put("/material-request-items/:id/lapangan-update", async (req, res) => {
+  try {
+    const list = await prisma.purchaseOrderItem.findMany({
+      where: { materialRequestId: req.params.id },
+      include: { purchaseOrder: true },
+      orderBy: { createdAt: "asc" },
+    });
+
+    if (list.length === 0) {
+      return res.status(400).json({
+        error:
+          "Barang belum di-PO, belum ada baris PO yang bisa diupdate lapangan.",
+      });
+    }
+    if (list.length > 1) {
+      return res.status(400).json({
+        error:
+          "Item ini punya beberapa PO. Kirim poItemId ke /api/po-items/:poItemId/lapangan-update.",
+      });
+    }
+
+    const poItem = list[0];
+    if (poItem.purchaseOrder?.status !== "APPROVED") {
+      return res.status(400).json({
+        error: `Barang belum bisa diupdate lapangan. PO induk ${poItem.purchaseOrder?.poNumber} belum di-approve.`,
+      });
+    }
+
+    const updated = await prisma.purchaseOrderItem.update({
+      where: { id: poItem.id },
+      data: buildLapanganData(req.body),
+    });
+
+    await syncMrItemStatus(req.params.id);
+
+    res.json({ message: "Update lapangan berhasil.", data: updated });
+  } catch (error) {
+    console.error("Error Lapangan Update (alias):", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
+/**
+ * ALIAS LAMA: PUT /api/material-request-items/lapangan-update-bulk
  */
 router.put(
   "/material-request-items/lapangan-update-bulk",
-
   async (req, res) => {
     try {
       const { items } = req.body;
-
-      if (!Array.isArray(items) || items.length === 0)
+      if (!Array.isArray(items) || items.length === 0) {
         return res
           .status(400)
           .json({ error: 'Field "items" wajib diisi (array).' });
-
-      const ids = items.map((i) => i.id);
-      const existingItems = await prisma.materialRequestItem.findMany({
-        where: { id: { in: ids } },
-      });
-      const existingMap = new Map(existingItems.map((e) => [e.id, e]));
+      }
 
       const results = [];
       const skipped = [];
+      const touchedMrItems = new Set();
 
       for (const item of items) {
-        const existing = existingMap.get(item.id);
-
-        if (!existing) {
-          skipped.push({ id: item.id, reason: "Item tidak ditemukan." });
-          continue;
-        }
-
-        // Cek semua PO item induk sudah APPROVED
-        const relatedPoItems = await prisma.purchaseOrderItem.findMany({
-          where: { materialRequestId: item.id },
-          include: { purchaseOrder: true },
-        });
-        const blockingPO = relatedPoItems.find(
-          (pi) => pi.purchaseOrder.status !== "APPROVED",
-        );
-        if (blockingPO) {
-          skipped.push({
-            id: item.id,
-            reason: `PO induk ${blockingPO.purchaseOrder.poNumber || blockingPO.purchaseOrder.id} belum di-approve.`,
-          });
-          continue;
-        }
-
-        if (!existing.orderedVolume || existing.orderedVolume <= 0) {
+        const poItem = await resolvePoItem(item);
+        if (!poItem) {
           skipped.push({
             id: item.id,
             reason:
-              "Barang belum di-PO oleh Finance, belum bisa update lapangan.",
+              "Barang PO tidak ditemukan (baris sisa belum di-PO).",
+          });
+          continue;
+        }
+        if (poItem.purchaseOrder?.status !== "APPROVED") {
+          skipped.push({
+            id: poItem.id,
+            reason: `PO induk ${poItem.purchaseOrder?.poNumber} belum di-approve.`,
           });
           continue;
         }
 
-        let statusData = {};
-        if (item.receivedVolume !== undefined) {
-          const rv = Number(item.receivedVolume);
-          let newStatus = "PENDING";
-          let isCompleted = false;
-          if (rv >= existing.estimatedVolume) {
-            newStatus = "COMPLETED";
-            isCompleted = true;
-          } else if (rv > 0) {
-            newStatus = "PARTIAL";
-          }
-          statusData = { receivedVolume: rv, status: newStatus, isCompleted };
-        }
-
-        const updated = await prisma.materialRequestItem.update({
-          where: { id: item.id },
-          data: {
-            ...(item.tanggalOnsite !== undefined
-              ? {
-                  tanggalOnsite: item.tanggalOnsite
-                    ? new Date(item.tanggalOnsite)
-                    : null,
-                }
-              : {}),
-            ...(item.updateLapangan !== undefined
-              ? { updateLapangan: item.updateLapangan }
-              : {}),
-            ...(item.catatanRusak !== undefined
-              ? { catatanRusak: item.catatanRusak }
-              : {}),
-            ...statusData,
-          },
+        const updated = await prisma.purchaseOrderItem.update({
+          where: { id: poItem.id },
+          data: buildLapanganData(item),
         });
-
+        if (poItem.materialRequestId)
+          touchedMrItems.add(poItem.materialRequestId);
         results.push(updated);
       }
+
+      for (const mrItemId of touchedMrItems) await syncMrItemStatus(mrItemId);
 
       res.json({
         message: `Berhasil update lapangan ${results.length} item. Dilewati ${skipped.length} item.`,
@@ -210,13 +358,14 @@ router.put(
         skipped,
       });
     } catch (error) {
-      console.error("Error Lapangan Update Bulk:", error);
+      console.error("Error Lapangan Update Bulk (alias):", error);
       res
         .status(500)
         .json({ error: error.message || "Terjadi kesalahan pada server." });
     }
   },
 );
+
 
 /**
  * PUT /api/lapangan/po-items/:poItemId/receive
@@ -325,11 +474,28 @@ router.put(
 // ==========================================
 router.post(
   "/po-items/:poItemId/surat-jalan",
-  upload.array("fotoBukti", 5),
+  maybeUpload,
   async (req, res) => {
     try {
       const { poItemId } = req.params;
       const { nomorSJ, volumeDiterima, catatan, tanggal } = req.body;
+
+      // Validasi biar error jelas, bukan 500
+      if (!nomorSJ || !String(nomorSJ).trim()) {
+        return res.status(400).json({ error: "Nomor Surat Jalan wajib diisi." });
+      }
+      const vol = Number(volumeDiterima);
+      if (
+        volumeDiterima === undefined ||
+        volumeDiterima === null ||
+        volumeDiterima === "" ||
+        Number.isNaN(vol) ||
+        vol <= 0
+      ) {
+        return res
+          .status(400)
+          .json({ error: "Volume diterima wajib diisi dan lebih dari 0." });
+      }
 
       // 🔥 FORMAT PATH UNTUK DATABASE
       // Ambil semua file yang berhasil di-upload, lalu format path-nya
@@ -338,6 +504,14 @@ router.post(
         filePaths = req.files.map(
           (file) => `/uploads/surat-jalan/${file.filename}`,
         );
+      }
+
+      // Surat Jalan = bukti barang nyampe lapangan. Foto wajib, dan biasanya lebih dari 1.
+      if (filePaths.length === 0) {
+        return res.status(400).json({
+          error:
+            "Foto Surat Jalan wajib dilampirkan. Surat Jalan adalah bukti barang diterima di lapangan.",
+        });
       }
 
       // Ubah Array jadi String JSON untuk disimpan di Prisma
@@ -358,6 +532,17 @@ router.post(
       if (poItem.purchaseOrder.status !== "APPROVED") {
         return res.status(400).json({
           error: "PO belum di-approve. Surat Jalan belum boleh dibuat.",
+        });
+      }
+
+      // Barang kurang: datang < sisa pesanan → catatan kekurangan wajib.
+      const sisa = Math.max(
+        0,
+        (poItem.qty || 0) - (poItem.receivedVolume || 0),
+      );
+      if (sisa > 0 && vol < sisa && !String(catatan || "").trim()) {
+        return res.status(400).json({
+          error: `Barang datang kurang dari pesanan (pesan ${sisa}, datang ${vol}). Catatan kekurangan wajib diisi.`,
         });
       }
 
@@ -391,6 +576,9 @@ router.post(
         },
       });
 
+      // Sinkronkan ringkasan status MaterialRequestItem
+      await syncMrItemStatus(poItem.materialRequestId);
+
       res.json({
         message: "Surat Jalan dan Foto berhasil dicatat!",
         data: newSJ,
@@ -406,13 +594,105 @@ router.post(
 // ==========================================
 // API PENERIMAAN BORONGAN (BULK SURAT JALAN)
 // ==========================================
-router.post("/surat-jalan/bulk", async (req, res) => {
+router.post("/surat-jalan/bulk", maybeUpload, async (req, res) => {
   try {
-    const { nomorSJ, fotoUrls, tanggal, items } = req.body;
+    const { nomorSJ, fotoUrls, tanggal } = req.body;
     // 'items' adalah array dari barang yang dicentang, contoh:
-    // [{ poItemId: "123", volumeDiterima: 50, catatan: "aman" }, { poItemId: "124", volumeDiterima: 100, catatan: "" }]
+    // items bisa datang sebagai JSON string (multipart) atau array asli (application/json)
+    let items = req.body.items;
+    if (typeof items === "string") {
+      try {
+        items = JSON.parse(items);
+      } catch (e) {
+        return res.status(400).json({ error: 'Field "items" bukan JSON yang valid.' });
+      }
+    }
+
+    // Foto: multipart (req.files) atau JSON base64 (fotoUrls)
+    let filePaths = [];
+    if (req.files && req.files.length > 0) {
+      filePaths = req.files.map((f) => `/uploads/surat-jalan/${f.filename}`);
+    } else if (Array.isArray(fotoUrls)) {
+      // Jalur JSON cuma boleh nunjuk file yang benar-benar ada di uploads.
+      filePaths = fotoUrls
+        .filter((u) => typeof u === "string" && u.startsWith("/uploads/"))
+        .map((u) => {
+          try {
+            return fs.existsSync(path.join(__dirname, "../../../public", u))
+              ? u
+              : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+    }
+
+    // Surat Jalan = bukti barang nyampe lapangan. Foto wajib ada.
+    if (filePaths.length === 0) {
+      return res.status(400).json({
+        error:
+          "Foto Surat Jalan wajib dilampirkan. Surat Jalan adalah bukti barang diterima di lapangan.",
+      });
+    }
+
+    // Validasi dulu sebelum transaksi — biar error jelas, bukan 500
+    if (!Array.isArray(items) || items.length === 0) {
+      return res
+        .status(400)
+        .json({ error: 'Field "items" wajib diisi (array).' });
+    }
+    if (!nomorSJ || !String(nomorSJ).trim()) {
+      return res.status(400).json({ error: "Nomor Surat Jalan wajib diisi." });
+    }
+
+    const invalid = [];
+    for (const item of items) {
+      if (!item.poItemId) {
+        invalid.push("ada baris tanpa poItemId (baris sisa belum di-PO)");
+        continue;
+      }
+      const vol = Number(item.volumeDiterima);
+      if (
+        item.volumeDiterima === undefined ||
+        item.volumeDiterima === null ||
+        item.volumeDiterima === "" ||
+        Number.isNaN(vol) ||
+        vol <= 0
+      ) {
+        invalid.push(`volumeDiterima baris ${item.poItemId} tidak valid`);
+      }
+    }
+    if (invalid.length > 0) {
+      return res.status(400).json({
+        error: `Data Surat Jalan belum lengkap: ${invalid.join("; ")}.`,
+      });
+    }
+
+    // Barang kurang: kalau yang datang lebih sedikit dari sisa pesanan,
+    // catatan kekurangan wajib diisi. Surat Jalan tetap jadi buktinya.
+    const kurangTanpaCatatan = [];
+    for (const item of items) {
+      const poItem = await prisma.purchaseOrderItem.findUnique({
+        where: { id: item.poItemId },
+      });
+      if (!poItem) continue;
+      const sisa = Math.max(0, (poItem.qty || 0) - (poItem.receivedVolume || 0));
+      const datang = Number(item.volumeDiterima);
+      if (sisa > 0 && datang < sisa && !String(item.catatan || "").trim()) {
+        kurangTanpaCatatan.push(
+          `${poItem.description || item.poItemId} (pesan ${sisa}, datang ${datang})`,
+        );
+      }
+    }
+    if (kurangTanpaCatatan.length > 0) {
+      return res.status(400).json({
+        error: `Barang datang kurang dari jumlah pesanan, catatan kekurangan wajib diisi: ${kurangTanpaCatatan.join("; ")}.`,
+      });
+    }
 
     // Kita gunakan prisma.$transaction agar aman!
+    const touchedMrItems = new Set();
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
         // 1. Simpan Riwayat Surat Jalan untuk masing-masing barang
@@ -435,7 +715,7 @@ router.post("/surat-jalan/bulk", async (req, res) => {
             nomorSJ,
             volumeDiterima: parseFloat(item.volumeDiterima),
             catatan: item.catatan || "",
-            fotoUrls: fotoUrls || "",
+            fotoUrls: JSON.stringify(filePaths),
             tanggal: tanggal ? new Date(tanggal) : new Date(),
           },
         });
@@ -456,8 +736,16 @@ router.post("/surat-jalan/bulk", async (req, res) => {
             tanggalOnsite: newSJ.tanggal,
           },
         });
+
+        // 4. Kumpulkan MR item biar ringkasan status-nya ikut disinkron
+        if (poItem.materialRequestId) touchedMrItems.add(poItem.materialRequestId);
       }
     });
+
+    // 5. Sinkronkan status MaterialRequestItem (receivedVolume/status pindah ke PO item)
+    for (const mrItemId of touchedMrItems) {
+      await syncMrItemStatus(mrItemId);
+    }
 
     res.json({ message: "Penerimaan borongan berhasil dicatat!" });
   } catch (error) {
@@ -478,22 +766,290 @@ router.get("/surat-jalan/:poItemId", async (req, res) => {
   try {
     const { poItemId } = req.params;
 
-    // Cek di terminal/console backend kamu, ID apa yang sebenarnya dicari?
-    console.log("Mencari Riwayat untuk ID Barang:", poItemId);
-
     const riwayat = await prisma.deliveryReceipt.findMany({
-      // 🔥 Jaga-jaga kalau tipe datanya Int, kita ubah jadi angka
-      where: {
-        poItemId: isNaN(poItemId) ? poItemId : parseInt(poItemId),
-      },
+      where: { poItemId },
       orderBy: { tanggal: "asc" },
     });
 
-    console.log("Data ditemukan:", riwayat.length, "baris");
-    res.json(riwayat);
+    // fotoUrls disimpan sebagai string JSON di DB — kirim sebagai array biar FE gampang.
+    const parsed = riwayat.map((row) => {
+      let fotoUrls = [];
+      if (row.fotoUrls) {
+        try {
+          const p = JSON.parse(row.fotoUrls);
+          fotoUrls = Array.isArray(p) ? p : [row.fotoUrls];
+        } catch {
+          fotoUrls = [row.fotoUrls];
+        }
+      }
+      return { ...row, fotoUrls };
+    });
+
+    res.json(parsed);
   } catch (error) {
     console.error("Error get riwayat:", error);
     res.status(500).json({ error: "Gagal mengambil riwayat Surat Jalan" });
   }
 });
+/**
+ * GET /api/riwayat-habis-pakai?projectId=xxx
+ * Riwayat pembelian habis pakai:
+ *  - permintaan habis pakai dari lapangan + PO hasilnya
+ *  - PO berkategori HABIS_PAKAI + surat jalannya
+ *  - kelebihan terima (receivedVolume > qty PO) — kandidat habis pakai
+ */
+router.get("/riwayat-habis-pakai", async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const wherePO = { kategoriPO: "HABIS_PAKAI" };
+    const wherePermintaan = {};
+    if (projectId) {
+      wherePO.projectId = projectId;
+      wherePermintaan.projectId = projectId;
+    }
+
+    const [permintaan, poHabisPakai, semuaItemPO] = await Promise.all([
+      prisma.permintaanHabisPakai.findMany({
+        where: wherePermintaan,
+        include: {
+          po: { select: { id: true, poNumber: true, status: true } },
+          poHabisPakai: { select: { id: true, poNumber: true, status: true } },
+          requestedBy: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.purchaseOrder.findMany({
+        where: wherePO,
+        include: {
+          supplier: { select: { id: true, name: true } },
+          project: { select: { id: true, name: true } },
+          items: {
+            orderBy: { id: "asc" },
+            include: {
+              deliveryReceipts: { orderBy: { tanggal: "desc" } },
+            },
+          },
+          // Permintaan yang dituntaskan PO habis pakai ini (poHabisPakaiId)
+          permintaanHabisPakai: {
+            select: { id: true, nomor: true, itemName: true, alasan: true },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      // Semua item PO (kategori apa saja) buat deteksi kelebihan terima
+      prisma.purchaseOrderItem.findMany({
+        where: projectId ? { purchaseOrder: { projectId } } : {},
+        include: {
+          purchaseOrder: {
+            select: {
+              id: true,
+              poNumber: true,
+              kategoriPO: true,
+              supplier: { select: { id: true, name: true } },
+            },
+          },
+          materialRequest: { select: { id: true, itemName: true, groupName: true } },
+          deliveryReceipts: { select: { id: true, nomorSJ: true, tanggal: true, fotoUrls: true, volumeDiterima: true, catatan: true } },
+        },
+      }),
+    ]);
+
+    // Kelebihan: barang datang melebihi jumlah yang dipesan di PO.
+    // Bukan dibuatkan permintaan otomatis — cuma ditandai supaya
+    // pihak perusahaan tahu ini masuk hitungan habis pakai.
+    const kelebihan = semuaItemPO
+      .filter((it) => Number(it.receivedVolume || 0) - Number(it.qty || 0) > 0.0001)
+      .map((it) => ({
+        id: it.id,
+        poItemId: it.id,
+        description: it.description,
+        description2: it.description2,
+        unit: it.unit,
+        qtyPO: it.qty,
+        receivedVolume: it.receivedVolume,
+        kelebihan: Number(it.receivedVolume || 0) - Number(it.qty || 0),
+        poNumber: it.purchaseOrder?.poNumber,
+        poId: it.purchaseOrder?.id,
+        kategoriPO: it.purchaseOrder?.kategoriPO,
+        supplier: it.purchaseOrder?.supplier || null,
+        mrItemId: it.materialRequest?.id || null,
+        itemName: it.materialRequest?.itemName || null,
+        groupName: it.materialRequest?.groupName || null,
+        suratJalan: (it.deliveryReceipts || []).map((r) => ({
+          id: r.id,
+          nomorSJ: r.nomorSJ,
+          tanggal: r.tanggal,
+        })),
+      }))
+      .sort((a, b) => b.kelebihan - a.kelebihan);
+
+    res.json({ permintaan, poHabisPakai, kelebihan });
+  } catch (error) {
+    console.error("Get Riwayat Habis Pakai Error:", error);
+    res.status(500).json({ error: "Gagal mengambil riwayat habis pakai" });
+  }
+});
+
+/**
+ * GET /api/permintaan-habis-pakai?projectId=&status=
+ * Antrean permintaan habis pakai yang diajukan lapangan dari Item Tracking.
+ * Purchasing pakai ini buat bikin PO kategori HABIS_PAKAI.
+ */
+router.get("/permintaan-habis-pakai", async (req, res) => {
+  try {
+    const { projectId, status } = req.query;
+    const where = {};
+    if (projectId) where.projectId = projectId;
+    if (status) where.status = status;
+
+    const data = await prisma.permintaanHabisPakai.findMany({
+      where,
+      include: {
+        po: { select: { id: true, poNumber: true, status: true } },
+        poHabisPakai: { select: { id: true, poNumber: true, status: true } },
+        requestedBy: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(data);
+  } catch (error) {
+    console.error("Get Permintaan Habis Pakai Error:", error);
+    res.status(500).json({ error: "Gagal mengambil permintaan habis pakai" });
+  }
+});
+
+/**
+ * POST /api/permintaan-habis-pakai
+ * Item Tracking mengajukan pembelian habis pakai.
+ * HANYA boleh kalau PO induk sudah COMPLETED (barang awal sudah diterima semua).
+ * body: { projectId, poId, mrItemId, itemName, unit, qty, alasan, catatan }
+ */
+router.post("/permintaan-habis-pakai", async (req, res) => {
+  try {
+    const { projectId, poId, mrItemId, itemName, unit, qty, alasan, catatan } =
+      req.body || {};
+
+    if (!projectId || !itemName || !qty) {
+      return res
+        .status(400)
+        .json({ error: "projectId, itemName, dan qty wajib diisi." });
+    }
+
+    if (poId) {
+      const po = await prisma.purchaseOrder.findUnique({ where: { id: poId } });
+      if (!po) {
+        return res.status(404).json({ error: "PO induk tidak ditemukan." });
+      }
+      if (po.status !== "APPROVED") {
+        return res.status(400).json({
+          error: `PO induk ${po.poNumber || po.id} belum APPROVED. Pembelian habis pakai baru bisa diajukan setelah PO induk disetujui.`,
+        });
+      }
+    }
+
+    const created = await prisma.permintaanHabisPakai.create({
+      data: {
+        projectId,
+        poId: poId || null,
+        mrItemId: mrItemId || null,
+        itemName: String(itemName).trim(),
+        unit: unit || "-",
+        qty: Number(qty),
+        alasan: alasan || null,
+        catatan: catatan || null,
+        requestedById: req.user?.userId || null,
+      },
+    });
+
+    const now = created.createdAt;
+    const bulan = String(now.getMonth() + 1).padStart(2, "0");
+    const tahun = now.getFullYear();
+    const urutan = String(created.seq).padStart(3, "0");
+    const nomor = `PHP/${bulan}/${tahun}/${urutan}`;
+
+    const final = await prisma.permintaanHabisPakai.update({
+      where: { id: created.id },
+      data: { nomor },
+      include: {
+        po: { select: { id: true, poNumber: true, status: true } },
+        requestedBy: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json({
+      message: "Permintaan habis pakai diajukan, menunggu purchasing.",
+      data: final,
+    });
+  } catch (error) {
+    console.error("Create Permintaan Habis Pakai Error:", error);
+    res.status(500).json({ error: "Gagal mengajukan permintaan habis pakai" });
+  }
+});
+
+/**
+ * PUT /api/permintaan-habis-pakai/:id/link
+ * Purchasing menautkan PO HABIS_PAKAI yang baru dibuat ke permintaan ini.
+ * body: { poHabisPakaiId }
+ */
+router.put("/permintaan-habis-pakai/:id/link", async (req, res) => {
+  try {
+    const { poHabisPakaiId } = req.body || {};
+    if (!poHabisPakaiId) {
+      return res.status(400).json({ error: "poHabisPakaiId wajib diisi." });
+    }
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: poHabisPakaiId },
+    });
+    if (!po) {
+      return res.status(404).json({ error: "PO habis pakai tidak ditemukan." });
+    }
+    if (po.kategoriPO !== "HABIS_PAKAI") {
+      return res
+        .status(400)
+        .json({ error: "PO tujuan bukan kategori HABIS_PAKAI." });
+    }
+
+    const updated = await prisma.permintaanHabisPakai.update({
+      where: { id: req.params.id },
+      data: { poHabisPakaiId, status: "LINKED" },
+      include: {
+        po: { select: { id: true, poNumber: true } },
+        poHabisPakai: { select: { id: true, poNumber: true, status: true } },
+      },
+    });
+    res.json({ message: "Permintaan ditautkan ke PO habis pakai.", data: updated });
+  } catch (error) {
+    console.error("Link Permintaan Habis Pakai Error:", error);
+    if (error.code === "P2025") {
+      return res.status(404).json({ error: "Permintaan tidak ditemukan." });
+    }
+    res.status(500).json({ error: "Gagal menautkan permintaan" });
+  }
+});
+
+/**
+ * PUT /api/permintaan-habis-pakai/:id/reject
+ * body: { alasan }
+ */
+router.put("/permintaan-habis-pakai/:id/reject", async (req, res) => {
+  try {
+    const reason = req.body?.alasan || req.body?.catatan;
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ error: "Alasan penolakan wajib diisi." });
+    }
+    const updated = await prisma.permintaanHabisPakai.update({
+      where: { id: req.params.id },
+      data: { status: "REJECTED", catatan: String(reason).trim() },
+    });
+    res.json({ message: "Permintaan habis pakai ditolak.", data: updated });
+  } catch (error) {
+    console.error("Reject Permintaan Habis Pakai Error:", error);
+    if (error.code === "P2025") {
+      return res.status(404).json({ error: "Permintaan tidak ditemukan." });
+    }
+    res.status(500).json({ error: "Gagal menolak permintaan" });
+  }
+});
+
 module.exports = router;

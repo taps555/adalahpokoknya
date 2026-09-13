@@ -3,6 +3,43 @@ const router = express.Router();
 const prisma = require("../../lib/prisma"); // Sesuaikan path menuju file prisma Anda
 const { verifyToken, authorizeRoles } = require("../../middleware/auth"); // Sesuaikan path middleware auth Anda
 
+/**
+ * Hitung ulang status penerimaan satu MaterialRequestItem dari total receivedVolume
+ * semua PurchaseOrderItem miliknya. Dipakai endpoint /receive.
+ */
+async function syncStatusPenerimaan(materialRequestId) {
+  if (!materialRequestId) return;
+  try {
+    const mrItem = await prisma.materialRequestItem.findUnique({
+      where: { id: materialRequestId },
+      include: { poItems: true },
+    });
+    if (!mrItem) return;
+
+    const totalDiterima = (mrItem.poItems || []).reduce(
+      (s, p) => s + Number(p.receivedVolume || 0),
+      0,
+    );
+    const status =
+      totalDiterima >= Number(mrItem.estimatedVolume)
+        ? "COMPLETED"
+        : totalDiterima > 0
+          ? "PARTIAL"
+          : "PENDING";
+
+    await prisma.materialRequestItem.update({
+      where: { id: materialRequestId },
+      data: {
+        orderedVolume: totalDiterima,
+        status,
+        isCompleted: status === "COMPLETED",
+      },
+    });
+  } catch (e) {
+    console.error("syncStatusPenerimaan gagal:", e.message);
+  }
+}
+
 // =====================================================================
 // FASE 1: PERMINTAAN PEMBELIAN (DARI RAB)
 // =====================================================================
@@ -254,26 +291,54 @@ router.put("/material-requests/items/:id/receive", async (req, res) => {
   try {
     const { id } = req.params;
     const { receivedVolume, catatanRusak } = req.body;
+
+    // FIX: kolom "lapangan" (receivedVolume, catatanRusak) hidup di PurchaseOrderItem.
+    // Dulu endpoint ini selalu menulis ke MaterialRequestItem yang tidak punya kolom itu,
+    // jadi setiap penerimaan barang PASTI 500. Sekarang menerima dua-duanya:
+    // kirim poItemId (dari GET /finance/projects/:id/material-requests) atau mrItemId.
+    const rvAwal = Number(receivedVolume);
+
+    const poItem = await prisma.purchaseOrderItem.findUnique({ where: { id } });
+    if (poItem) {
+      const target = Number(poItem.qty) || 0;
+      const rv = isNaN(rvAwal) ? 0 : rvAwal;
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id },
+        data: {
+          receivedVolume: rv,
+          catatanRusak: catatanRusak ?? poItem.catatanRusak,
+        },
+      });
+      await syncStatusPenerimaan(poItem.materialRequestId);
+      return res.json({
+        message: "Data penerimaan disimpan",
+        data: updated,
+        status:
+          rv >= target ? "COMPLETED" : rv > 0 ? "PARTIAL" : "PENDING",
+      });
+    }
+
+    // Fallback: dipanggil dengan MaterialRequestItem.id
     const mrItem = await prisma.materialRequestItem.findUnique({
       where: { id },
     });
     if (!mrItem) return res.status(404).json({ error: "Item tidak ditemukan" });
 
-    const rv = Number(receivedVolume);
-    let newStatus = "PENDING",
-      isCompleted = false;
-    if (rv >= mrItem.estimatedVolume) {
-      newStatus = "COMPLETED";
-      isCompleted = true;
-    } else if (rv > 0) newStatus = "PARTIAL";
+    // tanpa kolom receivedVolume di MR item, status dihitung dari orderedVolume
+    const rv = isNaN(rvAwal) ? 0 : rvAwal;
+    const newStatus =
+      rv >= mrItem.estimatedVolume
+        ? "COMPLETED"
+        : rv > 0
+          ? "PARTIAL"
+          : "PENDING";
 
     const updated = await prisma.materialRequestItem.update({
       where: { id },
       data: {
-        receivedVolume: rv,
-        catatanRusak,
+        orderedVolume: rv,
         status: newStatus,
-        isCompleted,
+        isCompleted: newStatus === "COMPLETED",
       },
     });
     res.json({ message: "Data penerimaan disimpan", data: updated });
@@ -297,6 +362,10 @@ router.post("/po", verifyToken, async (req, res) => {
       supplierId,
       projectId,
       kategori,
+      kategoriPO,
+      sumberPo,
+      alasanHabisPakai,
+      permintaanHabisPakaiId,
       tanggal,
       deliveryDate,
       perusahaan,
@@ -339,6 +408,9 @@ router.post("/po", verifyToken, async (req, res) => {
           supplierId,
           projectId,
           kategori,
+          kategoriPO: kategoriPO || "MATERIAL",
+          sumberPo: sumberPo || null,
+          alasanHabisPakai: alasanHabisPakai || null,
           tanggal: new Date(tanggal),
           deliveryDate: deliveryDate ? new Date(deliveryDate) : null,
           perusahaan,
@@ -413,6 +485,14 @@ router.post("/po", verifyToken, async (req, res) => {
         }
       }
 
+      // 3. Tautkan PO HABIS_PAKAI ke permintaan lapangan (kalau ada)
+      if (permintaanHabisPakaiId && (kategoriPO || "MATERIAL") === "HABIS_PAKAI") {
+        await tx.permintaanHabisPakai.update({
+          where: { id: permintaanHabisPakaiId },
+          data: { poHabisPakaiId: po.id, status: "LINKED" },
+        });
+      }
+
       return po;
     });
 
@@ -434,9 +514,19 @@ router.post("/po", verifyToken, async (req, res) => {
 
 router.get("/po", verifyToken, async (req, res) => {
   try {
+    const { projectId, status, kategoriPO } = req.query;
+    const where = {};
+    if (projectId) where.projectId = projectId;
+    if (status) where.status = { in: String(status).split(",") };
+    if (kategoriPO) where.kategoriPO = kategoriPO;
+
     const pos = await prisma.purchaseOrder.findMany({
+      where,
       include: {
         supplier: true,
+        project: { select: { id: true, name: true } },
+        verifiedBy: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
         items: {
           orderBy: { id: "asc" },
           include: {
@@ -456,6 +546,158 @@ router.get("/po", verifyToken, async (req, res) => {
 });
 
 /**
+ * GET /api/finance/po-plan?projectId=xxx
+ * Nyiapin draft PO dari data RAB: item MR yang belum terpenuhi dikelompokkan
+ * PER SUPPLIER (lewat AhspItemMapping -> SupplierItem -> Supplier).
+ * Hasilnya langsung bisa dipakai buat bikin PO per supplier.
+ */
+router.get("/po-plan", verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) {
+      return res.status(400).json({ error: "projectId wajib diisi" });
+    }
+
+    const mrItems = await prisma.materialRequestItem.findMany({
+      where: {
+        header: { projectId },
+        isCompleted: false,
+      },
+      include: { header: { select: { projectId: true } } },
+      orderBy: { itemName: "asc" },
+    });
+
+    const mappings = await prisma.ahspItemMapping.findMany({
+      include: {
+        supplierItem: {
+          include: { supplier: { select: { id: true, name: true } } },
+        },
+      },
+    });
+    const mapByItemName = new Map(mappings.map((m) => [m.itemName, m]));
+
+    const groups = new Map(); // supplierId -> group
+    const belumAdaSupplier = [];
+
+    for (const it of mrItems) {
+      const sisa = Math.max(
+        0,
+        (it.estimatedVolume || 0) - (it.orderedVolume || 0),
+      );
+      if (sisa <= 0) continue;
+
+      const row = {
+        mrItemId: it.id,
+        itemName: it.itemName,
+        unit: it.unit,
+        groupName: it.groupName,
+        jobName: it.jobName,
+        estimatedVolume: it.estimatedVolume,
+        orderedVolume: it.orderedVolume || 0,
+        sisa,
+        pricePerUnit: it.pricePerUnit,
+        estimasiTotal: sisa * (it.pricePerUnit || 0),
+      };
+
+      const mapping = mapByItemName.get(it.itemName);
+      const supplier = mapping?.supplierItem?.supplier;
+      if (!supplier) {
+        belumAdaSupplier.push(row);
+        continue;
+      }
+
+      if (!groups.has(supplier.id)) {
+        groups.set(supplier.id, {
+          supplierId: supplier.id,
+          supplierName: supplier.name,
+          items: [],
+          subTotal: 0,
+        });
+      }
+      const g = groups.get(supplier.id);
+      const harga = Number(mapping.supplierItem.currentPrice || 0) || row.pricePerUnit || 0;
+      const total = sisa * harga;
+      g.items.push({
+        ...row,
+        supplierItemId: mapping.supplierItemId,
+        variantName: mapping.supplierItem?.variantName || null,
+        hargaSupplier: harga,
+        estimasiTotal: total,
+      });
+      g.subTotal += total;
+    }
+
+    const result = [...groups.values()].sort((a, b) =>
+      a.supplierName.localeCompare(b.supplierName),
+    );
+
+    res.json({
+      projectId,
+      totalItemBelumTerpenuhi: mrItems.length,
+      jmlSupplier: result.length,
+      suppliers: result,
+      belumAdaSupplier,
+    });
+  } catch (error) {
+    console.error("Get PO Plan Error:", error);
+    res.status(500).json({ error: "Gagal menyusun rencana PO" });
+  }
+});
+
+/**
+ * GET /api/finance/po/inbox-atasan?projectId=xxx
+ * Daftar PO yang sudah di-ACC finance dan nunggu persetujuan atasan (PM).
+ */
+router.get("/po/inbox-atasan", verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const where = { status: "MENUNGGU_ATASAN" };
+    if (projectId) where.projectId = projectId;
+
+    const pos = await prisma.purchaseOrder.findMany({
+      where,
+      include: {
+        supplier: true,
+        project: { select: { id: true, name: true } },
+        verifiedBy: { select: { id: true, name: true, role: true } },
+        items: { orderBy: { id: "asc" } },
+      },
+      orderBy: { verifiedAt: "asc" },
+    });
+    res.json(pos);
+  } catch (error) {
+    console.error("Get Inbox Atasan Error:", error);
+    res.status(500).json({ error: "Gagal mengambil inbox approval atasan" });
+  }
+});
+
+/**
+ * GET /api/finance/po/inbox-finance?projectId=xxx
+ * Daftar PO baru yang nunggu verifikasi Finance (tingkat 1).
+ */
+router.get("/po/inbox-finance", verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const where = { status: "BELUM_APPROVE" };
+    if (projectId) where.projectId = projectId;
+
+    const pos = await prisma.purchaseOrder.findMany({
+      where,
+      include: {
+        supplier: true,
+        project: { select: { id: true, name: true } },
+        items: { orderBy: { id: "asc" } },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json(pos);
+  } catch (error) {
+    console.error("Get Inbox Finance Error:", error);
+    res.status(500).json({ error: "Gagal mengambil inbox verifikasi finance" });
+  }
+});
+
+/**
  * GET /api/finance/po/:id
  * Mengambil detail 1 PO secara spesifik untuk halaman Cetak PDF
  */
@@ -465,6 +707,9 @@ router.get("/po/:id", verifyToken, async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
+        project: { select: { id: true, name: true } },
+        verifiedBy: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
         items: {
           orderBy: { id: "asc" },
           include: {
@@ -481,21 +726,84 @@ router.get("/po/:id", verifyToken, async (req, res) => {
 });
 
 /**
+ * PUT /api/finance/po/:id/verify
+ * TINGKAT 1 — Finance verifikasi isi & harga PO.
+ * BELUM_APPROVE -> MENUNGGU_ATASAN
+ */
+router.put(
+  "/po/:id/verify",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  async (req, res) => {
+    try {
+      const { catatanFinance } = req.body || {};
+
+      const existing = await prisma.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!existing)
+        return res.status(404).json({ error: "PO tidak ditemukan" });
+      if (existing.status !== "BELUM_APPROVE") {
+        return res.status(400).json({
+          error: `Hanya PO status BELUM_APPROVE yang bisa diverifikasi finance. Status sekarang: ${existing.status}`,
+        });
+      }
+
+      const po = await prisma.purchaseOrder.update({
+        where: { id: req.params.id },
+        data: {
+          status: "MENUNGGU_ATASAN",
+          verifiedById: req.user?.userId || null,
+          verifiedAt: new Date(),
+          catatanFinance: catatanFinance ? String(catatanFinance).trim() : null,
+        },
+        include: { supplier: true, items: true },
+      });
+
+      res.json({ message: "PO diverifikasi Finance, menunggu persetujuan atasan.", po });
+    } catch (error) {
+      console.error("Verify PO Error:", error);
+      if (error.code === "P2025") {
+        return res.status(404).json({ error: "PO tidak ditemukan" });
+      }
+      res.status(500).json({ error: "Gagal memverifikasi PO" });
+    }
+  },
+);
+
+/**
  * PUT /api/finance/po/:id/approve
- * Mengubah status PO menjadi "Approved"
+ * TINGKAT 2 — Atasan (PROJECT_MANAGER) menyetujui.
+ * MENUNGGU_ATASAN -> APPROVED
+ * Tetap menerima BELUM_APPROVE untuk kompatibilitas data lama / SUPER_ADMIN.
  */
 router.put(
   "/po/:id/approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OWNER"),
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
+      const existing = await prisma.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!existing)
+        return res.status(404).json({ error: "PO tidak ditemukan" });
+
+      if (existing.status === "APPROVED") {
+        return res.status(400).json({ error: "PO ini sudah disetujui." });
+      }
+      if (existing.status === "REJECTED") {
+        return res
+          .status(400)
+          .json({ error: "PO sudah ditolak, batalkan reject dulu." });
+      }
+
       const po = await prisma.purchaseOrder.update({
         where: { id: req.params.id },
         data: {
           status: "APPROVED",
           approvedAt: new Date(),
-          approvedById: req.user?.id || null,
+          approvedById: req.user?.userId || null,
           rejectReason: null,
           rejectedAt: null,
           rejectedById: null,
@@ -519,7 +827,7 @@ router.put(
 router.put(
   "/po/:id/reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OWNER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { rejectReason } = req.body;
@@ -530,9 +838,12 @@ router.put(
       const existing = await prisma.purchaseOrder.findUnique({
         where: { id: req.params.id },
       });
-      if (!existing) return res.status(404).json({ error: "PO tidak ditemukan" });
-      if (existing.status !== "BELUM_APPROVE") {
-        return res.status(400).json({ error: "Hanya PO BELUM_APPROVE yang bisa ditolak." });
+      if (!existing)
+        return res.status(404).json({ error: "PO tidak ditemukan" });
+      if (!["BELUM_APPROVE", "MENUNGGU_ATASAN"].includes(existing.status)) {
+        return res.status(400).json({
+          error: "Hanya PO yang belum final (BELUM_APPROVE / MENUNGGU_ATASAN) yang bisa ditolak.",
+        });
       }
 
       const po = await prisma.purchaseOrder.update({
@@ -540,7 +851,7 @@ router.put(
         data: {
           status: "REJECTED",
           rejectedAt: new Date(),
-          rejectedById: req.user?.id || null,
+          rejectedById: req.user?.userId || null,
           rejectReason: String(rejectReason).trim(),
         },
       });
@@ -559,15 +870,18 @@ router.put(
 router.put(
   "/po/:id/cancel-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "OWNER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.purchaseOrder.findUnique({
         where: { id: req.params.id },
       });
-      if (!existing) return res.status(404).json({ error: "PO tidak ditemukan" });
+      if (!existing)
+        return res.status(404).json({ error: "PO tidak ditemukan" });
       if (existing.status !== "REJECTED") {
-        return res.status(400).json({ error: "Hanya PO REJECTED yang bisa cancel reject." });
+        return res
+          .status(400)
+          .json({ error: "Hanya PO REJECTED yang bisa cancel reject." });
       }
 
       const po = await prisma.purchaseOrder.update({

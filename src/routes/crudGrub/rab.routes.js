@@ -34,6 +34,7 @@ router.put("/rab-items/:id", async (req, res) => {
 
     const {
       rapUnitPrice,
+      rabUnitPrice,
       overheadPercent,
       components,
       groupId,
@@ -123,7 +124,14 @@ router.put("/rab-items/:id", async (req, res) => {
         : Number(existing.overheadPercent || existing.overhead);
 
     const nilaiOverhead = rapSatuan * (overhead / 100);
-    const rabSatuan = rapSatuan + nilaiOverhead;
+
+    // FIX: rabUnitPrice boleh dikirim eksplisit dari frontend.
+    // Diperlukan untuk item jasa/jual yang RAP (modal) = 0 tapi harga jual RAB > 0,
+    // mis. Loose Furniture & Instalasi Armature di BV. Tanpa ini harga jual hilang jadi 0.
+    const rabSatuan =
+      rabUnitPrice !== undefined && rabUnitPrice !== null && rabUnitPrice !== ""
+        ? Number(rabUnitPrice)
+        : rapSatuan + nilaiOverhead;
 
     const rapTotal = rapSatuan * vol;
     const rabTotal = rabSatuan * vol;
@@ -645,7 +653,11 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
     const requestItemsData = [];
 
     project.rabItems.forEach((rabItem) => {
-      if (!rabItem.components || rabItem.components.length === 0) return;
+      // FIX: dulu baris ini `return` saat komponen kosong, sehingga Material Request
+      // selalu KOSONG untuk item yang di-link dari BV (BV item tidak punya components).
+      // Sekarang item tanpa komponen tetap dikirim sebagai 1 baris material.
+      const isHeaderBv = rabItem.isHeaderOnly || (rabItem.children && rabItem.children.length > 0);
+      const itemsBefore = requestItemsData.length;
 
       // --- GROUP ---
       const groupName = rabItem.group ? buildPath(rabItem.group) : "Lainnya";
@@ -703,6 +715,26 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
           catatanPerencana: req.body.catatan || null,
         });
       });
+
+      // FIX lanjutan: kalau komponen kosong / semuanya bertipe UPAH, tetap kirim
+      // 1 baris material memakai item RAB itu sendiri, supaya item tidak hilang.
+      if (!isHeaderBv && requestItemsData.length === itemsBefore) {
+        const volPolos = Number(rabItem.volume);
+        const hargaPolos = Number(rabItem.rabUnitPrice);
+        requestItemsData.push({
+          itemName: rabItem.name,
+          unit: rabItem.paymentUnit || "-",
+          discipline: jobDiscipline,
+          groupName,
+          jobName,
+          volumePekerjaan: volPolos,
+          estimatedVolume: volPolos,
+          pricePerUnit: hargaPolos,
+          totalPrice: volPolos * hargaPolos,
+          scheduleRange: scheduleStr,
+          catatanPerencana: req.body.catatan || null,
+        });
+      }
     });
 
     await prisma.$transaction(async (tx) => {
