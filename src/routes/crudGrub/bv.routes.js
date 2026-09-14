@@ -33,6 +33,7 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
       breakdowns,
       parentBvItemId,
       isHeaderOnly,
+      disciplineLabel,
     } = req.body;
 
     if (
@@ -121,6 +122,7 @@ router.post("/projects/:projectId/bv-items", async (req, res) => {
         paymentUnit: isHeaderOnly ? finalUnit || null : finalUnit,
         ecommerceLink: ecommerceLink || null,
         nameEcommerceLink: nameEcommerceLink || null,
+        disciplineLabel: disciplineLabel || "GENERAL",
         totalVolume,
         breakdowns: { create: breakdownRows },
       },
@@ -185,6 +187,7 @@ router.put("/bv-items/:id", async (req, res) => {
       breakdowns,
       parentBvItemId,
       isHeaderOnly,
+      disciplineLabel,
     } = req.body;
 
     const existing = await prisma.bvItem.findUnique({ where: { id } });
@@ -290,6 +293,7 @@ router.put("/bv-items/:id", async (req, res) => {
           ? { isHeaderOnly: finalIsHeaderOnly }
           : {}),
         ...(finalGroupId !== undefined ? { groupId: finalGroupId } : {}),
+        ...(disciplineLabel !== undefined ? { disciplineLabel: disciplineLabel || "GENERAL" } : {}),
         ...(ecommerceLink !== undefined ? { ecommerceLink } : {}),
         ...(nameEcommerceLink !== undefined ? { nameEcommerceLink } : {}),
         totalVolume,
@@ -1280,7 +1284,7 @@ async function buildBqSheetXLSX(ws, projectId, project, discFilter) {
   const filterItems = (items) => items.filter(it => {
     if (discFilter === "GENERAL") return true;
     const d = (it.discipline || "GENERAL").toUpperCase();
-    return d === discFilter;
+    return d === discFilter || d === "GENERAL";
   });
 
   // Layout kolom B-J (9 kolom + border kiri/kanan medium)
@@ -1563,7 +1567,7 @@ async function buildBvSheetFiltered(wb, projectId, project, labelFilter) {
     if (label === "GENERAL") return true; // General = semua
     return items.some(it => {
       const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
-      return lbl === label || (it.children && hasLabelRecursive(it.children, label));
+      return lbl === label || lbl === "GENERAL" || (it.children && hasLabelRecursive(it.children, label));
     });
   };
 
@@ -1571,7 +1575,7 @@ async function buildBvSheetFiltered(wb, projectId, project, labelFilter) {
     if (label === "GENERAL") return items; // General = tampilkan semua
     return items.filter(it => {
       const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
-      if (lbl === label) {
+      if (lbl === label || lbl === "GENERAL") {
         // Keep this item, but also filter its children
         if (it.children) it.children = filterBvItemsRecursive(it.children, label);
         return true;
@@ -1862,3 +1866,5 @@ router.get("/projects/:projectId/bv-items/export-excel", async (req, res) => {
 });
 
 module.exports = router;
+
+
