@@ -402,9 +402,10 @@ router.get("/projects/:projectId/rab-items/export", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
+    const discipline = req.query.discipline;
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("RAB");
-    await buildRabSheet(ws, projectId, project);
+    await buildRabSheet(ws, projectId, project, discipline);
 
     res.setHeader(
       "Content-Type",

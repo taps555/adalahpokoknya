@@ -302,6 +302,37 @@ router.put("/bv-items/:id", async (req, res) => {
       include: { breakdowns: true, sourceJobType: true },
     });
 
+    if (disciplineLabel !== undefined) {
+      const finalLabel = disciplineLabel || "GENERAL";
+      
+      // Update children BV items
+      await prisma.bvItem.updateMany({
+        where: { parentBvItemId: id },
+        data: { disciplineLabel: finalLabel }
+      });
+
+      // Sync ke RAB (induk dan anak yang sudah terlink)
+      const affectedBvItems = await prisma.bvItem.findMany({
+        where: {
+          OR: [
+            { id: id },
+            { parentBvItemId: id }
+          ],
+          linkedRabItemId: { not: null }
+        },
+        select: { linkedRabItemId: true }
+      });
+      
+      const rabIds = affectedBvItems.map(item => item.linkedRabItemId);
+      if (rabIds.length > 0) {
+        const mappedRabLabel = finalLabel === "GENERAL" ? null : finalLabel;
+        await prisma.rabItem.updateMany({
+          where: { id: { in: rabIds } },
+          data: { discipline: mappedRabLabel }
+        });
+      }
+    }
+
     res.json({ message: "Item BV berhasil diperbarui", data: updated });
   } catch (error) {
     console.error("Error Update BvItem:", error);
@@ -400,7 +431,7 @@ async function pastikanIndukTerlink(tx, bvItem) {
       paymentUnit: parent.paymentUnit || "-",
       volume: Number(parent.totalVolume) || 0,
       isHeaderOnly: true,
-      discipline: proj?.discipline || null,
+      discipline: (parent.disciplineLabel === "GENERAL" || !parent.disciplineLabel) ? null : parent.disciplineLabel,
       grade: proj?.grade || null,
       overheadPercent: 0,
       rapUnitPrice: 0,
@@ -624,7 +655,7 @@ router.post("/bv-items/:id/link-to-rab", async (req, res) => {
           overheadPercent: overheadPct, // <-- Pastikan overheadPercent
           volume: vol,
           isHeaderOnly: bvItem.isHeaderOnly || false,
-          discipline: bvProject?.discipline || null,
+          discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel) ? null : bvItem.disciplineLabel,
           grade: bvProject?.grade || null,
 
           rapUnitPrice: rapUnitPrice,

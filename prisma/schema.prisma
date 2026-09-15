@@ -402,8 +402,8 @@ model TimeSchedule {
   rabItemId String  @unique
   rabItem   RabItem @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
 
-  startWeek Int
-  endWeek   Int
+  startDate DateTime
+  endDate   DateTime
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

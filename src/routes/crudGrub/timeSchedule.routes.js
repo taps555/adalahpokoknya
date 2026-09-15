@@ -36,16 +36,23 @@ router.put("/projects/:projectId/start-date", async (req, res) => {
   }
 });
 
-/** PUT /rap-items/:id/schedule — assign / update rentang minggu pengerjaan item RAB */
+/** PUT /rap-items/:id/schedule — assign / update rentang pengerjaan item RAB */
 router.put("/rap-items/:id/schedule", async (req, res) => {
   try {
     const { id } = req.params;
-    const { startWeek, endWeek } = req.body;
+    const { startDate, endDate } = req.body;
 
-    if (!startWeek || !endWeek || startWeek < 1 || endWeek < startWeek) {
+    if (!startDate || !endDate) {
       return res.status(400).json({
-        error: "startWeek dan endWeek wajib diisi, endWeek >= startWeek.",
+        error: "startDate dan endDate wajib diisi.",
       });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    
+    if (end < start) {
+      return res.status(400).json({ error: "Tanggal selesai tidak boleh kurang dari tanggal mulai." });
     }
 
     const rabItem = await prisma.rabItem.findUnique({ where: { id } });
@@ -54,8 +61,8 @@ router.put("/rap-items/:id/schedule", async (req, res) => {
 
     const schedule = await prisma.timeSchedule.upsert({
       where: { rabItemId: id },
-      update: { startWeek, endWeek },
-      create: { rabItemId: id, startWeek, endWeek },
+      update: { startDate: start, endDate: end },
+      create: { rabItemId: id, startDate: start, endDate: end },
     });
 
     res.json({ message: "Jadwal berhasil disimpan", data: schedule });
@@ -82,11 +89,11 @@ router.delete("/rap-items/:id/schedule", async (req, res) => {
   }
 });
 
-/** GET /projects/:projectId/rap-time-schedule — generate tabel breakdown mingguan + kurva S rencana RAB */
+/** GET /projects/:projectId/rap-time-schedule — generate tabel breakdown + kurva S rencana RAB */
 router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline } = req.query;
+    const { discipline, viewMode = 'week' } = req.query;
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -94,7 +101,6 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
-    // query berbasis GROUP RAB
     const groups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
@@ -123,7 +129,6 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       orderBy: { order: "asc" },
     });
 
-    // item tanpa group (groupId null)
     const ungroupedItems = await prisma.rabItem.findMany({
       where: {
         projectId,
@@ -174,22 +179,83 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       return sum + Number(it.rapTotalPrice);
     }, 0);
 
-    const maxWeek = rabItems.reduce((max, it) => {
-      if (!it.timeSchedule) return max;
-      return Math.max(max, it.timeSchedule.endWeek);
-    }, 0);
+    let minDate = project.startDate ? new Date(project.startDate) : null;
+    let maxDate = minDate ? new Date(minDate) : null;
 
-    const weekDates = [];
-    for (let w = 1; w <= maxWeek; w++) {
-      let start = null;
-      let end = null;
-      if (project.startDate) {
-        start = new Date(project.startDate);
-        start.setDate(start.getDate() + (w - 1) * 7);
-        end = new Date(start);
-        end.setDate(end.getDate() + 6);
+    rabItems.forEach(it => {
+      if (it.timeSchedule) {
+         const s = new Date(it.timeSchedule.startDate);
+         const e = new Date(it.timeSchedule.endDate);
+         if (!minDate || s < minDate) minDate = new Date(s);
+         if (!maxDate || e > maxDate) maxDate = new Date(e);
       }
-      weekDates.push({ week: w, start, end });
+    });
+
+    if (!minDate) {
+      minDate = new Date();
+      minDate.setHours(0,0,0,0);
+    }
+    if (!maxDate) {
+      maxDate = new Date(minDate);
+      maxDate.setDate(maxDate.getDate() + 30);
+    }
+    
+    minDate.setHours(0,0,0,0);
+    maxDate.setHours(23,59,59,999);
+
+    const periods = [];
+    let curr = new Date(minDate);
+    const endLimit = new Date(maxDate);
+
+    if (viewMode === 'day') {
+      let i = 1;
+      while (curr <= endLimit) {
+        const d = new Date(curr);
+        periods.push({
+           index: i,
+           label: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth()+1).padStart(2, '0')}`,
+           start: new Date(d.setHours(0,0,0,0)),
+           end: new Date(d.setHours(23,59,59,999))
+        });
+        curr.setDate(curr.getDate() + 1);
+        i++;
+      }
+    } else if (viewMode === 'week') {
+      let i = 1;
+      while (curr <= endLimit) {
+        const start = new Date(curr);
+        start.setHours(0,0,0,0);
+        const end = new Date(curr);
+        end.setDate(end.getDate() + 6);
+        end.setHours(23,59,59,999);
+        periods.push({
+           index: i,
+           label: `Mg ${i}`,
+           start: start,
+           end: end
+        });
+        curr.setDate(curr.getDate() + 7);
+        i++;
+      }
+    } else if (viewMode === 'month') {
+      let i = 1;
+      curr.setDate(1); 
+      while (curr <= endLimit || (curr.getFullYear() === endLimit.getFullYear() && curr.getMonth() === endLimit.getMonth())) {
+        const start = new Date(curr);
+        start.setHours(0,0,0,0);
+        const end = new Date(curr.getFullYear(), curr.getMonth() + 1, 0); 
+        end.setHours(23,59,59,999);
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Ags", "Sep", "Okt", "Nov", "Des"];
+        periods.push({
+           index: i,
+           label: `${monthNames[curr.getMonth()]} '${String(curr.getFullYear()).slice(-2)}`,
+           start: start,
+           end: end
+        });
+        curr.setMonth(curr.getMonth() + 1);
+        curr.setDate(1);
+        i++;
+      }
     }
 
     const items = rabItems.map((it) => {
@@ -205,14 +271,25 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
           ? (actualRapTotal / totalContract) * 100
           : 0;
 
-      const weeklyWeight = {};
+      const periodWeight = {};
       if (it.timeSchedule && !hasChildren) {
-        const { startWeek, endWeek } = it.timeSchedule;
-        const span = endWeek - startWeek + 1;
-        const perWeek = weight / span;
-        for (let w = startWeek; w <= endWeek; w++) {
-          weeklyWeight[w] = perWeek;
-        }
+         const iStart = new Date(it.timeSchedule.startDate).getTime();
+         const iEnd = new Date(it.timeSchedule.endDate).setHours(23,59,59,999);
+         const totalDays = Math.round((iEnd - iStart) / (1000 * 60 * 60 * 24)) || 1;
+         const perDay = weight / totalDays;
+
+         periods.forEach(p => {
+            const pStart = p.start.getTime();
+            const pEnd = p.end.getTime();
+            const overlapStart = Math.max(iStart, pStart);
+            const overlapEnd = Math.min(iEnd, pEnd);
+            
+            if (overlapStart <= overlapEnd) {
+               let overlapDays = Math.round((overlapEnd - overlapStart) / (1000 * 60 * 60 * 24));
+               if (overlapDays < 1) overlapDays = 1;
+               periodWeight[p.index] = perDay * overlapDays;
+            }
+         });
       }
 
       return {
@@ -224,40 +301,41 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         satuanHarga: it.rapUnitPrice,
         weight,
 
-        startWeek: it.timeSchedule?.startWeek ?? null,
-        endWeek: it.timeSchedule?.endWeek ?? null,
-        weeklyWeight,
+        startDate: it.timeSchedule?.startDate ?? null,
+        endDate: it.timeSchedule?.endDate ?? null,
+        periodWeight,
         groupId: it.groupId,
         groupName: it.groupName,
         isChild,
         hasChildren,
         isByOwner: it.isByOwner,
         isStip: it.isStip,
+        discipline: it.discipline,
       };
     });
 
-    const weeklyTotal = {};
-    for (let w = 1; w <= maxWeek; w++) {
-      weeklyTotal[w] = items.reduce(
-        (sum, it) => sum + (it.weeklyWeight[w] || 0),
-        0,
+    const periodTotal = {};
+    periods.forEach(p => {
+      periodTotal[p.index] = items.reduce(
+        (sum, it) => sum + (it.periodWeight[p.index] || 0),
+        0
       );
-    }
+    });
 
     let cumulative = 0;
     const cumulativeTotal = {};
-    for (let w = 1; w <= maxWeek; w++) {
-      cumulative += weeklyTotal[w];
-      cumulativeTotal[w] = cumulative;
-    }
+    periods.forEach(p => {
+      cumulative += periodTotal[p.index];
+      cumulativeTotal[p.index] = cumulative;
+    });
 
     res.json({
       projectId,
       startDate: project.startDate,
-      maxWeek,
-      weekDates,
+      viewMode,
+      periods,
       items,
-      weeklyTotal,
+      periodTotal,
       cumulativeTotal,
     });
   } catch (error) {

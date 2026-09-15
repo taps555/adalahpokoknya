@@ -17,9 +17,10 @@ router.get("/projects/:projectId/bv-items/export", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
+    const discipline = req.query.discipline;
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("BV");
-    await buildBvSheet(ws, projectId, project);
+    await buildBvSheet(ws, projectId, project, discipline);
 
     res.setHeader(
       "Content-Type",

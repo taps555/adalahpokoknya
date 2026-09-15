@@ -101,4 +101,51 @@ router.get(
   },
 );
 
+router.get("/projects/:projectId/export-all-tabs", async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { client: true },
+    });
+    if (!project)
+      return res.status(404).json({ error: "Project tidak ditemukan." });
+
+    const wb = new ExcelJS.Workbook();
+    
+    // General
+    const wsRabGen = wb.addWorksheet("RAB General");
+    await buildRabSheet(wsRabGen, projectId, project, "GENERAL");
+    const wsBvGen = wb.addWorksheet("BV General");
+    await buildBvSheet(wsBvGen, projectId, project, "GENERAL");
+
+    // Interior
+    const wsRabInt = wb.addWorksheet("RAB Interior");
+    await buildRabSheet(wsRabInt, projectId, project, "INTERIOR");
+    const wsBvInt = wb.addWorksheet("BV Interior");
+    await buildBvSheet(wsBvInt, projectId, project, "INTERIOR");
+
+    // Sipil
+    const wsRabSip = wb.addWorksheet("RAB Sipil");
+    await buildRabSheet(wsRabSip, projectId, project, "SIPIL");
+    const wsBvSip = wb.addWorksheet("BV Sipil");
+    await buildBvSheet(wsBvSip, projectId, project, "SIPIL");
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Export_Lengkap_${project.name.replace(/\s+/g, "_")}.xlsx"`,
+    );
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error("Error Export All Tabs:", err);
+    res.status(500).json({ error: err.message || "Gagal export." });
+  }
+});
+
 module.exports = router;

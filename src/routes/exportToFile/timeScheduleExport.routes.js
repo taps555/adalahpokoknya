@@ -21,7 +21,7 @@ router.get("/projects/:projectId/time-schedule/export", async (req, res) => {
 
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Time Schedule");
-    await buildTimeScheduleSheet(ws, projectId, project, prisma);
+    await buildTimeScheduleSheet(ws, projectId, project, prisma, req.query.viewMode || 'week');
 
     res.setHeader(
       "Content-Type",
@@ -60,7 +60,7 @@ router.get(
         const sheetName =
           p.discipline === "SIPIL" ? "TS - Civil" : "TS - Interior";
         const ws = wb.addWorksheet(sheetName);
-        await buildTimeScheduleSheet(ws, p.id, p, prisma);
+        await buildTimeScheduleSheet(ws, p.id, p, prisma, req.query.viewMode || 'week');
       }
 
       res.setHeader(

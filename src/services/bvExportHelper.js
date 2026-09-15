@@ -58,8 +58,8 @@ const bvItemInclude = {
   },
 };
 
-async function buildBvSheet(ws, projectId, project) {
-  const groups = await prisma.rabGroup.findMany({
+async function buildBvSheet(ws, projectId, project, discipline) {
+  const rawGroups = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
       bvItems: {
@@ -78,6 +78,36 @@ async function buildBvSheet(ws, projectId, project) {
       },
     },
     orderBy: { order: "asc" },
+  });
+
+  function filterBvItems(items, label) {
+    if (!label || label === "GENERAL") return items;
+    return items.reduce((acc, it) => {
+      const matchingChildren = it.children?.length
+        ? filterBvItems(it.children, label)
+        : [];
+      const itemLabel = it.disciplineLabel || "GENERAL";
+      const match = itemLabel === "GENERAL" || itemLabel === label;
+      if (match || matchingChildren.length > 0) {
+        acc.push({ ...it, children: matchingChildren });
+      }
+      return acc;
+    }, []);
+  }
+
+  const groups = rawGroups.map(g => {
+    const children = g.children ? g.children.map(c => ({
+      ...c,
+      bvItems: filterBvItems(c.bvItems || [], discipline)
+    })).filter(c => c.bvItems && c.bvItems.length > 0) : [];
+    
+    return {
+      ...g,
+      bvItems: filterBvItems(g.bvItems || [], discipline),
+      children
+    };
+  }).filter(g => {
+    return (g.bvItems && g.bvItems.length > 0) || (g.children && g.children.length > 0);
   });
 
   // B=NO C=URAIAN D=VOL.Sat E=VOL.Vol F=KETERANGAN

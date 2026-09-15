@@ -49,17 +49,24 @@ function colRange(startCol, endCol) {
   return cols;
 }
 
-async function buildRabSheet(ws, projectId, project) {
-  const groups = await prisma.rabGroup.findMany({
+async function buildRabSheet(ws, projectId, project, discipline) {
+  const itemWhere = {};
+  if (discipline && discipline !== "GENERAL") {
+    itemWhere.discipline = discipline;
+  }
+
+  const rawGroups = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
       items: {
+        where: itemWhere,
         include: { bvItem: { select: { id: true, parentBvItemId: true } } },
         orderBy: { order: "asc" },
       },
       children: {
         include: {
           items: {
+            where: itemWhere,
             include: { bvItem: { select: { id: true, parentBvItemId: true } } },
             orderBy: { order: "asc" },
           },
@@ -67,6 +74,15 @@ async function buildRabSheet(ws, projectId, project) {
       },
     },
     orderBy: { order: "asc" },
+  });
+
+  const groups = rawGroups.map(g => {
+    // Filter out sub-groups that have no items
+    const children = g.children ? g.children.filter(c => c.items && c.items.length > 0) : [];
+    return { ...g, children };
+  }).filter(g => {
+    // Keep group if it has items directly or has children with items
+    return (g.items && g.items.length > 0) || (g.children && g.children.length > 0);
   });
 
   ws.columns = [
