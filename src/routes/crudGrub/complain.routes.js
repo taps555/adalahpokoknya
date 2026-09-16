@@ -9,6 +9,7 @@ const { streamComplaintPdf } = require("../exportToFile/complainView.routes");
 const {
   streamComplaintPdff,
 } = require("../exportToFile/complainView(bast_2).routes");
+const { streamBast2Pdf } = require("../exportToFile/bast2.routes");
 
 const MAX_PHOTOS_PER_TYPE = 20;
 
@@ -60,15 +61,10 @@ async function computePeriode(project) {
 
   const result = await prisma.timeSchedule.aggregate({
     where: { rabItem: { projectId: project.id } },
-    _max: { endWeek: true },
+    _max: { endDate: true },
   });
 
-  const maxEndWeek = result._max.endWeek;
-  const endDate = maxEndWeek
-    ? new Date(
-        project.startDate.getTime() + maxEndWeek * 7 * 24 * 60 * 60 * 1000,
-      )
-    : null;
+  const endDate = result._max.endDate || null;
 
   return { startDate: project.startDate, endDate };
 }
@@ -259,7 +255,7 @@ router.get("/projects/:projectId/complaints", async (req, res) => {
     res.json(complaintsWithPeriode);
   } catch (error) {
     console.error("Error Get Complaints:", error);
-    res.status(500).json({ error: "Gagal mengambil data complaint." });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -671,7 +667,28 @@ router.get("/complaints2/:id/pdf/download", async (req, res) => {
     streamComplaintPdff(complaint, res);
   } catch (error) {
     console.error("Error Download Complaint2 PDF:", error);
-    res.status(500).json({ error: "Gagal membuat PDF complaint." });
+    res.status(500).json({ error: "Gagal mendownload PDF complaint." });
+  }
+});
+
+router.get("/complaints/:id/bast2/pdf", async (req, res) => {
+  try {
+    const complaint = await getComplaintForPdf(req.params.id);
+    if (!complaint)
+      return res
+        .status(404)
+        .json({ error: "Laporan complaint tidak ditemukan." });
+
+    const formData = req.query; // Contains bastNumber, spkNumber, dll
+
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="bast2-complaint-${req.params.id}.pdf"`,
+    });
+    streamBast2Pdf(complaint, formData, res);
+  } catch (error) {
+    console.error("Error Generate BAST 2 PDF:", error);
+    res.status(500).json({ error: "Gagal membuat PDF BAST 2." });
   }
 });
 

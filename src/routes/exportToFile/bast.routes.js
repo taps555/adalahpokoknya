@@ -201,11 +201,12 @@ function streamBastPdf(bast, res) {
       { continued: true, align: "left", width: contentW },
     )
     .font("Times-BoldItalic")
-    .text(
-      "telah " +
-        (bast.statusText || "SELESAI DIKERJAKAN 100% dan DITERIMA DENGAN BAIK"),
-      { continued: false },
-    );
+    .text("telah SELESAI", { continued: false });
+
+  y = doc.y + 10;
+  doc
+    .font("Times-Roman")
+    .text(`Notes : ${bast.statusText || "-"}`, leftMargin, y);
 
   y = doc.y + 10;
   doc

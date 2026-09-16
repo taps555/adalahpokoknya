@@ -23,8 +23,8 @@ app.use(cors());
 app.use(express.json());
 
 // Static serve untuk frontend build
-// src/index.js -> backend/adalahpokoknya/src -> backend/adalahpokoknya -> backend -> projekbaru -> frontend/dist
-const FRONTEND_DIST = path.join(__dirname, "..", "..", "..", "frontend", "dist");
+// src/index.js -> backend/src -> backend -> Project -> frontend/dist
+const FRONTEND_DIST = path.join(__dirname, "..", "..", "frontend", "dist");
 app.use(express.static(FRONTEND_DIST));
 
 app.use(express.static("public"));
