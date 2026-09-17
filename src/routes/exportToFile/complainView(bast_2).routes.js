@@ -14,20 +14,20 @@ const MARGIN = 20;
 const MIN_ROW_H = 30;
 
 // Ukuran tiap foto (before & after pakai ukuran sama)
-const PHOTO_W = 140;
-const PHOTO_H = 200;
+const PHOTO_W = 60;
+const PHOTO_H = 60;
 
-const PHOTO_GAP = 6;
-const PHOTO_COLS = 1; // 1 kolom foto per grup (before / after), nambah baris kalau foto > 1
+const PHOTO_GAP = 5;
+const PHOTO_COLS = 2; // 1 kolom foto per grup (before / after), nambah baris kalau foto > 1
 
 // ==========================================
 // LEBAR KOLOM (proporsional, dihitung ulang tiap render sesuai CONTENT_WIDTH)
 // ==========================================
 function buildColumns(contentWidth) {
-  const no = 35;
+  const no = 25;
   const defect = 140;
-  const repairDate = 85;
-  const status = 60;
+  const repairDate = 60;
+  const status = 55;
   const fotoGroupW = PHOTO_COLS * PHOTO_W + (PHOTO_COLS + 1) * PHOTO_GAP;
   const fotoBefore = fotoGroupW;
   const fotoAfter = fotoGroupW;
@@ -356,7 +356,7 @@ function streamComplaintPdff(complaint, res) {
   const PDFDocument = require("pdfkit");
   const doc = new PDFDocument({
     size: "A3",
-    layout: "landscape",
+    layout: "portrait",
     margin: MARGIN,
   });
   doc.pipe(res);

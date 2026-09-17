@@ -64,7 +64,14 @@ const SUMMARY_ROW_STYLES = {
 
 // mirrors buildTimeScheduleSheet's data prep: weight per item, weekly spread,
 // weekly/cumulative totals
-function computeScheduleData(groups) {
+function getWeek(date, projectStartDate) {
+  if (!date || !projectStartDate) return 1;
+  const diffMs = new Date(date).getTime() - new Date(projectStartDate).getTime();
+  const week = Math.floor(diffMs / (1000 * 60 * 60 * 24 * 7)) + 1;
+  return week < 1 ? 1 : week;
+}
+
+function computeScheduleData(project, groups) {
   const allItems = [];
   groups.forEach((g) => {
     allItems.push(...g.items);
@@ -77,8 +84,9 @@ function computeScheduleData(groups) {
   );
 
   const maxWeek = allItems.reduce((max, it) => {
-    if (!it.timeSchedule) return max;
-    return Math.max(max, it.timeSchedule.endWeek);
+    if (!it.timeSchedule || !it.timeSchedule.endDate) return max;
+    const endW = getWeek(it.timeSchedule.endDate, project?.startDate);
+    return Math.max(max, endW);
   }, 0);
 
   function weightOf(it) {
@@ -89,8 +97,9 @@ function computeScheduleData(groups) {
   function weeklyWeightOf(it) {
     const weight = weightOf(it);
     const out = {};
-    if (it.timeSchedule) {
-      const { startWeek, endWeek } = it.timeSchedule;
+    if (it.timeSchedule && it.timeSchedule.startDate && it.timeSchedule.endDate) {
+      const startWeek = getWeek(it.timeSchedule.startDate, project?.startDate);
+      const endWeek = getWeek(it.timeSchedule.endDate, project?.startDate);
       const span = endWeek - startWeek + 1;
       const perWeek = weight / span;
       for (let w = startWeek; w <= endWeek; w++) out[w] = perWeek;
@@ -190,7 +199,7 @@ function subTotalRow(groupTotal, maxWeek) {
 }
 
 function renderScheduleHtml(project, groups) {
-  const ctx = computeScheduleData(groups);
+  const ctx = computeScheduleData(project, groups);
   const { maxWeek, totalContract, weeklyTotal, cumulativeTotal } = ctx;
 
   const weekDates = [];

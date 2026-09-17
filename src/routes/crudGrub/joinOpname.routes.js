@@ -125,9 +125,10 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       where: { projectId, parentId: null },
       include: {
         items: {
-          where: discipline ? { discipline } : undefined,
+          where: discipline && discipline !== "General" ? { discipline } : undefined,
           include: {
             dailyProgress: true,
+            timeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
           },
           orderBy: { order: "asc" },
@@ -135,9 +136,10 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         children: {
           include: {
             items: {
-              where: discipline ? { discipline } : undefined,
+              where: discipline && discipline !== "General" ? { discipline } : undefined,
               include: {
                 dailyProgress: true,
+                timeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
               },
               orderBy: { order: "asc" },
@@ -153,10 +155,11 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       where: {
         projectId,
         groupId: null,
-        ...(discipline ? { discipline } : {}),
+        ...(discipline && discipline !== "General" ? { discipline } : {}),
       },
       include: {
         dailyProgress: true,
+        timeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
       },
       orderBy: { order: "asc" },
@@ -199,16 +202,19 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       return sum + Number(it.rapTotalPrice);
     }, 0);
 
-    // total hari = maxWeek dari TimeSchedule x 7
-    const timeSchedules = await prisma.timeSchedule.findMany({
+    // total hari = selisih max endDate dan project.startDate
+    const timeSchedulesAgg = await prisma.timeSchedule.aggregate({
       where: { rabItem: { projectId } },
-      select: { endWeek: true },
+      _max: { endDate: true },
     });
-    const maxWeek = timeSchedules.reduce(
-      (max, ts) => Math.max(max, ts.endWeek),
-      0,
-    );
-    const totalDays = maxWeek * 7;
+    
+    let totalDays = 0;
+    const maxEndDate = timeSchedulesAgg._max.endDate;
+    if (project.startDate && maxEndDate) {
+      const diffMs = maxEndDate.getTime() - project.startDate.getTime();
+      totalDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24)) + 1;
+      if (totalDays < 0) totalDays = 0;
+    }
 
     const days = [];
     for (let d = 0; d < totalDays; d++) {
@@ -225,37 +231,80 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       return "QC CHECK"; // 95-99
     }
 
-    const items = rabItems.map((it) => {
+    const itemsData = rabItems.map(it => {
       const hasChildren = parentIds.has(it.bvItem?.id);
-
+      
+      let maxProgressSoFar = 0;
+      const progressByDate = new Map(
+        (it.dailyProgress || []).map((p) => {
+          const pVal = Number(p.progressPercent);
+          if (pVal > maxProgressSoFar) maxProgressSoFar = pVal;
+          return [
+            new Date(p.date).toISOString().slice(0, 10),
+            { percent: pVal, photoUrls: p.photoUrls || [] }
+          ];
+        })
+      );
+      
       const actualRapTotal = hasChildren
         ? parentRapSum[it.bvItem?.id] || 0
         : Number(it.rapTotalPrice);
 
-      const weight =
-        !hasChildren && totalContract > 0
+      const weight = totalContract > 0
           ? (actualRapTotal / totalContract) * 100
           : 0;
 
-      const progressByDate = new Map(
-        (it.dailyProgress || []).map((p) => [
-          new Date(p.date).toISOString().slice(0, 10),
-          {
-            percent: Number(p.progressPercent),
-            photoUrls: p.photoUrls || [],
-          },
-        ]),
-      );
+      return {
+        it,
+        hasChildren,
+        actualRapTotal,
+        weight,
+        progressByDate,
+        maxProgressSoFar
+      };
+    });
 
-      let sumProgress = 0;
+    const parentProgressSum = {}; 
+    itemsData.forEach(data => {
+      if (!data.hasChildren && data.it.bvItem?.parentBvItemId) {
+        const pId = data.it.bvItem.parentBvItemId;
+        const progressValue = data.actualRapTotal * (data.maxProgressSoFar / 100);
+        parentProgressSum[pId] = (parentProgressSum[pId] || 0) + progressValue;
+      }
+    });
+
+    const items = itemsData.map((data) => {
+      const { it, hasChildren, actualRapTotal, weight, progressByDate } = data;
+
+      let rekapProgress = data.maxProgressSoFar;
+      if (hasChildren) {
+         const pId = it.bvItem?.id;
+         const sumProgValue = parentProgressSum[pId] || 0;
+         rekapProgress = actualRapTotal > 0 ? (sumProgValue / actualRapTotal) * 100 : 0;
+      }
+      
+      const tsStart = it.timeSchedule?.startDate ? new Date(it.timeSchedule.startDate).setHours(0,0,0,0) : null;
+      const tsEnd = it.timeSchedule?.endDate ? new Date(it.timeSchedule.endDate).setHours(0,0,0,0) : null;
+
+      let lastPercent = 0;
       const dailyBreakdown = days.map((day) => {
         const key = day.date.toISOString().slice(0, 10);
+        const dayTime = new Date(day.date).setHours(0,0,0,0);
 
         const pData = hasChildren ? null : progressByDate.get(key);
-        const progress = pData ? pData.percent : 0;
+        
+        if (pData) {
+           lastPercent = pData.percent;
+        }
+
+        const progress = lastPercent;
         const photoUrls = pData ? pData.photoUrls : [];
 
-        sumProgress += progress;
+        let inSchedule = true;
+        if (tsStart && tsEnd) {
+          inSchedule = dayTime >= tsStart && dayTime <= tsEnd;
+        }
+
         return {
           dayNumber: day.dayNumber,
           date: day.date,
@@ -263,10 +312,10 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
           photoUrls,
           bobot: weight * (progress / 100),
           volume: (progress / 100) * Number(it.volume),
+          inSchedule,
+          hasProgress: !!pData
         };
       });
-
-      const rekapProgress = totalDays > 0 ? sumProgress / totalDays : 0;
 
       return {
         rabItemId: it.id,
@@ -278,12 +327,11 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         weight,
         groupId: it.groupId,
         groupName: it.groupName,
+        discipline: it.discipline,
         hasChildren,
         dailyBreakdown,
         rekapProgress,
         status: statusFor(rekapProgress),
-
-        // --- TAMBAHKAN 2 BARIS INI ---
         isByOwner: it.isByOwner,
         isStip: it.isStip,
       };

@@ -669,27 +669,12 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
       const jobVolume = Number(rabItem.volume);
 
       // --- TIME SCHEDULE CALCULATION ---
-      const startW = rabItem.timeSchedule?.startWeek || null;
-      const endW = rabItem.timeSchedule?.endWeek || null;
+      const startTaskDate = rabItem.timeSchedule?.startDate || null;
+      const endTaskDate = rabItem.timeSchedule?.endDate || null;
       let scheduleStr = null;
 
-      if (startW !== null && endW !== null) {
-        if (project.startDate) {
-          // Jika proyek punya startDate, konversi Week menjadi Tanggal
-          const projectStart = new Date(project.startDate);
-
-          // Mulai minggu ke-N: startDate + ((startWeek - 1) * 7 hari)
-          const startTaskDate = addDays(projectStart, (startW - 1) * 7);
-
-          // Akhir minggu ke-N: startDate + (endWeek * 7 hari) - 1 hari
-          const endTaskDate = addDays(projectStart, endW * 7 - 1);
-
-          scheduleStr = `${formatDate(startTaskDate)} - ${formatDate(endTaskDate)}`;
-        } else {
-          // Fallback jika project.startDate belum diisi (masih null)
-          scheduleStr =
-            startW === endW ? `W${startW}` : `W${startW} - W${endW}`;
-        }
+      if (startTaskDate && endTaskDate) {
+        scheduleStr = `${formatDate(new Date(startTaskDate))} - ${formatDate(new Date(endTaskDate))}`;
       }
 
       rabItem.components.forEach((comp) => {

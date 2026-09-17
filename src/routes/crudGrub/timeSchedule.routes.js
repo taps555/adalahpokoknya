@@ -267,7 +267,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         : Number(it.rapTotalPrice);
 
       const weight =
-        !hasChildren && totalContract > 0
+        totalContract > 0
           ? (actualRapTotal / totalContract) * 100
           : 0;
 

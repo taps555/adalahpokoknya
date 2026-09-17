@@ -14,20 +14,20 @@ const MARGIN = 20;
 const MIN_ROW_H = 30;
 
 // UBAH DUA NILAI INI MENJADI LEBIH BESAR
-const PHOTO_W = 210; // Lebarkan agar mengisi ruang kanan (sesuaikan jika kolom lebih lebar)
-const PHOTO_H = 280; // Tinggikan drastis karena foto Anda berbentuk portrait (berdiri)
+const PHOTO_W = 60; // Lebarkan agar mengisi ruang kanan (sesuaikan jika kolom lebih lebar)
+const PHOTO_H = 60; // Tinggikan drastis karena foto Anda berbentuk portrait (berdiri)
 
-const PHOTO_GAP = 6;
+const PHOTO_GAP = 5;
 const PHOTO_COLS = 2; // Jika ingin 2 foto bersebelahan, nilai W 210 sudah cukup besar
 
 // ==========================================
 // LEBAR KOLOM (proporsional, dihitung ulang tiap render sesuai CONTENT_WIDTH)
 // ==========================================
 function buildColumns(contentWidth) {
-  const no = 35;
+  const no = 25;
   const defect = 140;
-  const repairDate = 85;
-  const status = 60;
+  const repairDate = 60;
+  const status = 55;
   const foto = PHOTO_COLS * PHOTO_W + (PHOTO_COLS + 1) * PHOTO_GAP;
   const report = contentWidth - (no + defect + foto + repairDate + status);
   return { no, defect, foto, repairDate, status, report };
@@ -331,7 +331,7 @@ function streamComplaintPdf(complaint, res) {
   const PDFDocument = require("pdfkit");
   const doc = new PDFDocument({
     size: "A3",
-    layout: "landscape",
+    layout: "portrait",
     margin: MARGIN,
   });
   doc.pipe(res);
