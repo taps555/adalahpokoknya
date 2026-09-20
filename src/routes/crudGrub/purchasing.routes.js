@@ -17,7 +17,7 @@ router.get("/retur", async (req, res) => {
   try {
     const retur = await prisma.returPembelian.findMany({
       include: {
-        purchaseOrder: { select: { poNumber: true, id: true } },
+        purchaseOrder: { select: { poNumber: true, id: true, caraPembayaran: true, kategoriPO: true, project: true } },
         supplier: { select: { name: true, id: true } },
         items: { orderBy: { id: "asc" } },
       },
@@ -39,7 +39,7 @@ router.get("/retur/:id", async (req, res) => {
     const retur = await prisma.returPembelian.findUnique({
       where: { id: req.params.id },
       include: {
-        purchaseOrder: { include: { supplier: true } },
+        purchaseOrder: { include: { supplier: true, project: true } },
         supplier: true,
         items: { orderBy: { id: "asc" } },
       },
@@ -227,7 +227,18 @@ router.get("/pengajuan-bayar", async (req, res) => {
       where,
       include: {
         supplier: { select: { name: true, id: true } },
-        purchaseOrder: { select: { poNumber: true, id: true } },
+        purchaseOrder: {
+          include: {
+            supplier: { select: { id: true, name: true } },
+            project: { select: { id: true, name: true } },
+            items: {
+              orderBy: { id: "asc" },
+              include: {
+                materialRequest: { select: { estimatedVolume: true, pricePerUnit: true, itemName: true } },
+              },
+            },
+          },
+        },
         approvedBy: { select: { name: true, id: true } },
         verifiedBy: { select: { name: true, id: true } },
         pembayaran: true,
@@ -260,7 +271,12 @@ router.get("/pengajuan-bayar/inbox-atasan", async (req, res) => {
           include: {
             supplier: { select: { id: true, name: true } },
             project: { select: { id: true, name: true } },
-            items: { orderBy: { id: "asc" } },
+            items: {
+              orderBy: { id: "asc" },
+              include: {
+                materialRequest: { select: { estimatedVolume: true, pricePerUnit: true, itemName: true } },
+              },
+            },
           },
         },
         verifiedBy: { select: { name: true, id: true } },
@@ -421,7 +437,7 @@ router.get("/pengajuan-bayar/po-approved", async (req, res) => {
         items: {
           orderBy: { id: "asc" },
           include: {
-            materialRequest: { select: { groupName: true, jobName: true } },
+            materialRequest: { select: { groupName: true, jobName: true, estimatedVolume: true, pricePerUnit: true } },
           },
         },
         pengajuanPembayaran: {
@@ -687,6 +703,32 @@ router.put(
             rejectedById: null,
           },
         });
+
+        // Jika PO cash/transfer, langsung buat PembayaranSupplier
+        const poForPayment = await prisma.purchaseOrder.findUnique({
+          where: { id: existing.poId },
+        });
+        if (poForPayment && /cash|transfer/i.test(poForPayment.caraPembayaran || "")) {
+          const sudahAda = await prisma.pembayaranSupplier.findFirst({
+            where: { poId: poForPayment.id },
+          });
+          if (!sudahAda) {
+            const seq = await prisma.pembayaranSupplier.count({});
+            const noPembayaran = `BYR-${String(seq + 1).padStart(5, "0")}`;
+            await prisma.pembayaranSupplier.create({
+              data: {
+                noPembayaran,
+                supplierId: poForPayment.supplierId,
+                poId: poForPayment.id,
+                tanggal: new Date(),
+                jumlahBayar: poForPayment.grandTotal || poForPayment.subTotal || 0,
+                metodeBayar: /cash/i.test(poForPayment.caraPembayaran || "") ? "CASH" : "TRANSFER",
+                keterangan: `Pembayaran otomatis PO ${poForPayment.poNumber || poForPayment.id}`,
+                status: "PENDING",
+              },
+            });
+          }
+        }
       }
 
       res.json({ message: "Pengajuan bayar di-approve", data: pengajuan });
@@ -811,13 +853,19 @@ router.get("/pembayaran-supplier", async (req, res) => {
   try {
     const pembayaran = await prisma.pembayaranSupplier.findMany({
       include: {
-        supplier: { select: { name: true, id: true } },
+        supplier: { select: { name: true, id: true, type: true } },
         pengajuan: { select: { noPengajuan: true, id: true } },
-        purchaseOrder: { select: { poNumber: true, id: true } },
+        purchaseOrder: {
+          include: {
+            items: { include: { materialRequest: true } },
+            project: { select: { id: true, name: true } },
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
     res.json(pembayaran);
+
   } catch (error) {
     console.error("Get Pembayaran Supplier Error:", error);
     res.status(500).json({ error: "Gagal mengambil data pembayaran supplier" });
@@ -834,7 +882,7 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       include: {
         supplier: true,
         pengajuan: true,
-        purchaseOrder: { include: { supplier: true } },
+        purchaseOrder: { include: { supplier: true, project: true, items: { include: { materialRequest: true } } } },
       },
     });
     if (!pembayaran)
@@ -914,33 +962,117 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
 router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
   try {
     const {
-      supplierId,
-      pengajuanId,
-      poId,
-      tanggal,
-      jumlahBayar,
-      metodeBayar,
-      bankAccount,
-      keterangan,
-      buktiBayarUrl,
-      status,
-    } = req.body;
+          supplierId,
+          pengajuanId,
+          poId,
+          tanggal,
+          jumlahBayar,
+          metodeBayar,
+          jatuhTempo,
+          tanggalBayar,
+          bankAccount,
+          keterangan,
+          buktiBayarUrl,
+          akunKasBank = req.body.akunKasBank || "",
+          tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
+        } = req.body;
 
-    const pembayaran = await prisma.pembayaranSupplier.update({
+        // Tentukan status otomatis berdasarkan kelengkapan data pembayaran
+        // Status = PAID jika semua data keuangan terisi: jumlah > 0, metode, tanggalBayar
+        const jmlBayar = Number(jumlahBayar || 0);
+        const metode = metodeBayar || null;
+        const tglBayar = tanggalBayar ? new Date(tanggalBayar) : null;
+
+        const existing = await prisma.pembayaranSupplier.findUnique({
+          where: { id: req.params.id },
+          include: { purchaseOrder: { include: { items: { include: { materialRequest: true } } } }, supplier: true },
+        });
+        if (!existing) return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+
+        let autoStatus = existing.status || "PENDING";
+        if (req.body.status && ["PENDING", "PAID"].includes(req.body.status)) {
+          autoStatus = req.body.status;
+        } else if (jmlBayar > 0 && metode && tglBayar) {
+          autoStatus = "PAID";
+        }
+
+        const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: req.params.id },
       data: {
         supplierId: supplierId || undefined,
         pengajuanId: pengajuanId !== undefined ? pengajuanId : undefined,
         poId: poId !== undefined ? poId : undefined,
         tanggal: tanggal ? new Date(tanggal) : undefined,
-        jumlahBayar: Number(jumlahBayar || 0),
-        metodeBayar: metodeBayar || undefined,
+        jumlahBayar: jmlBayar,
+        metodeBayar: metode || undefined,
+        jatuhTempo: jatuhTempo ? new Date(jatuhTempo) : null,
+        tanggalBayar: tglBayar,
         bankAccount,
         keterangan,
         buktiBayarUrl,
-        status: status || undefined,
+        status: autoStatus,
+      },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        purchaseOrder: {
+          include: {
+            items: { include: { materialRequest: true } },
+          },
+        },
       },
     });
+
+    // Auto-create Buku Besar KELUAR saat status berubah menjadi PAID
+    const statusBerubahJadiPaid = autoStatus === "PAID" && existing.status !== "PAID";
+    if (statusBerubahJadiPaid) {
+      const { createTransaksiBukuBesar } = require("./glBank.routes.js");
+      try {
+        const namaAkun = akunKasBank?.trim() || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
+        const noReferensi = pembayaran.noPembayaran || existing.noPembayaran || req.params.id;
+        const po = pembayaran.purchaseOrder || existing.purchaseOrder;
+        const supplier = pembayaran.supplier || existing.supplier;
+        const pihak = supplier?.name || "Supplier";
+
+        // Hitung over/under qty & harga per item PO vs material request (jika ada)
+        const itemSummaries = [];
+        if (po?.items) {
+          for (const item of po.items) {
+            const mr = item.materialRequest;
+            if (!mr) continue;
+            const estQty = Number(mr.estimatedVolume || 0);
+            const estPrice = Number(mr.pricePerUnit || 0);
+            const poQty = Number(item.qty || 0);
+            const poPrice = Number(item.unitPrice || 0);
+            const diffQty = poQty - estQty;
+            const diffPrice = poPrice - estPrice;
+            const ketQty = diffQty > 0 ? `Over Qty ${diffQty} ${item.unit}` : diffQty < 0 ? `Under Qty ${Math.abs(diffQty)} ${item.unit}` : "Qty Sesuai";
+            const ketHarga = diffPrice > 0 ? `Over Harga Rp ${diffPrice.toLocaleString('id-ID')}` : diffPrice < 0 ? `Under Harga Rp ${Math.abs(diffPrice).toLocaleString('id-ID')}` : "Harga Sesuai";
+            itemSummaries.push(`${item.description}: ${ketQty}; ${ketHarga}`);
+          }
+        }
+        const overKeterangan = itemSummaries.length
+          ? `[Over/Under PO] ${itemSummaries.join(" | ")}`
+          : "[Over/Under PO] Tidak ada data MR";
+
+        await createTransaksiBukuBesar({
+          tanggal: tglBayar || pembayaran.tanggal || new Date(),
+          tipeAkun: tipeAkunKasBank === "BANK" ? "BANK" : "KAS",
+          namaAkun,
+          jenis: "KELUAR",
+          nominal: jmlBayar,
+          noReferensi,
+          pihak,
+          keterangan: `${keterangan || ""} ${overKeterangan}`.trim() || `Pembayaran PO ${po?.poNumber || ""}`,
+          poId: po?.id || pembayaran.poId || existing.poId,
+          pengajuanId: pembayaran.pengajuanId || existing.pengajuanId,
+          pembayaranId: pembayaran.id,
+          createdById: req.user?.id || null,
+        });
+      } catch (bbErr) {
+        console.error("Auto-create buku besar error:", bbErr);
+        // Jangan gagalkan update pembayaran jika buku besar error
+      }
+    }
 
     res.json({ message: "Pembayaran diupdate", data: pembayaran });
   } catch (error) {
@@ -953,6 +1085,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     res.status(500).json({ error: "Gagal update pembayaran" });
   }
 });
+
 
 // =====================================================================
 // 4. INVOICE PENAGIHAN
@@ -986,7 +1119,7 @@ router.get("/invoice-penagihan/:id", async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
-        purchaseOrder: { include: { supplier: true } },
+        purchaseOrder: { include: { supplier: true, project: true } },
       },
     });
     if (!invoice)

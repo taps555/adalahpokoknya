@@ -52,6 +52,7 @@ model User {
   approvedPengajuan PengajuanPembayaran[] @relation("ApprovedPengajuanByUser")
   verifiedPengajuan PengajuanPembayaran[] @relation("VerifiedPengajuanByUser")
   requestedHabisPakai PermintaanHabisPakai[] @relation("RequestedHabisPakai")
+  bukuBesarTransaksi BukuBesarTransaksi[] @relation("TransaksiBB")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -618,6 +619,8 @@ model PermintaanHabisPakai {
   qty       Float    @default(0)
   alasan    String?  @db.Text
   catatan   String?  @db.Text
+  keteranganVolume String? @db.Text
+  keteranganHarga  String? @db.Text
 
   // PENDING -> sudah dibuatkan PO (LINKED) / ditolak
   status String @default("PENDING")
@@ -644,6 +647,11 @@ enum TaxGroup {
 enum SupplierType {
   BAHAN
   JASA
+}
+
+enum KategoriItem {
+  BAHAN
+  ALAT
 }
 
 enum SupplierStatus {
@@ -675,6 +683,7 @@ model MaterialRequestItem {
   itemName   String
   unit       String
   discipline String? // SIPIL atau INTERIOR
+  category   String? // "UPAH", "BAHAN", "ALAT", dll
 
   // -- ANGKA & HARGA (Batas Budget dari Perencana) --
   estimatedVolume Float
@@ -755,6 +764,7 @@ model SupplierItem {
   unit              String
   currentPrice      Decimal
   currentPromoPrice Decimal?
+  kategori          KategoriItem?        // BAHAN / ALAT, untuk klasifikasi PO per item
 
   createdAt    DateTime               @default(now())
   updatedAt    DateTime               @updatedAt
@@ -809,6 +819,7 @@ model PurchaseOrder {
 
   subTotal       Float @default(0)
   globalDiscount Float @default(0)
+  globalDiscount2Percent Float @default(0)
   taxNominal     Float @default(0)
   grandTotal     Float @default(0)
 
@@ -829,6 +840,8 @@ model PurchaseOrder {
   pembayaranSupplier  PembayaranSupplier[]  @relation("PembayaranPO")
   invoicePenagihan    InvoicePenagihan[]    @relation("InvoicePO")
 
+  bukuBesarTransaksi  BukuBesarTransaksi[]  @relation("TransaksiKePO")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -847,7 +860,9 @@ model PurchaseOrderItem {
   unit         String
   unitPrice    Float
   disc1Percent Float   @default(0)
+  disc2Percent Float   @default(0)
   disc2Nominal Float   @default(0)
+  kategoriItem KategoriItem?
   total        Float
 
   // ✅ KOLOM LAPANGAN PINDAH KE SINI:
@@ -855,6 +870,9 @@ model PurchaseOrderItem {
   updateLapangan String?   @db.Text
   receivedVolume Float     @default(0)
   catatanRusak   String?   @db.Text
+
+  keteranganVolume String? @db.Text
+  keteranganHarga  String? @db.Text
 
   deliveryReceipts DeliveryReceipt[]
 
@@ -989,6 +1007,7 @@ model PengajuanPembayaran {
   items         Json?
 
   pembayaran PembayaranSupplier[]
+  bukuBesarTransaksi BukuBesarTransaksi[] @relation("TransaksiKePengajuan")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1015,9 +1034,13 @@ model PembayaranSupplier {
   keterangan    String?              @db.Text
   buktiBayarUrl String?
   status        PembayaranStatus     @default(PENDING)
+  jatuhTempo    DateTime?
+  tanggalBayar  DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  bukuBesarTransaksi BukuBesarTransaksi[] @relation("TransaksiKePembayaran")
 
   @@index([supplierId])
   @@index([pengajuanId])
@@ -1084,4 +1107,67 @@ model KanbanTask {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// MASTER AKUN BUKU BESAR
+// ==========================================
+model AkunBukuBesar {
+  id          String           @id @default(cuid())
+  kodeAkun    String?          @unique
+  namaAkun    String
+  tipeAkun    TipeAkunBukuBesar
+  keterangan  String?          @db.Text
+  isActive    Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@unique([namaAkun, tipeAkun])
+  @@index([tipeAkun])
+}
+
+// ==========================================
+// TABEL BARU: BUKU BESAR KAS / BANK
+// ==========================================
+enum TipeAkunBukuBesar {
+  KAS
+  BANK
+}
+
+enum JenisTransaksiBukuBesar {
+  MASUK
+  KELUAR
+}
+
+model BukuBesarTransaksi {
+  id              String                  @id @default(cuid())
+  tanggal         DateTime
+  tipeAkun        TipeAkunBukuBesar
+  namaAkun        String                  // contoh: "Kas Kecil", "BCA 123456"
+  jenis           JenisTransaksiBukuBesar
+  noReferensi     String?                 // nomor PO / pembayaran / kwitansi
+  pihak           String?                 // pihak terkait (supplier / customer / karyawan)
+  nominal         Float
+  keterangan      String?                 @db.Text
+  saldoBerjalan   Float                   // saldo setelah transaksi ini
+
+  // Relasi opsional ke PO / pembayaran / invoice
+  poId            String?
+  purchaseOrder   PurchaseOrder?          @relation("TransaksiKePO", fields: [poId], references: [id], onDelete: SetNull)
+  pengajuanId     String?
+  pengajuan       PengajuanPembayaran?    @relation("TransaksiKePengajuan", fields: [pengajuanId], references: [id], onDelete: SetNull)
+  pembayaranId    String?
+  pembayaran      PembayaranSupplier?     @relation("TransaksiKePembayaran", fields: [pembayaranId], references: [id], onDelete: SetNull)
+
+  createdById     String?
+  createdBy       User?                   @relation("TransaksiBB", fields: [createdById], references: [id])
+
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+
+  @@index([tipeAkun])
+  @@index([tanggal])
+  @@index([poId])
+  @@index([pengajuanId])
+  @@index([pembayaranId])
 }

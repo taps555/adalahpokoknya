@@ -374,6 +374,7 @@ router.put(
 router.put(
   "/po-items/:poItemId/receive",
   // verifyToken, // nyalakan auth-nya jika sudah siap
+  maybeUpload,
   async (req, res) => {
     try {
       const { poItemId } = req.params;
@@ -456,6 +457,48 @@ router.put(
             isCompleted: isCompleted,
           },
         });
+      }
+
+      // 4. Jika PO TEMPO & semua item sudah diterima → auto buat PembayaranSupplier
+      try {
+        const po = poItem.purchaseOrder;
+        if (po.status === "APPROVED" && (po.caraPembayaran || "").toUpperCase() === "TEMPO") {
+          const poFull = await prisma.purchaseOrder.findUnique({
+            where: { id: po.id },
+            include: {
+              items: { select: { id: true, qty: true, receivedVolume: true } },
+            },
+          });
+          const allReceived = poFull.items.every(
+            (it) => Number(it.receivedVolume || 0) >= Number(it.qty || 0) * 0.99
+          );
+          if (allReceived) {
+            const sudahAda = await prisma.pembayaranSupplier.findFirst({
+              where: { poId: po.id },
+            });
+            if (!sudahAda) {
+              const nowDate = new Date();
+              const created = await prisma.pembayaranSupplier.create({
+                data: {
+                  supplierId: po.supplierId,
+                  poId: po.id,
+                  tanggal: nowDate,
+                  jumlahBayar: po.grandTotal || po.subTotal || 0,
+                  metodeBayar: "TRANSFER",
+                  status: "PENDING",
+                  keterangan: `Auto TEMPO - semua barang diterima untuk PO ${po.poNumber || po.id}`,
+                },
+              });
+              const urutan = String(created.seq).padStart(3, "0");
+              await prisma.pembayaranSupplier.update({
+                where: { id: created.id },
+                data: { noPembayaran: `PBY/${String(nowDate.getMonth() + 1).padStart(2, "0")}/${nowDate.getFullYear()}/${urutan}` },
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Gagal auto-create pembayaran tempo:", e);
       }
 
       res.json({
@@ -742,17 +785,77 @@ router.post("/surat-jalan/bulk", maybeUpload, async (req, res) => {
       }
     });
 
-    // 5. Sinkronkan status MaterialRequestItem (receivedVolume/status pindah ke PO item)
+    // 5. Sinkronkan status MaterialRequestItem
     for (const mrItemId of touchedMrItems) {
       await syncMrItemStatus(mrItemId);
     }
 
+    // 6. Cek apakah ada PO TEMPO yang semua itemnya sudah diterima
+    //    Jika ya, buat PembayaranSupplier otomatis (status PENDING)
+    const uniquePoIds = new Set();
+    for (const item of items) {
+      const pi = await prisma.purchaseOrderItem.findUnique({
+        where: { id: item.poItemId },
+        select: { poId: true },
+      });
+      if (pi?.poId) uniquePoIds.add(pi.poId);
+    }
+
+    for (const poId of uniquePoIds) {
+      const po = await prisma.purchaseOrder.findUnique({
+        where: { id: poId },
+        include: {
+          items: { select: { id: true, qty: true, receivedVolume: true } },
+        },
+      });
+
+      if (!po || po.status !== "APPROVED") continue;
+      if ((po.caraPembayaran || "").toUpperCase() !== "TEMPO") continue;
+
+      // Cek apakah semua item sudah diterima (receivedVolume >= qty)
+      const allReceived = po.items.every(
+        (it) => Number(it.receivedVolume || 0) >= Number(it.qty || 0) * 0.99
+      );
+      if (!allReceived) continue;
+
+      // Cek apakah PembayaranSupplier untuk PO ini sudah ada
+      const sudahAda = await prisma.pembayaranSupplier.findFirst({
+        where: { poId },
+      });
+      if (sudahAda) continue;
+
+      // Buat entri PembayaranSupplier untuk TEMPO
+      const nowDate = new Date();
+      const bulan = String(nowDate.getMonth() + 1).padStart(2, "0");
+      const tahun = nowDate.getFullYear();
+
+      const created = await prisma.pembayaranSupplier.create({
+        data: {
+          supplierId: po.supplierId,
+          poId,
+          tanggal: nowDate,
+          jumlahBayar: 0,
+          metodeBayar: "TRANSFER",
+          status: "PENDING",
+          keterangan: `Auto TEMPO - semua barang diterima untuk PO ${po.poNumber || poId}`,
+        },
+      });
+
+      const urutan = String(created.seq).padStart(3, "0");
+      const noPembayaran = `PBY/${bulan}/${tahun}/${urutan}`;
+      await prisma.pembayaranSupplier.update({
+        where: { id: created.id },
+        data: { noPembayaran },
+      });
+    }
+
     res.json({ message: "Penerimaan borongan berhasil dicatat!" });
+
   } catch (error) {
     console.error("Error Bulk Surat Jalan:", error);
     res
       .status(500)
-      .json({ error: "Gagal menyimpan data borongan Surat Jalan." });
+      .json({ error: error.message || "Gagal menyimpan data borongan Surat Jalan." });
   }
 });
 
@@ -808,13 +911,14 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
       wherePermintaan.projectId = projectId;
     }
 
-    const [permintaan, poHabisPakai, semuaItemPO] = await Promise.all([
+    const [permintaanRaw, poHabisPakai, semuaItemPO] = await Promise.all([
       prisma.permintaanHabisPakai.findMany({
         where: wherePermintaan,
         include: {
           po: { select: { id: true, poNumber: true, status: true } },
           poHabisPakai: { select: { id: true, poNumber: true, status: true } },
           requestedBy: { select: { id: true, name: true } },
+          mrItem: { select: { id: true, itemName: true, estimatedVolume: true, pricePerUnit: true } },
         },
         orderBy: { createdAt: "desc" },
       }),
@@ -826,12 +930,13 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
           items: {
             orderBy: { id: "asc" },
             include: {
+              materialRequest: { select: { id: true, itemName: true, estimatedVolume: true, pricePerUnit: true } },
               deliveryReceipts: { orderBy: { tanggal: "desc" } },
             },
           },
           // Permintaan yang dituntaskan PO habis pakai ini (poHabisPakaiId)
           permintaanHabisPakai: {
-            select: { id: true, nomor: true, itemName: true, alasan: true },
+            select: { id: true, nomor: true, itemName: true, alasan: true, qty: true, mrItemId: true },
           },
         },
         orderBy: { createdAt: "desc" },
@@ -853,6 +958,18 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
         },
       }),
     ]);
+
+    // Enrich status permintaan habis pakai berdasarkan PO habis pakai terkait
+    const permintaan = permintaanRaw.map((p) => {
+      const po = p.poHabisPakai;
+      if (!po) return p;
+      let status = p.status;
+      if (po.status === "BELUM_APPROVE") status = "PO_DIBUAT";
+      else if (po.status === "MENUNGGU_ATASAN") status = "FINANCE_APPROVED";
+      else if (po.status === "APPROVED") status = "ATASAN_APPROVED";
+      else if (po.status === "REJECTED") status = "REJECTED";
+      return { ...p, status };
+    });
 
     // Kelebihan: barang datang melebihi jumlah yang dipesan di PO.
     // Bukan dibuatkan permintaan otomatis — cuma ditandai supaya
@@ -883,7 +1000,40 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
       }))
       .sort((a, b) => b.kelebihan - a.kelebihan);
 
-    res.json({ permintaan, poHabisPakai, kelebihan });
+    // Ambil data MR terkait untuk akumulasi over qty/harga
+    const mrItemIds = permintaan
+      .map((p) => p.mrItemId)
+      .filter(Boolean);
+    const mrMap = new Map();
+    if (mrItemIds.length) {
+      const mrItems = await prisma.materialRequestItem.findMany({
+        where: { id: { in: mrItemIds } },
+        select: { id: true, itemName: true, estimatedVolume: true, pricePerUnit: true },
+      });
+      mrItems.forEach((m) => mrMap.set(m.id, m));
+    }
+
+    // Proyeksi RAP per item PO habis pakai dari permintaan yang terkait
+    const poHabisPakaiEnriched = poHabisPakai.map((po) => {
+      const items = (po.items || []).map((it) => {
+        const matching = (po.permintaanHabisPakai || []).find(
+          (pm) => pm.itemName === it.description || pm.alasan?.includes(it.description)
+        );
+        const mr = matching?.mrItemId ? mrMap.get(matching.mrItemId) : null;
+        const rapVol = mr?.estimatedVolume || it.materialRequest?.estimatedVolume || 0;
+        const rapPrice = mr?.pricePerUnit || it.materialRequest?.pricePerUnit || 0;
+        return {
+          ...it,
+          rapEstVolume: rapVol,
+          rapPricePerUnit: rapPrice,
+          overQty: Math.max(0, Number(it.qty || 0) - Number(rapVol || 0)),
+          overHarga: Math.max(0, Number(it.unitPrice || 0) - Number(rapPrice || 0)),
+        };
+      });
+      return { ...po, items };
+    });
+
+    res.json({ permintaan, poHabisPakai: poHabisPakaiEnriched, kelebihan });
   } catch (error) {
     console.error("Get Riwayat Habis Pakai Error:", error);
     res.status(500).json({ error: "Gagal mengambil riwayat habis pakai" });
@@ -911,7 +1061,50 @@ router.get("/permintaan-habis-pakai", async (req, res) => {
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json(data);
+
+    // Hitung akumulasi qty yang sudah datang/terbeli per item (semua PO habis pakai proyek)
+    const poHabisPakaiForProject = projectId
+      ? await prisma.purchaseOrder.findMany({
+          where: { projectId, kategoriPO: "HABIS_PAKAI", status: { not: "REJECTED" } },
+          include: { items: true },
+        })
+      : [];
+    const akumulasiMap = {};
+    for (const po of poHabisPakaiForProject) {
+      for (const it of po.items || []) {
+        const key = it.description;
+        if (!akumulasiMap[key]) akumulasiMap[key] = { qty: 0, received: 0 };
+        akumulasiMap[key].qty += Number(it.qty || 0);
+        akumulasiMap[key].received += Number(it.receivedVolume || 0);
+      }
+    }
+
+    // Enrich status tracking berdasarkan PO habis pakai terkait + akumulasi
+    const fmtNumBE = (n) => {
+      const num = Number(n || 0);
+      return isNaN(num) ? '0' : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
+    };
+    const enriched = data.map((perm) => {
+      const po = perm.poHabisPakai;
+      let status = perm.status;
+      if (po) {
+        if (po.status === "BELUM_APPROVE") status = "PO_DIBUAT";
+        else if (po.status === "MENUNGGU_ATASAN") status = "FINANCE_APPROVED";
+        else if (po.status === "APPROVED") status = "ATASAN_APPROVED";
+        else if (po.status === "REJECTED") status = "REJECTED";
+      }
+      const acc = akumulasiMap[perm.itemName] || { qty: 0, received: 0 };
+      const qtyOver = acc.qty > perm.qty ? acc.qty - perm.qty : 0;
+      return {
+        ...perm,
+        status,
+        akumulasiQty: acc.qty,
+        akumulasiReceived: acc.received,
+        keteranganVolume: perm.keteranganVolume || (qtyOver > 0 ? `Over ${fmtNumBE(qtyOver)} ${perm.unit || ''} (akumulasi terbeli ${fmtNumBE(acc.qty)} ${perm.unit || ''})` : null),
+      };
+    });
+
+    res.json(enriched);
   } catch (error) {
     console.error("Get Permintaan Habis Pakai Error:", error);
     res.status(500).json({ error: "Gagal mengambil permintaan habis pakai" });
@@ -926,7 +1119,7 @@ router.get("/permintaan-habis-pakai", async (req, res) => {
  */
 router.post("/permintaan-habis-pakai", async (req, res) => {
   try {
-    const { projectId, poId, mrItemId, itemName, unit, qty, alasan, catatan } =
+    const { projectId, poId, mrItemId, itemName, unit, qty, alasan, catatan, keteranganVolume, keteranganHarga } =
       req.body || {};
 
     if (!projectId || !itemName || !qty) {
@@ -957,15 +1150,14 @@ router.post("/permintaan-habis-pakai", async (req, res) => {
         qty: Number(qty),
         alasan: alasan || null,
         catatan: catatan || null,
+        keteranganVolume: keteranganVolume || null,
+        keteranganHarga: keteranganHarga || null,
         requestedById: req.user?.userId || null,
       },
     });
 
-    const now = created.createdAt;
-    const bulan = String(now.getMonth() + 1).padStart(2, "0");
-    const tahun = now.getFullYear();
     const urutan = String(created.seq).padStart(3, "0");
-    const nomor = `PHP/${bulan}/${tahun}/${urutan}`;
+    const nomor = `PHP-${urutan}`;
 
     const final = await prisma.permintaanHabisPakai.update({
       where: { id: created.id },

@@ -678,7 +678,6 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
       }
 
       rabItem.components.forEach((comp) => {
-        if (comp.section === "UPAH") return;
 
         const itemVolume = Number(
           (Number(comp.coefficient) * jobVolume).toFixed(4),
@@ -690,6 +689,7 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
           itemName: comp.name,
           unit: comp.unit,
           discipline: jobDiscipline,
+          category: comp.section,
           groupName,
           jobName,
           volumePekerjaan: jobVolume,
@@ -710,6 +710,7 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
           itemName: rabItem.name,
           unit: rabItem.paymentUnit || "-",
           discipline: jobDiscipline,
+          category: "MATERIAL", // Fallback
           groupName,
           jobName,
           volumePekerjaan: volPolos,

@@ -292,7 +292,7 @@ router.get("/supplier-items/:id/history", async (req, res) => {
  */
 router.post("/supplier-items", async (req, res) => {
   try {
-    const { supplierId, itemName, variantName, unit, price, promoPrice } =
+    const { supplierId, itemName, variantName, unit, price, promoPrice, kategori } =
       req.body;
 
     if (!supplierId || !itemName || !unit || price === undefined) {
@@ -309,6 +309,7 @@ router.post("/supplier-items", async (req, res) => {
         unit,
         currentPrice: price,
         currentPromoPrice: promoPrice,
+        kategori: kategori || null,
       },
     });
 

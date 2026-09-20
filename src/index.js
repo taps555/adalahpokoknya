@@ -23,8 +23,8 @@ app.use(cors());
 app.use(express.json());
 
 // Static serve untuk frontend build
-// src/index.js -> backend/src -> backend -> Project -> frontend/dist
-const FRONTEND_DIST = path.join(__dirname, "..", "..", "frontend", "dist");
+// Path absolut ke D:\projekbaru\frontend\dist agar tidak bergantung working directory
+const FRONTEND_DIST = "D:\\\\projekbaru\\\\frontend\\\\dist";
 app.use(express.static(FRONTEND_DIST));
 
 app.use(express.static("public"));
@@ -78,6 +78,7 @@ app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 app.use("/api", require("./routes/crudGrub/kanban.routes"));
 app.use("/api", require("./routes/crudGrub/purchasing.routes"));
+app.use("/api/gl-bank", require("./routes/crudGrub/glBank.routes"));
 
 // SPA fallback: kirim index.html untuk route non-API
 app.get('*', (req, res, next) => {

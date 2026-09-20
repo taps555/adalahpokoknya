@@ -464,7 +464,11 @@ router.post("/po", verifyToken, async (req, res) => {
                 unit: item.unit || "-",
                 unitPrice: Number(item.unitPrice || 0),
                 disc1Percent: Number(item.disc1Percent || 0),
+                disc2Percent: Number(item.disc2Percent || 0),
                 disc2Nominal: Number(item.disc2Nominal || 0),
+                kategoriItem: item.kategoriItem || null,
+                keteranganVolume: item.keteranganVolume || null,
+                keteranganHarga: item.keteranganHarga || null,
                 total: Number(item.total || 0),
               };
             }),
@@ -473,12 +477,13 @@ router.post("/po", verifyToken, async (req, res) => {
         include: { items: true },
       });
 
-      // 2. generate poNumber dari seq, format PO/GLD/{bulan}/{tahun}/{urutan}
+      // 2. generate poNumber sesuai kategori PO
       const now = created.tanggal;
-      const bulan = String(now.getMonth() + 1).padStart(2, "0");
-      const tahun = now.getFullYear();
       const urutan = String(created.seq).padStart(3, "0");
-      const poNumber = `PO/GLD/${bulan}/${tahun}/${urutan}`;
+      const poNumber =
+        created.kategoriPO === "HABIS_PAKAI"
+          ? `PHB-${urutan}`
+          : `PO/GLD/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}/${urutan}`;
 
       const po = await tx.purchaseOrder.update({
         where: { id: created.id },
@@ -507,10 +512,26 @@ router.post("/po", verifyToken, async (req, res) => {
 
       // 3. Tautkan PO HABIS_PAKAI ke permintaan lapangan (kalau ada)
       if (permintaanHabisPakaiId && (kategoriPO || "MATERIAL") === "HABIS_PAKAI") {
+        const permintaan = await tx.permintaanHabisPakai.findUnique({
+          where: { id: permintaanHabisPakaiId },
+        });
         await tx.permintaanHabisPakai.update({
           where: { id: permintaanHabisPakaiId },
-          data: { poHabisPakaiId: po.id, status: "LINKED" },
+          data: { poHabisPakaiId: po.id, status: "PO_DIBUAT" },
         });
+
+        // Copy keterangan volume/harga dari permintaan ke item PO (jika item PO belum punya)
+        if (permintaan && (permintaan.keteranganVolume || permintaan.keteranganHarga)) {
+          for (const poItem of po.items || []) {
+            await tx.purchaseOrderItem.update({
+              where: { id: poItem.id },
+              data: {
+                keteranganVolume: permintaan.keteranganVolume || undefined,
+                keteranganHarga: permintaan.keteranganHarga || undefined,
+              },
+            });
+          }
+        }
       }
 
       return po;
@@ -553,7 +574,7 @@ router.get("/po", verifyToken, async (req, res) => {
           orderBy: { id: "asc" },
           include: {
             materialRequest: {
-              select: { groupName: true, jobName: true },
+              select: { groupName: true, jobName: true, estimatedVolume: true, pricePerUnit: true },
             },
           },
         },
@@ -779,10 +800,64 @@ router.put(
           verifiedAt: new Date(),
           catatanFinance: catatanFinance ? String(catatanFinance).trim() : null,
         },
-        include: { supplier: true, items: true },
+        include: { supplier: true, items: true, project: { select: { id: true, name: true } } },
       });
 
-      res.json({ message: "PO diverifikasi Finance, menunggu persetujuan atasan.", po });
+      // Otomatis buat Pengajuan Pembayaran agar atasan bisa approve
+      let pengajuan = null;
+      try {
+        const existingPengajuan = await prisma.pengajuanPembayaran.findFirst({
+          where: { poId: req.params.id, status: { notIn: ["REJECTED", "APPROVED"] } },
+        });
+        if (!existingPengajuan) {
+          const seq = await prisma.pengajuanPembayaran.count({});
+          const noPengajuan = `PJB-${String(seq + 1).padStart(5, "0")}`;
+          pengajuan = await prisma.pengajuanPembayaran.create({
+            data: {
+              noPengajuan,
+              supplierId: po.supplierId,
+              poId: po.id,
+              projectId: po.projectId,
+              tanggal: new Date(),
+              totalTagihan: po.grandTotal || po.subTotal || 0,
+              status: "APPROVED_FINANCE",
+              catatanFinance: po.catatanFinance,
+              verifiedById: req.user?.userId || null,
+              verifiedAt: new Date(),
+              items: po.items.map((it) => ({
+                description: it.description,
+                qty: it.qty,
+                unit: it.unit,
+                unitPrice: it.unitPrice,
+                total: it.total,
+              })),
+            },
+          });
+        }
+      } catch (e) {
+        console.error("Gagal membuat Pengajuan Pembayaran otomatis:", e);
+      }
+
+      // Update status permintaan habis pakai terkait jika ada
+    try {
+      const linked = await prisma.permintaanHabisPakai.findFirst({
+        where: { poHabisPakaiId: req.params.id },
+      });
+      if (linked) {
+        let nextStatus = "PO_DIBUAT";
+        if (po.status === "MENUNGGU_ATASAN") nextStatus = "FINANCE_APPROVED";
+        else if (po.status === "APPROVED") nextStatus = "ATASAN_APPROVED";
+        else if (po.status === "REJECTED") nextStatus = "REJECTED";
+        await prisma.permintaanHabisPakai.update({
+          where: { id: linked.id },
+          data: { status: nextStatus },
+        });
+      }
+    } catch (e) {
+      console.error("Gagal sinkron status permintaan habis pakai:", e);
+    }
+
+    res.json({ message: "PO diverifikasi Finance, menunggu persetujuan atasan.", po, pengajuan });
     } catch (error) {
       console.error("Verify PO Error:", error);
       if (error.code === "P2025") {
@@ -830,37 +905,84 @@ router.put(
           rejectedAt: null,
           rejectedById: null,
         },
+        include: { supplier: true },
       });
 
-      // JANGAN buat PengajuanPembayaran baru otomatis di sini.
-      // Cukup finalkan PengajuanPembayaran yang sudah ada (kalau ada) biar
-      // statusnya sinkron dengan PO yang baru saja di-approve atasan.
-      const existingPengajuan = await prisma.pengajuanPembayaran.findFirst({
-        where: {
-          poId: req.params.id,
-          status: { notIn: ["REJECTED", "APPROVED"] },
-        },
-      });
+      // Jika pembayaran cash/transfer, langsung buat Pembayaran Supplier
+      let pembayaran = null;
+      try {
+        const isCash = /cash|transfer/i.test(po.caraPembayaran || "");
+        if (isCash) {
+          const seq = await prisma.pembayaranSupplier.count({});
+          const noPembayaran = `BYR-${String(seq + 1).padStart(5, "0")}`;
+          pembayaran = await prisma.pembayaranSupplier.create({
+            data: {
+              noPembayaran,
+              supplierId: po.supplierId,
+              poId: po.id,
+              tanggal: new Date(),
+              jumlahBayar: po.grandTotal || po.subTotal || 0,
+              metodeBayar: /cash/i.test(po.caraPembayaran || "") ? "CASH" : "TRANSFER",
+              keterangan: `Pembayaran otomatis PO ${po.poNumber || po.id}`,
+              status: "PENDING",
+            },
+          });
+        }
+      } catch (e) {
+        console.error("Gagal membuat Pembayaran Supplier otomatis:", e);
+      }
 
+      // Finalkan PengajuanPembayaran yang sudah ada (kalau ada)
       let pengajuan = null;
-      if (existingPengajuan) {
-        pengajuan = await prisma.pengajuanPembayaran.update({
-          where: { id: existingPengajuan.id },
-          data: {
-            status: "APPROVED",
-            approvedById: req.user?.userId || null,
-            approvedAt: new Date(),
-            verifiedById: existing.verifiedById,
-            verifiedAt: existing.verifiedAt,
-            rejectReason: null,
+      try {
+        const existingPengajuan = await prisma.pengajuanPembayaran.findFirst({
+          where: {
+            poId: req.params.id,
+            status: { notIn: ["REJECTED", "APPROVED"] },
           },
         });
+
+        if (existingPengajuan) {
+          pengajuan = await prisma.pengajuanPembayaran.update({
+            where: { id: existingPengajuan.id },
+            data: {
+              status: "APPROVED",
+              approvedById: req.user?.userId || null,
+              approvedAt: new Date(),
+              verifiedById: po.verifiedById,
+              verifiedAt: po.verifiedAt,
+              rejectReason: null,
+            },
+          });
+        }
+      } catch (e) {
+        console.error("Gagal finalkan Pengajuan Pembayaran:", e);
+      }
+
+      // Update status permintaan habis pakai terkait jika ada
+      try {
+        const linked = await prisma.permintaanHabisPakai.findFirst({
+          where: { poHabisPakaiId: req.params.id },
+        });
+        if (linked) {
+          let nextStatus = "PO_DIBUAT";
+          if (po.status === "MENUNGGU_ATASAN") nextStatus = "FINANCE_APPROVED";
+          else if (po.status === "APPROVED") nextStatus = "ATASAN_APPROVED";
+          else if (po.status === "REJECTED") nextStatus = "REJECTED";
+          await prisma.permintaanHabisPakai.update({
+            where: { id: linked.id },
+            data: { status: nextStatus },
+          });
+        }
+      } catch (e) {
+        console.error("Gagal sinkron status permintaan habis pakai:", e);
       }
 
       res.json({
         message: "PO berhasil di-Approve!",
         po,
         pengajuan,
+        pembayaran,
       });
     } catch (error) {
       console.error("Approve PO Error:", error);
@@ -907,6 +1029,22 @@ router.put(
           rejectReason: String(rejectReason).trim(),
         },
       });
+
+      // Update status permintaan habis pakai terkait jika ada
+      try {
+        const linked = await prisma.permintaanHabisPakai.findFirst({
+          where: { poHabisPakaiId: req.params.id },
+        });
+        if (linked) {
+          await prisma.permintaanHabisPakai.update({
+            where: { id: linked.id },
+            data: { status: "REJECTED" },
+          });
+        }
+      } catch (e) {
+        console.error("Gagal sinkron status permintaan habis pakai:", e);
+      }
+
       res.json({ message: "PO berhasil ditolak.", po });
     } catch (error) {
       console.error("Reject PO Error:", error);
@@ -1055,7 +1193,9 @@ router.put("/po/:id", verifyToken, async (req, res) => {
               unit: item.unit,
               unitPrice: Number(item.unitPrice),
               disc1Percent: Number(item.disc1Percent || 0),
+              disc2Percent: Number(item.disc2Percent || 0),
               disc2Nominal: Number(item.disc2Nominal || 0),
+              kategoriItem: item.kategoriItem || null,
               total: Number(item.total),
             })),
           },
