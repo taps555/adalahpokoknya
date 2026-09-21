@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const prisma = require("../../lib/prisma"); // Sesuaikan path menuju file prisma Anda
 const { verifyToken, authorizeRoles } = require("../../middleware/auth"); // Sesuaikan path middleware auth Anda
+const { getKeteranganVolumeHarga } = require("../../lib/keteranganVolumeHarga.js");
 
 /**
  * Hitung ulang status penerimaan satu MaterialRequestItem dari total receivedVolume
@@ -557,6 +558,7 @@ router.get("/po", verifyToken, async (req, res) => {
         project: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
         approvedBy: { select: { id: true, name: true, role: true } },
+        permintaanHabisPakai: { select: { id: true, poId: true } },
         items: {
           orderBy: { id: "asc" },
           include: {
@@ -568,7 +570,18 @@ router.get("/po", verifyToken, async (req, res) => {
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json(pos);
+
+    // Enrich setiap PO dengan keterangan over/under volume & harga
+    const enrichedPos = await Promise.all(
+      pos.map(async (po) => {
+        const ket = await getKeteranganVolumeHarga(po).catch((e) => {
+          console.error("getKeteranganVolumeHarga error:", e);
+          return { ketVolume: "-", ketHarga: "-" };
+        });
+        return { ...po, keteranganVolume: ket.ketVolume, keteranganHarga: ket.ketHarga };
+      })
+    );
+    res.json(enrichedPos);
   } catch (error) {
     console.error("Get PO Error:", error);
     res.status(500).json({ error: "Gagal mengambil data PO" });

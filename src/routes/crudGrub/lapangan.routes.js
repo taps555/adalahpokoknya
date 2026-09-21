@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 const prisma = require("../../lib/prisma"); // sesuaikan path relatif sama struktur folder lo
 const { verifyToken } = require("../../middleware/auth");
+const { getKeteranganVolumeHarga, getKeteranganForHabisPakai } = require("../../lib/keteranganVolumeHarga.js");
 
 const router = express.Router();
 
@@ -1013,103 +1014,24 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
       mrItems.forEach((m) => mrMap.set(m.id, m));
     }
 
-    const fmtNumRH = (n) => {
-      const num = Number(n || 0);
-      return isNaN(num) ? '0' : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
-    };
-    const fmtRpRH = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 
-    const getRapAndAkumulasi = async (itemName, mrItemId, poId, projectId) => {
-      let rapQty = 0;
-      let rapPrice = 0;
-
-      if (mrItemId) {
-        const mr = await prisma.materialRequestItem.findUnique({
-          where: { id: mrItemId },
-          select: { estimatedVolume: true, pricePerUnit: true },
-        });
-        if (mr) {
-          rapQty = Number(mr.estimatedVolume || 0);
-          rapPrice = Number(mr.pricePerUnit || 0);
-        }
-      }
-
-      if (rapQty <= 0 && poId) {
-        const poItems = await prisma.purchaseOrderItem.findMany({
-          where: { poId },
-          select: { description: true, qty: true, unitPrice: true },
-        });
-        const matching = poItems.find((it) =>
-          (it.description || '').toLowerCase() === (itemName || '').toLowerCase()
-        );
-        if (matching) {
-          rapQty = Number(matching.qty || 0);
-          rapPrice = Number(matching.unitPrice || 0);
-        }
-      }
-
-      const itemNameTrim = (itemName || '').trim();
-      const poItemWhere = { description: { contains: itemNameTrim, mode: "insensitive" } };
-      if (projectId) poItemWhere.purchaseOrder = { projectId };
-      const poItems = await prisma.purchaseOrderItem.findMany({
-        where: poItemWhere,
-        select: { qty: true, receivedVolume: true, unitPrice: true },
-      });
-
-      const akumulasiQty = poItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
-      const akumulasiReceived = poItems.reduce((sum, it) => sum + Number(it.receivedVolume || 0), 0);
-
-      return { rapQty, rapPrice, akumulasiQty, akumulasiReceived };
-    };
 
     // Proyeksi RAP per item PO habis pakai dari permintaan yang terkait
     const poHabisPakaiEnriched = [];
     for (const po of poHabisPakai) {
-      const items = [];
-      for (const it of po.items || []) {
-        const matching = (po.permintaanHabisPakai || []).find(
-          (pm) => pm.itemName === it.description || pm.alasan?.includes(it.description)
-        );
-        const mr = matching?.mrItemId ? mrMap.get(matching.mrItemId) : null;
-        const rapVol = mr?.estimatedVolume || it.materialRequest?.estimatedVolume || 0;
-        const rapPrice = mr?.pricePerUnit || it.materialRequest?.pricePerUnit || 0;
-        const { akumulasiQty } = await getRapAndAkumulasi(
-          it.description,
-          matching?.mrItemId || it.materialRequestId,
-          po.id,
-          projectId
-        );
-
-        let keteranganVolume = null;
-        if (rapVol > 0) {
-          const diff = akumulasiQty - rapVol;
-          if (diff > 0) keteranganVolume = `Over ${fmtNumRH(diff)} ${it.unit || ''} (akumulasi ${fmtNumRH(akumulasiQty)} vs RAP ${fmtNumRH(rapVol)})`;
-          else if (diff < 0) keteranganVolume = `Under ${fmtNumRH(Math.abs(diff))} ${it.unit || ''} (akumulasi ${fmtNumRH(akumulasiQty)} vs RAP ${fmtNumRH(rapVol)})`;
-          else keteranganVolume = `Sesuai RAP ${fmtNumRH(rapVol)} ${it.unit || ''}`;
-        } else if (akumulasiQty > 0) {
-          keteranganVolume = `Akumulasi ${fmtNumRH(akumulasiQty)} ${it.unit || ''} (RAP tidak tersedia)`;
-        }
-
-        const poPrice = Number(it.unitPrice || 0);
-        let keteranganHarga = null;
-        if (rapPrice > 0) {
-          const diff = poPrice - rapPrice;
-          if (diff > 0) keteranganHarga = `Over ${fmtRpRH(diff)} (PO ${fmtRpRH(poPrice)} vs RAP ${fmtRpRH(rapPrice)})`;
-          else if (diff < 0) keteranganHarga = `Under ${fmtRpRH(Math.abs(diff))} (PO ${fmtRpRH(poPrice)} vs RAP ${fmtRpRH(rapPrice)})`;
-          else keteranganHarga = `Sesuai RAP ${fmtRpRH(rapPrice)}`;
-        } else if (poPrice > 0) {
-          keteranganHarga = `PO ${fmtRpRH(poPrice)} (RAP tidak tersedia)`;
-        }
-
-        items.push({
-          ...it,
-          rapEstVolume: rapVol,
-          rapPricePerUnit: rapPrice,
-          keteranganVolume,
-          keteranganHarga,
-        });
-      }
-      poHabisPakaiEnriched.push({ ...po, items });
+      // Gunakan poId dari permintaan (PO induk), bukan po.id (PO habis pakai)
+      const matching = (po.permintaanHabisPakai || [])[0];
+      const indukPoId = matching?.poId || po.permintaanHabisPakai?.[0]?.poId;
+      const enriched = await getKeteranganVolumeHarga({
+        ...po,
+        poId: indukPoId,
+      });
+      poHabisPakaiEnriched.push({
+        ...po,
+        keteranganVolume: enriched.ketVolume,
+        keteranganHarga: enriched.ketHarga,
+        items: po.items,
+      });
     }
 
     res.json({ permintaan, poHabisPakai: poHabisPakaiEnriched, kelebihan });
@@ -1141,80 +1063,7 @@ router.get("/permintaan-habis-pakai", async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
-    // Helper: ambil RAP qty/harga dan akumulasi PO untuk satu permintaan
-    const getRapAndAkumulasi = async (itemName, mrItemId, poId, projectId) => {
-      let rapQty = 0;
-      let rapPrice = 0;
 
-      // Prioritas 1: dari MaterialRequestItem
-      if (mrItemId) {
-        const mr = await prisma.materialRequestItem.findUnique({
-          where: { id: mrItemId },
-          select: { estimatedVolume: true, pricePerUnit: true },
-        });
-        if (mr) {
-          rapQty = Number(mr.estimatedVolume || 0);
-          rapPrice = Number(mr.pricePerUnit || 0);
-        }
-      }
-
-      // Prioritas 2: dari PO induk (item dengan description sama)
-      if (rapQty <= 0 && poId) {
-        const poItems = await prisma.purchaseOrderItem.findMany({
-          where: { poId },
-          select: { description: true, qty: true, unitPrice: true },
-        });
-        const matching = poItems.find((it) =>
-          (it.description || '').toLowerCase() === (itemName || '').toLowerCase()
-        );
-        if (matching) {
-          rapQty = Number(matching.qty || 0);
-          rapPrice = Number(matching.unitPrice || 0);
-        }
-      }
-
-      // Ambil semua PO item untuk itemName ini dalam project yang sama
-      const itemNameTrim = (itemName || '').trim();
-      const poItemWhere = {
-        description: { contains: itemNameTrim, mode: "insensitive" },
-      };
-      if (projectId) {
-        poItemWhere.purchaseOrder = { projectId };
-      }
-      const poItems = await prisma.purchaseOrderItem.findMany({
-        where: poItemWhere,
-        select: { qty: true, receivedVolume: true, unitPrice: true },
-      });
-
-      // Jumlahkan juga permintaan habis pakai yang belum jadi PO
-      const permintaanWhere = {
-        itemName: { contains: itemNameTrim, mode: "insensitive" },
-        status: { not: "REJECTED" },
-      };
-      if (projectId) permintaanWhere.projectId = projectId;
-      const permintaanItems = await prisma.permintaanHabisPakai.findMany({
-        where: permintaanWhere,
-        select: { qty: true },
-      });
-
-      const akumulasiQtyPo = poItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
-      const akumulasiQtyPermintaan = permintaanItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
-      const akumulasiQty = akumulasiQtyPo + akumulasiQtyPermintaan;
-      const akumulasiReceived = poItems.reduce((sum, it) => sum + Number(it.receivedVolume || 0), 0);
-
-      // Harga rata-rata tertimbang dari PO yang sudah ada
-      const totalNilai = poItems.reduce((sum, it) => sum + (Number(it.qty || 0) * Number(it.unitPrice || 0)), 0);
-      const avgPrice = akumulasiQtyPo > 0 ? totalNilai / akumulasiQtyPo : 0;
-
-      return { rapQty, rapPrice, akumulasiQty, akumulasiReceived, avgPrice };
-    };
-
-    // Enrich status tracking berdasarkan PO habis pakai terkait + RAP comparison
-    const fmtNumBE = (n) => {
-      const num = Number(n || 0);
-      return isNaN(num) ? '0' : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
-    };
-    const fmtRpBE = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 
     const enriched = [];
     for (const perm of data) {
@@ -1227,38 +1076,25 @@ router.get("/permintaan-habis-pakai", async (req, res) => {
         else if (po.status === "REJECTED") status = "REJECTED";
       }
 
-      const { rapQty, rapPrice, akumulasiQty, akumulasiReceived, avgPrice } =
-        await getRapAndAkumulasi(perm.itemName, perm.mrItemId, perm.poId, projectId);
-
-      let ketVolume = null;
-      if (rapQty > 0) {
-        const diff = akumulasiQty - rapQty;
-        if (diff > 0) ketVolume = `Over ${fmtNumBE(diff)} ${perm.unit || ''} (akumulasi ${fmtNumBE(akumulasiQty)} vs RAP ${fmtNumBE(rapQty)})`;
-        else if (diff < 0) ketVolume = `Under ${fmtNumBE(Math.abs(diff))} ${perm.unit || ''} (akumulasi ${fmtNumBE(akumulasiQty)} vs RAP ${fmtNumBE(rapQty)})`;
-        else ketVolume = `Sesuai RAP ${fmtNumBE(rapQty)} ${perm.unit || ''}`;
-      } else if (akumulasiQty > 0) {
-        ketVolume = `Akumulasi ${fmtNumBE(akumulasiQty)} ${perm.unit || ''} (RAP tidak tersedia)`;
-      }
-
-      let ketHarga = null;
-      if (rapPrice > 0) {
-        const diff = avgPrice - rapPrice;
-        if (diff > 0) ketHarga = `Over ${fmtRpBE(diff)} (rata-rata ${fmtRpBE(avgPrice)} vs RAP ${fmtRpBE(rapPrice)})`;
-        else if (diff < 0) ketHarga = `Under ${fmtRpBE(Math.abs(diff))} (rata-rata ${fmtRpBE(avgPrice)} vs RAP ${fmtRpBE(rapPrice)})`;
-        else ketHarga = `Sesuai RAP ${fmtRpBE(rapPrice)}`;
-      } else if (avgPrice > 0) {
-        ketHarga = `Rata-rata harga ${fmtRpBE(avgPrice)} (RAP tidak tersedia)`;
-      }
+      const { rapQty, rapPrice, rapSource, akumulasiQty, keteranganVolume, keteranganHarga } =
+        await getKeteranganForHabisPakai({
+          itemName: perm.itemName,
+          unit: perm.unit,
+          mrItemId: perm.mrItemId,
+          indukPoId: perm.poId,
+          projectId,
+        });
 
       enriched.push({
         ...perm,
         status,
         rapQty,
         rapPrice,
+        rapSource,
         akumulasiQty,
-        akumulasiReceived,
-        keteranganVolume: ketVolume,
-        keteranganHarga: ketHarga,
+        akumulasiReceived: 0,
+        keteranganVolume,
+        keteranganHarga,
       });
     }
 

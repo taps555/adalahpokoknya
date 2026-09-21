@@ -213,6 +213,25 @@ router.delete("/retur/:id", verifyToken, async (req, res) => {
 // 2. PENGAJUAN PEMBAYARAN
 // =====================================================================
 
+const { getKeteranganVolumeHarga } = require("../../lib/keteranganVolumeHarga.js");
+
+// Enrich pengajuan dengan keterangan volume/harga dari PO
+const enrichPengajuanWithKeterangan = async (pengajuan) => {
+  if (!pengajuan?.purchaseOrder) return pengajuan;
+  const ket = await getKeteranganVolumeHarga(pengajuan.purchaseOrder).catch((e) => {
+    console.error("getKeteranganVolumeHarga error:", e);
+    return { ketVolume: "-", ketHarga: "-" };
+  });
+  return {
+    ...pengajuan,
+    purchaseOrder: {
+      ...pengajuan.purchaseOrder,
+      keteranganVolume: ket.ketVolume,
+      keteranganHarga: ket.ketHarga,
+    },
+  };
+};
+
 /**
  * GET /api/pengajuan-bayar
  */
@@ -245,7 +264,9 @@ router.get("/pengajuan-bayar", async (req, res) => {
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json(pengajuan);
+
+    const enriched = await Promise.all(pengajuan.map(enrichPengajuanWithKeterangan));
+    res.json(enriched);
   } catch (error) {
     console.error("Get Pengajuan Bayar Error:", error);
     res.status(500).json({ error: "Gagal mengambil data pengajuan bayar" });
@@ -284,7 +305,8 @@ router.get("/pengajuan-bayar/inbox-atasan", async (req, res) => {
       },
       orderBy: { verifiedAt: "asc" },
     });
-    res.json(data);
+    const enriched = await Promise.all(data.map(enrichPengajuanWithKeterangan));
+    res.json(enriched);
   } catch (error) {
     console.error("Get Inbox Atasan Pengajuan Error:", error);
     res.status(500).json({ error: "Gagal mengambil inbox atasan" });
@@ -315,7 +337,8 @@ router.get("/pengajuan-bayar/inbox-finance", async (req, res) => {
       },
       orderBy: { createdAt: "asc" },
     });
-    res.json(data);
+    const enriched = await Promise.all(data.map(enrichPengajuanWithKeterangan));
+    res.json(enriched);
   } catch (error) {
     console.error("Get Inbox Finance Pengajuan Error:", error);
     res.status(500).json({ error: "Gagal mengambil inbox finance" });
@@ -963,66 +986,6 @@ const fmtNum = (n) => {
 const fmtRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 
 /**
- * Helper: hitung keterangan over/under volume & harga untuk sebuah PO.
- * - Ket Volume: akumulasi qty PO (semua PO untuk itemName yang sama dalam project) vs RAP qty.
- * - Ket Harga: harga satuan item PO vs harga satuan RAP (tidak diakumulasi).
- */
-async function getKeteranganVolumeHarga(po) {
-  if (!po?.items?.length) return { ketVolume: null, ketHarga: null };
-
-  const ketVolParts = [];
-  const ketHargaParts = [];
-
-  for (const item of po.items) {
-    const mr = item.materialRequest;
-    const rapQty = Number(mr?.estimatedVolume || 0);
-    const rapPrice = Number(mr?.pricePerUnit || 0);
-    const poPrice = Number(item.unitPrice || 0);
-    const itemName = item.description || 'Item';
-    const unit = item.unit || '';
-    const projectId = po.projectId;
-
-    // Akumulasi qty dari semua PO untuk item ini dalam project
-    let akumulasiQty = 0;
-    if (itemName) {
-      const allItems = await prisma.purchaseOrderItem.findMany({
-        where: {
-          description: { contains: itemName.trim(), mode: "insensitive" },
-          purchaseOrder: projectId ? { projectId } : undefined,
-        },
-        select: { qty: true },
-      });
-      akumulasiQty = allItems.reduce((s, it) => s + Number(it.qty || 0), 0);
-    }
-
-    // Volume
-    if (rapQty > 0) {
-      const diff = akumulasiQty - rapQty;
-      if (diff > 0) ketVolParts.push(`${itemName}: Over ${fmtNum(diff)} ${unit} (akumulasi ${fmtNum(akumulasiQty)} vs RAP ${fmtNum(rapQty)})`);
-      else if (diff < 0) ketVolParts.push(`${itemName}: Under ${fmtNum(Math.abs(diff))} ${unit} (akumulasi ${fmtNum(akumulasiQty)} vs RAP ${fmtNum(rapQty)})`);
-      else ketVolParts.push(`${itemName}: Sesuai RAP ${fmtNum(rapQty)} ${unit}`);
-    } else if (akumulasiQty > 0) {
-      ketVolParts.push(`${itemName}: Akumulasi ${fmtNum(akumulasiQty)} ${unit} (RAP tidak tersedia)`);
-    }
-
-    // Harga (tidak diakumulasi, perbandingan harga PO vs RAP)
-    if (rapPrice > 0) {
-      const diff = poPrice - rapPrice;
-      if (diff > 0) ketHargaParts.push(`${itemName}: Over ${fmtRp(diff)} (PO ${fmtRp(poPrice)} vs RAP ${fmtRp(rapPrice)})`);
-      else if (diff < 0) ketHargaParts.push(`${itemName}: Under ${fmtRp(Math.abs(diff))} (PO ${fmtRp(poPrice)} vs RAP ${fmtRp(rapPrice)})`);
-      else ketHargaParts.push(`${itemName}: Sesuai RAP ${fmtRp(rapPrice)}`);
-    } else if (poPrice > 0) {
-      ketHargaParts.push(`${itemName}: PO ${fmtRp(poPrice)} (RAP tidak tersedia)`);
-    }
-  }
-
-  return {
-    ketVolume: ketVolParts.length ? ketVolParts.join(' | ') : null,
-    ketHarga: ketHargaParts.length ? ketHargaParts.join(' | ') : null,
-  };
-}
-
-/**
  * PUT /api/pembayaran-supplier/:id
  */
 router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
@@ -1083,6 +1046,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
+            permintaanHabisPakai: { select: { id: true, poId: true } },
           },
         },
       },
@@ -1099,28 +1063,12 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         const supplier = pembayaran.supplier || existing.supplier;
         const pihak = supplier?.name || "Supplier";
 
-        // Hitung over/under qty & harga per item PO vs material request (jika ada)
-        const itemSummaries = [];
-        if (po?.items) {
-          for (const item of po.items) {
-            const mr = item.materialRequest;
-            if (!mr) continue;
-            const estQty = Number(mr.estimatedVolume || 0);
-            const estPrice = Number(mr.pricePerUnit || 0);
-            const poQty = Number(item.qty || 0);
-            const poPrice = Number(item.unitPrice || 0);
-            const diffQty = poQty - estQty;
-            const diffPrice = poPrice - estPrice;
-            const ketQty = diffQty > 0 ? `Over Qty ${diffQty} ${item.unit}` : diffQty < 0 ? `Under Qty ${Math.abs(diffQty)} ${item.unit}` : "Qty Sesuai";
-            const ketHarga = diffPrice > 0 ? `Over Harga Rp ${diffPrice.toLocaleString('id-ID')}` : diffPrice < 0 ? `Under Harga Rp ${Math.abs(diffPrice).toLocaleString('id-ID')}` : "Harga Sesuai";
-            itemSummaries.push(`${item.description}: ${ketQty}; ${ketHarga}`);
-          }
-        }
-        const overKeterangan = itemSummaries.length
-          ? `[Over/Under PO] ${itemSummaries.join(" | ")}`
-          : "[Over/Under PO] Tidak ada data MR";
-
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
+
+        // Over/under qty & harga per item PO vs RAP (sudah dihitung di keteranganVolume/Harga)
+        const overKeterangan = (ketVol || ketHrg)
+          ? `[Over/Under PO] ${[ketVol, ketHrg].filter(Boolean).join(" | ")}`
+          : "[Over/Under PO] Tidak ada data RAP";
 
         await createTransaksiBukuBesar({
           tanggal: tglBayar || pembayaran.tanggal || new Date(),
