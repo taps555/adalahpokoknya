@@ -956,6 +956,72 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
   }
 });
 
+const fmtNum = (n) => {
+  const num = Number(n || 0);
+  return isNaN(num) ? '0' : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
+};
+const fmtRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
+
+/**
+ * Helper: hitung keterangan over/under volume & harga untuk sebuah PO.
+ * - Ket Volume: akumulasi qty PO (semua PO untuk itemName yang sama dalam project) vs RAP qty.
+ * - Ket Harga: harga satuan item PO vs harga satuan RAP (tidak diakumulasi).
+ */
+async function getKeteranganVolumeHarga(po) {
+  if (!po?.items?.length) return { ketVolume: null, ketHarga: null };
+
+  const ketVolParts = [];
+  const ketHargaParts = [];
+
+  for (const item of po.items) {
+    const mr = item.materialRequest;
+    const rapQty = Number(mr?.estimatedVolume || 0);
+    const rapPrice = Number(mr?.pricePerUnit || 0);
+    const poPrice = Number(item.unitPrice || 0);
+    const itemName = item.description || 'Item';
+    const unit = item.unit || '';
+    const projectId = po.projectId;
+
+    // Akumulasi qty dari semua PO untuk item ini dalam project
+    let akumulasiQty = 0;
+    if (itemName) {
+      const allItems = await prisma.purchaseOrderItem.findMany({
+        where: {
+          description: { contains: itemName.trim(), mode: "insensitive" },
+          purchaseOrder: projectId ? { projectId } : undefined,
+        },
+        select: { qty: true },
+      });
+      akumulasiQty = allItems.reduce((s, it) => s + Number(it.qty || 0), 0);
+    }
+
+    // Volume
+    if (rapQty > 0) {
+      const diff = akumulasiQty - rapQty;
+      if (diff > 0) ketVolParts.push(`${itemName}: Over ${fmtNum(diff)} ${unit} (akumulasi ${fmtNum(akumulasiQty)} vs RAP ${fmtNum(rapQty)})`);
+      else if (diff < 0) ketVolParts.push(`${itemName}: Under ${fmtNum(Math.abs(diff))} ${unit} (akumulasi ${fmtNum(akumulasiQty)} vs RAP ${fmtNum(rapQty)})`);
+      else ketVolParts.push(`${itemName}: Sesuai RAP ${fmtNum(rapQty)} ${unit}`);
+    } else if (akumulasiQty > 0) {
+      ketVolParts.push(`${itemName}: Akumulasi ${fmtNum(akumulasiQty)} ${unit} (RAP tidak tersedia)`);
+    }
+
+    // Harga (tidak diakumulasi, perbandingan harga PO vs RAP)
+    if (rapPrice > 0) {
+      const diff = poPrice - rapPrice;
+      if (diff > 0) ketHargaParts.push(`${itemName}: Over ${fmtRp(diff)} (PO ${fmtRp(poPrice)} vs RAP ${fmtRp(rapPrice)})`);
+      else if (diff < 0) ketHargaParts.push(`${itemName}: Under ${fmtRp(Math.abs(diff))} (PO ${fmtRp(poPrice)} vs RAP ${fmtRp(rapPrice)})`);
+      else ketHargaParts.push(`${itemName}: Sesuai RAP ${fmtRp(rapPrice)}`);
+    } else if (poPrice > 0) {
+      ketHargaParts.push(`${itemName}: PO ${fmtRp(poPrice)} (RAP tidak tersedia)`);
+    }
+  }
+
+  return {
+    ketVolume: ketVolParts.length ? ketVolParts.join(' | ') : null,
+    ketHarga: ketHargaParts.length ? ketHargaParts.join(' | ') : null,
+  };
+}
+
 /**
  * PUT /api/pembayaran-supplier/:id
  */
@@ -1054,6 +1120,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
           ? `[Over/Under PO] ${itemSummaries.join(" | ")}`
           : "[Over/Under PO] Tidak ada data MR";
 
+        const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
+
         await createTransaksiBukuBesar({
           tanggal: tglBayar || pembayaran.tanggal || new Date(),
           tipeAkun: tipeAkunKasBank === "BANK" ? "BANK" : "KAS",
@@ -1063,6 +1131,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
           noReferensi,
           pihak,
           keterangan: `${keterangan || ""} ${overKeterangan}`.trim() || `Pembayaran PO ${po?.poNumber || ""}`,
+          keteranganVolume: ketVol,
+          keteranganHarga: ketHrg,
           poId: po?.id || pembayaran.poId || existing.poId,
           pengajuanId: pembayaran.pengajuanId || existing.pengajuanId,
           pembayaranId: pembayaran.id,

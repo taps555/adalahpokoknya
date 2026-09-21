@@ -619,8 +619,6 @@ model PermintaanHabisPakai {
   qty       Float    @default(0)
   alasan    String?  @db.Text
   catatan   String?  @db.Text
-  keteranganVolume String? @db.Text
-  keteranganHarga  String? @db.Text
 
   // PENDING -> sudah dibuatkan PO (LINKED) / ditolak
   status String @default("PENDING")
@@ -1149,6 +1147,8 @@ model BukuBesarTransaksi {
   pihak           String?                 // pihak terkait (supplier / customer / karyawan)
   nominal         Float
   keterangan      String?                 @db.Text
+  keteranganVolume String?                @db.Text
+  keteranganHarga  String?                @db.Text
   saldoBerjalan   Float                   // saldo setelah transaksi ini
 
   // Relasi opsional ke PO / pembayaran / invoice

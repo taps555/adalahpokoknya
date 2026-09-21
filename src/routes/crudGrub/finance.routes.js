@@ -420,6 +420,11 @@ router.post("/po", verifyToken, async (req, res) => {
         }
       }
 
+      // Hitung ulang subTotal & grandTotal dari items jika tidak valid
+      const calculatedSubTotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+      const finalSubTotal = Number(subTotal || 0) > 0 ? Number(subTotal || 0) : calculatedSubTotal;
+      const finalGrandTotal = Number(grandTotal || 0) > 0 ? Number(grandTotal || 0) : finalSubTotal;
+
       // 1. create dulu tanpa poNumber, biar seq auto-increment kegenerate
       const created = await tx.purchaseOrder.create({
         data: {
@@ -436,10 +441,10 @@ router.post("/po", verifyToken, async (req, res) => {
           caraPembayaran,
           jadwalPenagihan,
           keterangan,
-          subTotal: Number(subTotal || 0),
+          subTotal: finalSubTotal,
           globalDiscount: Number(globalDiscount || 0),
           taxNominal: Number(taxNominal || 0),
-          grandTotal: Number(grandTotal || 0),
+          grandTotal: finalGrandTotal,
           items: {
             create: items.map((item) => {
               // 🔥 JURUS PENCUCIAN ID:
@@ -467,8 +472,6 @@ router.post("/po", verifyToken, async (req, res) => {
                 disc2Percent: Number(item.disc2Percent || 0),
                 disc2Nominal: Number(item.disc2Nominal || 0),
                 kategoriItem: item.kategoriItem || null,
-                keteranganVolume: item.keteranganVolume || null,
-                keteranganHarga: item.keteranganHarga || null,
                 total: Number(item.total || 0),
               };
             }),
@@ -512,26 +515,10 @@ router.post("/po", verifyToken, async (req, res) => {
 
       // 3. Tautkan PO HABIS_PAKAI ke permintaan lapangan (kalau ada)
       if (permintaanHabisPakaiId && (kategoriPO || "MATERIAL") === "HABIS_PAKAI") {
-        const permintaan = await tx.permintaanHabisPakai.findUnique({
-          where: { id: permintaanHabisPakaiId },
-        });
         await tx.permintaanHabisPakai.update({
           where: { id: permintaanHabisPakaiId },
           data: { poHabisPakaiId: po.id, status: "PO_DIBUAT" },
         });
-
-        // Copy keterangan volume/harga dari permintaan ke item PO (jika item PO belum punya)
-        if (permintaan && (permintaan.keteranganVolume || permintaan.keteranganHarga)) {
-          for (const poItem of po.items || []) {
-            await tx.purchaseOrderItem.update({
-              where: { id: poItem.id },
-              data: {
-                keteranganVolume: permintaan.keteranganVolume || undefined,
-                keteranganHarga: permintaan.keteranganHarga || undefined,
-              },
-            });
-          }
-        }
       }
 
       return po;

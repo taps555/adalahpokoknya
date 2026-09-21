@@ -246,6 +246,8 @@ async function createTransaksiBukuBesar({
   noReferensi,
   pihak,
   keterangan,
+  keteranganVolume,
+  keteranganHarga,
   poId,
   pengajuanId,
   pembayaranId,
@@ -268,6 +270,8 @@ async function createTransaksiBukuBesar({
       noReferensi: noReferensi || null,
       pihak: pihak || null,
       keterangan: keterangan || null,
+      keteranganVolume: keteranganVolume || null,
+      keteranganHarga: keteranganHarga || null,
       poId: poId || null,
       pengajuanId: pengajuanId || null,
       pembayaranId: pembayaranId || null,
@@ -306,7 +310,7 @@ async function recalcSaldo(tipeAkun, namaAkun) {
  */
 router.post("/transaksi", verifyToken, async (req, res) => {
   try {
-    const { tanggal, tipeAkun, namaAkun, jenis, nominal, noReferensi, pihak, keterangan } = req.body;
+    const { tanggal, tipeAkun, namaAkun, jenis, nominal, noReferensi, pihak, keterangan, keteranganVolume, keteranganHarga, poId, pengajuanId, pembayaranId } = req.body;
     if (!tanggal || !tipeAkun || !namaAkun || !jenis || nominal === undefined || nominal === null) {
       return res.status(400).json({ error: "Field tanggal, tipeAkun, namaAkun, jenis, nominal wajib diisi." });
     }
@@ -331,6 +335,11 @@ router.post("/transaksi", verifyToken, async (req, res) => {
         noReferensi: noReferensi || null,
         pihak: pihak || null,
         keterangan: keterangan || null,
+        keteranganVolume: keteranganVolume || null,
+        keteranganHarga: keteranganHarga || null,
+        poId: poId || null,
+        pengajuanId: pengajuanId || null,
+        pembayaranId: pembayaranId || null,
         createdById: req.user?.id || null,
         saldoBerjalan: 0, // akan dihitung ulang
       },
@@ -359,7 +368,7 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
     const existing = await prisma.bukuBesarTransaksi.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: "Transaksi tidak ditemukan." });
 
-    const { tanggal, tipeAkun, namaAkun, jenis, nominal, noReferensi, pihak, keterangan } = req.body;
+    const { tanggal, tipeAkun, namaAkun, jenis, nominal, noReferensi, pihak, keterangan, keteranganVolume, keteranganHarga, poId, pengajuanId, pembayaranId } = req.body;
     const newTipe = tipeAkun || existing.tipeAkun;
     const newNama = (namaAkun || existing.namaAkun).trim();
     const newJenis = jenis || existing.jenis;
@@ -386,6 +395,11 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
         noReferensi: noReferensi !== undefined ? (noReferensi || null) : existing.noReferensi,
         pihak: pihak !== undefined ? (pihak || null) : existing.pihak,
         keterangan: keterangan !== undefined ? (keterangan || null) : existing.keterangan,
+        keteranganVolume: keteranganVolume !== undefined ? (keteranganVolume || null) : existing.keteranganVolume,
+        keteranganHarga: keteranganHarga !== undefined ? (keteranganHarga || null) : existing.keteranganHarga,
+        poId: poId !== undefined ? (poId || null) : existing.poId,
+        pengajuanId: pengajuanId !== undefined ? (pengajuanId || null) : existing.pengajuanId,
+        pembayaranId: pembayaranId !== undefined ? (pembayaranId || null) : existing.pembayaranId,
       },
     });
 

@@ -35,3 +35,24 @@ HSPK/AHSP importer jalan di http://localhost:4000
 HSPK/AHSP importer jalan di http://localhost:4000
 ✅ Google Calendar API terinisialisasi.
 HSPK/AHSP importer jalan di http://localhost:4000
+✅ Google Calendar API terinisialisasi.
+HSPK/AHSP importer jalan di http://localhost:4000
+POST /gl-bank/transaksi error: ReferenceError: poId is not defined
+    at D:\projekbaru\backend\adalahpokoknya\src\routes\crudGrub\glBank.routes.js:340:15
+    at Layer.handle [as handle_request] (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\route.js:149:13)
+    at verifyToken (D:\projekbaru\backend\adalahpokoknya\src\middleware\auth.js:26:5)
+    at Layer.handle [as handle_request] (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\layer.js:95:5)
+    at D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:284:15
+    at Function.process_params (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:346:12)
+    at next (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:280:10)
+    at Function.handle (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:175:3)
+    at router (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:47:12)
+    at Layer.handle [as handle_request] (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\layer.js:95:5)
+    at trim_prefix (D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:328:13)
+    at D:\projekbaru\backend\adalahpokoknya\node_modules\express\lib\router\index.js:286:9
+✅ Google Calendar API terinisialisasi.
+HSPK/AHSP importer jalan di http://localhost:4000
