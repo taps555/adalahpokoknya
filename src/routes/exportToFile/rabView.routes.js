@@ -2,6 +2,7 @@
 
 const express = require("express");
 const prisma = require("../../lib/prisma");
+const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
 
@@ -54,9 +55,8 @@ function sumRecursive(group) {
   return { rap, rab };
 }
 
-function renderRabHtml(project, groups) {
-  let grandRap = 0,
-    grandRab = 0;
+function renderRapHtml(project, groups) {
+  let grandRap = 0;
   let rowsHtml = "";
 
   groups.forEach((group, idx) => {
@@ -77,33 +77,32 @@ function renderRabHtml(project, groups) {
           <td class="num">${Number(item.volume)}</td>
           <td class="num">${fmtRp(item.rapUnitPrice)}</td>
           <td class="num">${fmtRp(item.rapTotalPrice)}</td>
-          <td class="num">${fmtRp(item.rabUnitPrice)}</td>
-          <td class="num">${fmtRp(item.rabTotalPrice)}</td>
         </tr>
       `;
     };
 
-    for (const item of group.items) writeItem(item, false);
-    for (const sub of group.children || []) {
-      rowsHtml += `
-        <tr class="subgroup-row">
-          <td>${n++}</td>
-          <td colspan="7">${escapeHtml(sub.name)}</td>
-        </tr>
-      `;
-      for (const item of sub.items) writeItem(item, true);
-    }
+    const writeGroup = (current, depth) => {
+      for (const item of current.items || []) writeItem(item, depth > 0);
+      for (const child of current.children || []) {
+        rowsHtml += `
+          <tr class="subgroup-row">
+            <td>${n++}</td>
+            <td colspan="7">${"&nbsp;&nbsp;".repeat(depth)}${escapeHtml(child.name)}</td>
+          </tr>
+        `;
+        writeGroup(child, depth + 1);
+      }
+    };
 
-    const { rap, rab } = sumRecursive(group);
+    writeGroup(group, 0);
+
+    const { rap } = sumRecursive(group);
     grandRap += rap;
-    grandRab += rab;
 
     rowsHtml += `
       <tr class="subtotal-row">
         <td colspan="5"></td>
         <td class="num">${fmtRp(rap)}</td>
-        <td></td>
-        <td class="num">${fmtRp(rab)}</td>
       </tr>
     `;
   });
@@ -160,21 +159,17 @@ function renderRabHtml(project, groups) {
       <th rowspan="2">Item Pekerjaan</th>
       <th rowspan="2">Sat.</th>
       <th rowspan="2">Vol.</th>
-      <th colspan="2">RAP</th>
-      <th colspan="2">RAB</th>
+      <th colspan="2">RAP Costing</th>
     </tr>
     <tr>
-      <th>Harga Satuan</th><th>Total Harga</th>
       <th>Harga Satuan</th><th>Total Harga</th>
     </tr>
   </thead>
   <tbody>
     ${rowsHtml}
-    <tr class="grand-row">
-      <td colspan="5">GRAND TOTAL</td>
+      <tr class="grand-row">
+      <td colspan="5">GRAND TOTAL RAP</td>
       <td class="num">${fmtRp(grandRap)}</td>
-      <td></td>
-      <td class="num">${fmtRp(grandRab)}</td>
     </tr>
   </tbody>
 </table>
@@ -184,7 +179,7 @@ function renderRabHtml(project, groups) {
   `;
 }
 
-router.get("/projects/:projectId/rab-items/view", async (req, res) => {
+router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({
@@ -192,13 +187,22 @@ router.get("/projects/:projectId/rab-items/view", async (req, res) => {
     });
     if (!project) return res.status(404).send("Project tidak ditemukan.");
 
-    const groups = await prisma.rabGroup.findMany({
-      where: { projectId, parentId: null },
-      include: { items: true, children: { include: { items: true } } },
+    const allGroups = await prisma.rabGroup.findMany({
+      where: { projectId },
+      include: { items: true },
       orderBy: { order: "asc" },
     });
+    const byId = new Map(allGroups.map((group) => [group.id, { ...group, children: [] }]));
+    const groups = [];
+    for (const group of byId.values()) {
+      if (group.parentId && byId.has(group.parentId)) {
+        byId.get(group.parentId).children.push(group);
+      } else {
+        groups.push(group);
+      }
+    }
 
-    const html = renderRabHtml(project, groups);
+    const html = renderRapHtml(project, groups);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
   } catch (err) {

@@ -20,6 +20,25 @@ const { calculateJobPrice } = require("./calculateService");
  * @returns {Promise<null | { jobType, componentRows, rapUnitPrice, overheadPct, rabUnitPrice }>}
  *   null kalau sourceJobTypeId diisi tapi JobType-nya gak ketemu di DB.
  */
+const FINITE_LIMITS = Object.freeze({
+  money: 1e15,
+  overhead: 1000,
+});
+
+function finiteBvPrice(value, field, { min = 0, max = FINITE_LIMITS.money } = {}) {
+  const number = Number(value ?? 0);
+  if (!Number.isFinite(number)) throw new TypeError(`${field} harus berupa angka.`);
+  if (number < min) throw new TypeError(`${field} tidak boleh kurang dari ${min}.`);
+  if (number > max) throw new TypeError(`${field} melebihi batas maksimum ${max}.`);
+  return number;
+}
+
+function normalizeAhspOverhead(value) {
+  return finiteBvPrice(Number(value ?? 0) * 100, "Overhead", {
+    max: FINITE_LIMITS.overhead,
+  });
+}
+
 async function computeAhspPricing({
   sourceJobTypeId,
   customComponents,
@@ -28,9 +47,12 @@ async function computeAhspPricing({
   overheadOverride,
 }) {
   let componentRows = null;
-  let rapUnitPrice = defaultRapUnitPrice;
-  let overheadPct =
-    overheadOverride != null ? overheadOverride : defaultOverheadPct;
+  let rapUnitPrice = finiteBvPrice(defaultRapUnitPrice, "RAP harga satuan");
+  let overheadPct = finiteBvPrice(
+    overheadOverride != null ? overheadOverride : defaultOverheadPct,
+    "Overhead",
+    { max: FINITE_LIMITS.overhead },
+  );
   let jobType = null;
 
   if (sourceJobTypeId) {
@@ -39,44 +61,54 @@ async function computeAhspPricing({
 
     jobType = calc.jobType;
     overheadPct = calc.jobType.overhead
-      ? Number(calc.jobType.overhead)
+      ? normalizeAhspOverhead(calc.jobType.overhead)
       : overheadPct;
 
     componentRows = Object.entries(calc.breakdown).flatMap(([section, items]) =>
-      items.map((item) => ({
-        name: item.name,
-        unit: item.unit,
-        section,
-        coefficient: item.coefficient,
-        unitPrice: item.unitPrice,
-        lineTotal: item.lineTotal,
-      })),
+      items.map((item) => {
+        const coefficient = finiteBvPrice(item.coefficient, "Koefisien");
+        const unitPrice = finiteBvPrice(item.unitPrice, "Harga satuan komponen");
+        const lineTotal = finiteBvPrice(item.lineTotal, "Total komponen");
+        return {
+          name: item.name,
+          unit: item.unit,
+          section,
+          coefficient,
+          unitPrice,
+          lineTotal,
+        };
+      }),
     );
 
-    rapUnitPrice = componentRows.reduce(
-      (sum, comp) => sum + Number(comp.lineTotal),
-      0,
+    rapUnitPrice = finiteBvPrice(
+      componentRows.reduce((sum, comp) => sum + comp.lineTotal, 0),
+      "RAP harga satuan",
     );
   } else if (Array.isArray(customComponents) && customComponents.length > 0) {
     let baseTotal = 0;
     componentRows = customComponents.map((c) => {
-      const lineTotal = Number(c.coefficient || 0) * Number(c.unitPrice || 0);
-      baseTotal += lineTotal;
+      const coefficient = finiteBvPrice(c.coefficient, "Koefisien");
+      const unitPrice = finiteBvPrice(c.unitPrice, "Harga satuan komponen");
+      const lineTotal = finiteBvPrice(coefficient * unitPrice, "Total komponen");
+      baseTotal = finiteBvPrice(baseTotal + lineTotal, "RAP harga satuan");
       return {
         name: c.name,
         unit: c.unit,
         section: c.section,
-        coefficient: c.coefficient,
-        unitPrice: c.unitPrice,
+        coefficient,
+        unitPrice,
         lineTotal,
       };
     });
-    rapUnitPrice = baseTotal;
+    rapUnitPrice = finiteBvPrice(baseTotal, "RAP harga satuan");
   }
 
-  const rabUnitPrice = rapUnitPrice + rapUnitPrice * (overheadPct / 100);
+  const rabUnitPrice = finiteBvPrice(
+    rapUnitPrice + rapUnitPrice * (overheadPct / 100),
+    "RAB harga satuan",
+  );
 
   return { jobType, componentRows, rapUnitPrice, overheadPct, rabUnitPrice };
 }
 
-module.exports = { computeAhspPricing };
+module.exports = { computeAhspPricing, normalizeAhspOverhead };

@@ -1,13 +1,34 @@
 "use strict";
 const express = require("express");
 const prisma = require("../../lib/prisma");
+const { verifyToken } = require("../../middleware/auth");
+const { redactSellingFields } = require("../../services/bvCalculationService");
 const router = express.Router();
+
+const redactSellingResponse = (req, res, next) => {
+  if (req.user?.role === "SUPER_ADMIN") return next();
+  const originalJson = res.json.bind(res);
+  res.json = (body) => originalJson(redactSellingFields(body));
+  next();
+};
+
+const canEditRap = (req) => ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role);
+const protectRapWrite = (req, res, next) => {
+  if (!canEditRap(req)) return res.status(403).json({ error: "Tidak memiliki akses mengubah RAP." });
+  next();
+};
+
+router.use(
+  ["/projects/:projectId/rab-groups", "/rab-groups"],
+  verifyToken,
+);
+router.use((req, res, next) => req.method === "GET" ? redactSellingResponse(req, res, next) : next());
 
 /**
  * POST /projects/:projectId/rab-groups
  * Body: { "name": "PEKERJAAN PERSIAPAN", "parentId": null, "reference": "1.1" }
  */
-router.post("/projects/:projectId/rab-groups", async (req, res) => {
+router.post("/projects/:projectId/rab-groups", protectRapWrite, async (req, res) => {
   try {
     const { projectId } = req.params;
     const { name, parentId, reference } = req.body;
@@ -69,11 +90,16 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
     const { projectId } = req.params;
     const { discipline } = req.query;
 
+    const validDisciplines = ["SIPIL", "INTERIOR"];
+    const itemWhere = discipline && validDisciplines.includes(discipline)
+      ? { discipline }
+      : undefined;
+
     const groups = await prisma.rabGroup.findMany({
       where: { projectId },
       include: {
         items: {
-          where: discipline ? { discipline } : undefined,
+          where: itemWhere,
           orderBy: { order: "asc" },
           include: {
             bvItem: { select: { id: true, parentBvItemId: true } }, // <-- tambah
@@ -100,17 +126,36 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
 });
 
 /** PUT /rab-groups/:id — rename / pindah urutan / pindah parent */
-router.put("/rab-groups/:id", async (req, res) => {
+router.put("/rab-groups/:id", protectRapWrite, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, reference, order, parentId } = req.body;
     const existing = await prisma.rabGroup.findUnique({ where: { id } });
     if (!existing)
       return res.status(404).json({ error: "Group tidak ditemukan." });
-    if (parentId === id) {
-      return res
-        .status(400)
-        .json({ error: "Group tidak boleh jadi parent dirinya sendiri." });
+    if (parentId !== undefined && parentId !== null && parentId !== "") {
+      if (parentId === id) {
+        return res.status(400).json({ error: "Group tidak boleh jadi parent dirinya sendiri." });
+      }
+      const parent = await prisma.rabGroup.findUnique({ where: { id: parentId } });
+      if (!parent || parent.projectId !== existing.projectId) {
+        return res.status(400).json({ error: "Parent group bukan milik project ini." });
+      }
+      const visited = new Set([parent.id]);
+      let cursor = parent;
+      while (cursor?.parentId) {
+        if (cursor.parentId === id) {
+          return res.status(400).json({ error: "Group tidak boleh dipindahkan ke descendant-nya sendiri." });
+        }
+        if (visited.has(cursor.parentId)) {
+          return res.status(400).json({ error: "Rantai parent group tidak valid (cycle terdeteksi)." });
+        }
+        visited.add(cursor.parentId);
+        cursor = await prisma.rabGroup.findUnique({ where: { id: cursor.parentId } });
+        if (!cursor) {
+          return res.status(400).json({ error: "Rantai parent group tidak valid." });
+        }
+      }
     }
     const updated = await prisma.rabGroup.update({
       where: { id },
@@ -130,7 +175,7 @@ router.put("/rab-groups/:id", async (req, res) => {
 
 /** DELETE /rab-groups/:id */
 /** DELETE /rab-groups/:id — hapus group beserta sub-group, RAB item, dan BV item di dalamnya */
-router.delete("/rab-groups/:id", async (req, res) => {
+router.delete("/rab-groups/:id", protectRapWrite, async (req, res) => {
   try {
     const { id } = req.params;
 

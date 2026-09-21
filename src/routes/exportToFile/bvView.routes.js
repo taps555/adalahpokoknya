@@ -2,6 +2,7 @@
 
 const express = require("express");
 const prisma = require("../../lib/prisma");
+const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
@@ -296,7 +297,7 @@ function renderBvHtml(project, groups) {
   `;
 }
 
-router.get("/projects/:projectId/bv-items/view", async (req, res) => {
+router.get("/projects/:projectId/bv-items/view", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({

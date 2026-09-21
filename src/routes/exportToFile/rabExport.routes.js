@@ -389,10 +389,11 @@ const express = require("express");
 const ExcelJS = require("exceljs");
 const prisma = require("../../lib/prisma");
 const { buildRabSheet } = require("../../services/rabExportHelper");
+const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
-router.get("/projects/:projectId/rab-items/export", async (req, res) => {
+router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({

@@ -5,8 +5,53 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const { calculateJobPrice } = require("../../services/calculateService");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { redactSellingFields, validateJobTypeForProject } = require("../../services/bvCalculationService");
+const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
+
+const redactSellingResponse = (req, res, next) => {
+  if (req.user?.role === "SUPER_ADMIN") return next();
+  const originalJson = res.json.bind(res);
+  res.json = (body) => originalJson(redactSellingFields(body));
+  next();
+};
+const protectSelling = (req, res, next) => {
+  const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
+  if (isSellingWrite && req.user?.role !== "SUPER_ADMIN") {
+    return res.status(403).json({ error: "Hanya SUPER_ADMIN yang boleh mengubah RAB Selling." });
+  }
+  next();
+};
+
+const protectRapWrite = (req, res, next) => {
+  if (req.user?.role === "SUPER_ADMIN") {
+    const keys = Object.keys(req.body || {});
+    const onlySellingOverride = keys.length === 1 && keys[0] === "rabUnitPrice";
+    if (!onlySellingOverride) {
+      return res.status(403).json({ error: "SUPER_ADMIN hanya boleh override RAB Satuan." });
+    }
+    const value = Number(req.body.rabUnitPrice);
+    if (!Number.isFinite(value) || value < 0) {
+      return res.status(400).json({ error: "RAB Satuan harus berupa angka valid (>= 0)." });
+    }
+    req.body.rabUnitPrice = value;
+    return next();
+  }
+  if (!["PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
+    return res.status(403).json({ error: "Tidak memiliki akses mengubah RAP." });
+  }
+  next();
+};
 
 const router = express.Router();
+router.use(
+  ["/projects/:projectId/rab-items", "/rab-items"],
+  verifyToken,
+  protectSelling,
+  (req, res, next) => {
+    if (req.method === "GET") return redactSellingResponse(req, res, next);
+    redactSellingResponse(req, res, () => protectRapWrite(req, res, next));
+  },
+);
 
 router.get("/projects/:projectId/rab-items", async (req, res) => {
   try {
@@ -178,11 +223,11 @@ router.delete("/rab-items/:id", async (req, res) => {
 //atas no revisi
 
 /** PUT /rab-items/:id/switch-job — ganti sumber JobType master, tarik rincian AHSP */
-router.put("/rab-items/:id/switch-job", async (req, res) => {
+router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
     const { id } = req.params;
     // ===== [TAMBAHAN 1]: Tangkap customOverhead dari request body =====
-    const { newJobTypeId, customOverhead } = req.body;
+    const { newJobTypeId, customOverhead, ahspDiscipline } = req.body;
 
     if (!newJobTypeId)
       return res
@@ -198,6 +243,20 @@ router.put("/rab-items/:id/switch-job", async (req, res) => {
       return res
         .status(404)
         .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
+
+    const rabItem = await prisma.rabItem.findUnique({
+      where: { id },
+      include: { project: true },
+    });
+    if (!rabItem) return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    const scopeError = validateJobTypeForProject(
+      calc.jobType,
+      rabItem.project,
+      rabItem.discipline || "GENERAL",
+      ahspDiscipline,
+    );
+    if (scopeError) return res.status(400).json({ error: scopeError });
 
     const vol = Number(existing.volume);
 
@@ -233,8 +292,8 @@ router.put("/rab-items/:id/switch-job", async (req, res) => {
       customOverhead !== ""
     ) {
       overhead = Number(customOverhead);
-    } else if (calc.jobType.overhead) {
-      overhead = Number(calc.jobType.overhead);
+    } else if (calc.jobType.overhead != null) {
+      overhead = normalizeAhspOverhead(calc.jobType.overhead);
     } else {
       overhead = Number(existing.overhead || 0);
     }
@@ -303,7 +362,7 @@ router.delete("/rab-items/:id", async (req, res) => {
 router.post(
   "/rab-items/bulk-delete",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  authorizeRoles("PROJECT_MANAGER", "PERENCANA"),
   async (req, res) => {
     try {
       const { ids } = req.body;
@@ -425,9 +484,9 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   }
 });
 
-router.put("/rab-items/bulk-switch-job", async (req, res) => {
+router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
-    const { ids, newJobTypeId, customOverhead } = req.body;
+    const { ids, newJobTypeId, customOverhead, ahspDiscipline } = req.body;
 
     if (!Array.isArray(ids) || ids.length === 0)
       return res
@@ -445,7 +504,10 @@ router.put("/rab-items/bulk-switch-job", async (req, res) => {
         .status(404)
         .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
 
-    const items = await prisma.rabItem.findMany({ where: { id: { in: ids } } });
+    const items = await prisma.rabItem.findMany({
+      where: { id: { in: ids } },
+      include: { project: true },
+    });
 
     const results = [];
     const skipped = [];
@@ -456,6 +518,17 @@ router.put("/rab-items/bulk-switch-job", async (req, res) => {
       });
       if (childCount > 0) {
         skipped.push({ id: existing.id, reason: "Item Induk, dilewati." });
+        continue;
+      }
+
+      const scopeError = validateJobTypeForProject(
+        calc.jobType,
+        existing.project,
+        existing.discipline || "GENERAL",
+        ahspDiscipline,
+      );
+      if (scopeError) {
+        skipped.push({ id: existing.id, reason: scopeError });
         continue;
       }
 
@@ -485,8 +558,8 @@ router.put("/rab-items/bulk-switch-job", async (req, res) => {
         customOverhead !== ""
       ) {
         overhead = Number(customOverhead);
-      } else if (calc.jobType.overhead) {
-        overhead = Number(calc.jobType.overhead);
+      } else if (calc.jobType.overhead != null) {
+        overhead = normalizeAhspOverhead(calc.jobType.overhead);
       } else {
         overhead = Number(existing.overhead || 0);
       }
@@ -628,7 +701,11 @@ const formatDate = (date) => {
   return `${day}/${month}/${year}`;
 };
 
-router.post("/projects/:projectId/sync-finance", async (req, res) => {
+router.post(
+  "/projects/:projectId/sync-finance",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN"),
+  async (req, res) => {
   try {
     const { projectId } = req.params;
 
@@ -669,15 +746,31 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
       const jobVolume = Number(rabItem.volume);
 
       // --- TIME SCHEDULE CALCULATION ---
-      const startTaskDate = rabItem.timeSchedule?.startDate || null;
-      const endTaskDate = rabItem.timeSchedule?.endDate || null;
+      const startW = rabItem.timeSchedule?.startWeek || null;
+      const endW = rabItem.timeSchedule?.endWeek || null;
       let scheduleStr = null;
 
-      if (startTaskDate && endTaskDate) {
-        scheduleStr = `${formatDate(new Date(startTaskDate))} - ${formatDate(new Date(endTaskDate))}`;
+      if (startW !== null && endW !== null) {
+        if (project.startDate) {
+          // Jika proyek punya startDate, konversi Week menjadi Tanggal
+          const projectStart = new Date(project.startDate);
+
+          // Mulai minggu ke-N: startDate + ((startWeek - 1) * 7 hari)
+          const startTaskDate = addDays(projectStart, (startW - 1) * 7);
+
+          // Akhir minggu ke-N: startDate + (endWeek * 7 hari) - 1 hari
+          const endTaskDate = addDays(projectStart, endW * 7 - 1);
+
+          scheduleStr = `${formatDate(startTaskDate)} - ${formatDate(endTaskDate)}`;
+        } else {
+          // Fallback jika project.startDate belum diisi (masih null)
+          scheduleStr =
+            startW === endW ? `W${startW}` : `W${startW} - W${endW}`;
+        }
       }
 
       rabItem.components.forEach((comp) => {
+        if (comp.section === "UPAH") return;
 
         const itemVolume = Number(
           (Number(comp.coefficient) * jobVolume).toFixed(4),
@@ -689,7 +782,6 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
           itemName: comp.name,
           unit: comp.unit,
           discipline: jobDiscipline,
-          category: comp.section,
           groupName,
           jobName,
           volumePekerjaan: jobVolume,
@@ -710,7 +802,6 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
           itemName: rabItem.name,
           unit: rabItem.paymentUnit || "-",
           discipline: jobDiscipline,
-          category: "MATERIAL", // Fallback
           groupName,
           jobName,
           volumePekerjaan: volPolos,
@@ -755,7 +846,8 @@ router.post("/projects/:projectId/sync-finance", async (req, res) => {
     console.error("Sync Finance Error:", error);
     res.status(500).json({ error: "Gagal mengirim data ke Finance." });
   }
-});
+  },
+);
 
 /** PUT /material-request-items/finance-update-bulk
  * Finance update banyak item sekaligus (orderedVolume, catatanFinance)

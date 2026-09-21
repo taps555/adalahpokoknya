@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 "use strict";
 
 require("dotenv").config();
@@ -100,3 +101,103 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`HSPK/AHSP importer jalan di http://localhost:${PORT}`);
 });
+=======
+"use strict";
+
+require("dotenv").config();
+const express = require("express");
+const path = require("path");
+const cors = require("cors");
+
+const uploadRoutes = require("./routes/upload.routes");
+const jobsRoutes = require("./routes/jobs.routes");
+const clientsRouter = require("./routes/clients");
+const hspkRouter = require("./routes/hspk");
+const projectsRouter = require("./routes/projects");
+
+const rabRoutes = require("./routes/crudGrub/rab.routes");
+const rabGrub = require("./routes/crudGrub/rabGrub.routes");
+
+const exportExcel = require("./routes/exportToFile/rabExport.routes");
+
+const bv = require("./routes/crudGrub/bv.routes");
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Static serve untuk frontend build
+// src/index.js -> backend/src -> backend -> Project -> frontend/dist
+const FRONTEND_DIST = path.join(__dirname, "..", "..", "frontend", "dist");
+app.use(express.static(FRONTEND_DIST));
+
+app.use(express.static("public"));
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+app.use("/api", uploadRoutes);
+app.use("/api", jobsRoutes);
+app.use("/api/clients", clientsRouter);
+app.use("/api/hspk", hspkRouter);
+app.use("/api/projects", projectsRouter);
+
+//pembuatan rab:
+app.use("/api", rabRoutes);
+app.use("/api", rabGrub);
+
+//export to file excel
+app.use("/api", exportExcel);
+
+//bv
+app.use("/api", bv);
+
+app.use("/api", require("./routes/exportToFile/bvExport.routes"));
+app.use("/api", require("./routes/exportToFile/fullExport.routes"));
+
+app.use("/api", require("./routes/exportToFile/rabView.routes"));
+app.use("/api", require("./routes/exportToFile/bvView.routes"));
+app.use("/api", require("./routes/exportToFile/tsView.routes"));
+
+//shedule
+app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));
+
+//ts
+app.use("/api", require("./routes/exportToFile/timeScheduleExport.routes"));
+
+// material request pdf export
+app.use("/api", require("./routes/exportToFile/materialRequestExport.routes"));
+
+app.use("/api", require("./routes/crudGrub/joinOpname.routes"));
+
+app.use("/api", require("./routes/crudGrub/survey.routes"));
+
+app.use("/api", require("./routes/crudGrub/complain.routes"));
+app.use("/api", require("./routes/crudGrub/bast.routes"));
+app.use("/api", require("./routes/crudGrub/lapangan.routes"));
+app.use("/api", require("./routes/crudGrub/rab.routes"));
+app.use("/api", require("./routes/crudGrub/supplier.route"));
+app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
+app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
+app.use("/api", require("./routes/crudGrub/kanban.routes"));
+app.use("/api", require("./routes/crudGrub/purchasing.routes"));
+
+// SPA fallback: kirim index.html untuk route non-API
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(FRONTEND_DIST, 'index.html'), (err) => {
+    if (err) next(err);
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (err) {
+    console.error(err);
+    return res.status(400).json({ error: err.message || "Terjadi kesalahan." });
+  }
+  next();
+});
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  console.log(`HSPK/AHSP importer jalan di http://localhost:${PORT}`);
+});
+>>>>>>> 6606e6d (fix rab bv)

@@ -156,7 +156,7 @@ async function buildBvSheet(ws, projectId, project, discipline) {
   };
 
   for (let row = 2; row <= 9; row++) {
-    ws.getCell(`S ${row}`).border = {
+    ws.getCell(`S${row}`).border = {
       ...ws.getCell(`S${row}`).border,
       left: { style: "medium" },
     };

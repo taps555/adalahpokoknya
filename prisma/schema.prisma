@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 generator client {
   provider = "prisma-client-js"
 }
@@ -1171,3 +1172,1092 @@ model BukuBesarTransaksi {
   @@index([pengajuanId])
   @@index([pembayaranId])
 }
+=======
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ResourceType {
+  BAHAN // material
+  UPAH // tenaga kerja / labor
+  ALAT // peralatan / equipment
+}
+
+enum UploadStatus {
+  PROCESSING
+  SUCCESS
+  PARTIAL // berhasil sebagian, ada baris yang gagal di-parse (lihat UploadIssue)
+  FAILED
+}
+
+enum Discipline {
+  SIPIL
+  INTERIOR
+}
+
+enum FileKind {
+  PDF
+  XLSX
+  CSV
+}
+
+enum Role {
+  SUPER_ADMIN
+  PERENCANA
+  PELAKSANA
+  FINANCE
+  PURCHASING
+  PROJECT_MANAGER
+}
+
+model User {
+  id                String                @id @default(cuid())
+  username          String                @unique // atau email
+  password          String // password yang sudah di-hash
+  name              String // nama lengkap pegawai
+  role              Role                  @default(PERENCANA)
+  approvedPOs       PurchaseOrder[]       @relation("ApprovedByUser")
+  verifiedPOs       PurchaseOrder[]       @relation("VerifiedByUser")
+  rejectedPOs       PurchaseOrder[]       @relation("RejectedByUser")
+  approvedPengajuan PengajuanPembayaran[] @relation("ApprovedPengajuanByUser")
+  verifiedPengajuan PengajuanPembayaran[] @relation("VerifiedPengajuanByUser")
+  requestedHabisPakai PermintaanHabisPakai[] @relation("RequestedHabisPakai")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Daftar harga satuan dasar: bahan, upah (tenaga kerja), dan alat.
+/// Ini adalah bagian "HARGA SATUAN BAHAN, UPAH DAN ALAT" di dokumen HSPK.
+model PriceItem {
+  id         String       @id @default(cuid())
+  type       ResourceType
+  name       String
+  unit       String
+  price      Decimal      @db.Decimal(18, 4)
+  discipline Discipline?
+  grade      String? // "A" | "B" | "C"
+  period     Int // tahun berlaku, misal 2026
+  source     String? // nama file asal
+  batchId    String?
+  batch      UploadBatch? @relation(fields: [batchId], references: [id])
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  usages JobComponent[]
+
+  // satu nama+satuan+tipe hanya boleh punya 1 harga per periode
+  @@unique([type, name, unit, period, discipline, grade], name: "uniq_price_item")
+  @@index([period])
+  @@index([name])
+}
+
+/// Satu jenis pekerjaan AHSP (mis. "Pemasangan 1 m2 Dinding Bata Merah").
+/// Koefisien tenaga kerja/bahan/alat-nya ada di JobComponent.
+model JobType {
+  id          String      @id @default(cuid())
+  name        String // "Jenis Pekerjaan"
+  paymentUnit String // "Satuan Pembayaran", misal m2, m3, kg, buah
+  category    String? // "A. PEKERJAAN PERSIAPAN", dst
+  reference   String? // referensi SNI / Permen PUPR
+  period      Int
+  source      String?
+  batchId     String?
+  discipline  Discipline?
+
+  grade    String?
+  batch    UploadBatch? @relation(fields: [batchId], references: [id])
+  overhead Float? // Menambahkan kolom overhead, boleh kosong (null)
+
+  bvItems BvItem[]
+
+  needsReview Boolean  @default(false) // true kalau ada baris yang gagal di-parse saat import
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  components JobComponent[]
+
+  @@unique([name, paymentUnit, period, discipline, grade], name: "uniq_job_type")
+  @@index([period])
+  @@index([category])
+}
+
+/// Baris koefisien pada AHSP: berapa banyak PriceItem tertentu dibutuhkan
+/// untuk 1 satuan pekerjaan. Contoh: Semen PC 50 Kg, koefisien 6.18 zak.
+model JobComponent {
+  id          String       @id @default(cuid())
+  jobTypeId   String
+  jobType     JobType      @relation(fields: [jobTypeId], references: [id], onDelete: Cascade)
+  priceItemId String
+  priceItem   PriceItem    @relation(fields: [priceItemId], references: [id])
+  section     ResourceType // A = UPAH, B = BAHAN, C = ALAT
+  coefficient Decimal      @db.Decimal(14, 6)
+
+  @@index([jobTypeId])
+  @@index([priceItemId])
+}
+
+/// Riwayat setiap file yang di-upload (PDF/Excel) beserta ringkasan hasil
+/// import-nya. Berguna untuk audit trail & untuk melihat baris yang gagal.
+model UploadBatch {
+  id             String       @id @default(cuid())
+  filename       String
+  fileKind       FileKind
+  period         Int
+  status         UploadStatus @default(PROCESSING)
+  priceItemCount Int          @default(0)
+  jobTypeCount   Int          @default(0)
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+  finishedAt     DateTime?
+
+  priceItems PriceItem[]
+  jobTypes   JobType[]
+  issues     UploadIssue[]
+}
+
+/// Baris mentah yang gagal di-parse otomatis (harga #REF!, format aneh, dll)
+/// supaya bisa direview & dikoreksi manual lewat UI/endpoint, bukan hilang begitu saja.
+model UploadIssue {
+  id        String      @id @default(cuid())
+  batchId   String
+  batch     UploadBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  context   String? // nama job / section saat error terjadi, kalau ada
+  rawLine   String // teks baris asli
+  reason    String // kenapa gagal di-parse
+  resolved  Boolean     @default(false)
+  createdAt DateTime    @default(now())
+}
+
+// =========================================================
+// Tambahan: Client & Project
+// Bagian "Input Data Dasar" + "Pemilihan Data HSPK/AHSP"
+// =========================================================
+
+/// Client/pemilik proyek. Satu client bisa punya banyak proyek.
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects Project[]
+
+  @@index([name])
+}
+
+model Project {
+  id            String     @id @default(cuid())
+  name          String
+  location      String
+  hspkPeriod    Int
+  discipline    Discipline? // Dibuat opsional; proyek bisa bersifat campuran/general
+  grade         String?    // Grade lama (backward compatibility / general)
+  interiorGrade String?    // Grade HSPK untuk pekerjaan Interior
+  sipilGrade    String?    // Grade HSPK untuk pekerjaan Sipil
+  startDate     DateTime? // <-- TAMBAH: tanggal mulai proyek, buat hitung tanggal per minggu TS
+  clientId      String
+  client        Client     @relation(fields: [clientId], references: [id])
+  rabItems      RabItem[]
+  bvItems       BvItem[]
+
+  rabStatus        RabStatus         @default(DRAFT)
+  materialRequests MaterialRequest[]
+
+  rabGroups        RabGroup[]
+  surveyReports    SurveyReport[]
+  complaintReports ComplaintReport[]
+
+  kanbanBoard KanbanBoard?
+
+  // 👇 PAHAT BARIS INI DI SINI 👇
+  basts Bast[]
+
+  pairedProjectId String?  @unique // <-- TAMBAH
+  pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id]) // <-- TAMBAH
+  pairedWith      Project? @relation("ProjectPair") // <-- TAMBAH
+
+  // Relasi ke Purchase Order (Fase 2)
+  purchaseOrders PurchaseOrder[]
+  permintaanHabisPakai PermintaanHabisPakai[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([hspkPeriod])
+}
+
+model RabItem {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name            String
+  paymentUnit     String
+  category        String?
+  reference       String?
+  overheadPercent Decimal       @default(0) @db.Decimal(5, 2)
+  discipline      Discipline?
+  grade           String?
+  timeSchedule    TimeSchedule? // <-- TAMBAH
+
+  volume Decimal @db.Decimal(14, 4)
+
+  rapUnitPrice  Decimal @default(0) @db.Decimal(14, 2)
+  rapTotalPrice Decimal @db.Decimal(18, 4)
+
+  rabUnitPrice  Decimal @default(0) @db.Decimal(14, 2)
+  rabTotalPrice Decimal @db.Decimal(18, 4)
+
+  sourceJobTypeId String?
+  groupId         String?
+  group           RabGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  isByOwner Boolean @default(false)
+  isStip    Boolean @default(false) // <-- TAMBAHKAN BARIS INI
+
+  isHeaderOnly Boolean @default(false)
+
+  order Int @default(0)
+
+  bvItem BvItem?
+
+  components    RabItemComponent[]
+  dailyProgress DailyProgress[]
+
+  // 👇 TAMBAHKAN 3 BARIS INI UNTUK RELASI INDUK-ANAK DI RAB ITEM 👇
+  parentId String?
+  parent   RabItem?  @relation("ItemChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children RabItem[] @relation("ItemChildren")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([parentId]) // <-- Tambahkan index ini juga
+}
+
+model RabItemComponent {
+  id        String  @id @default(cuid())
+  rabItemId String
+  rabItem   RabItem @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  name        String
+  unit        String
+  section     ResourceType
+  coefficient Decimal      @db.Decimal(14, 6)
+  unitPrice   Decimal      @db.Decimal(18, 4)
+  lineTotal   Decimal      @db.Decimal(18, 4)
+}
+
+model RabGroup {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name      String // "PERSIAPAN LAPANGAN" / "PEKERJAAN PERSIAPAN"
+  reference String? // "1" / "1.1" dst, opsional buat penomoran otomatis
+  order     Int     @default(0) // urutan tampil
+
+  parentId String?
+  parent   RabGroup?  @relation("GroupChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children RabGroup[] @relation("GroupChildren")
+
+  items RabItem[]
+
+  bvItems             BvItem[] // relasi biasa (groupId)
+  headerLinkedBvItems BvItem[] @relation("HeaderLinkedGroup")
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([parentId])
+}
+
+model DisciplineGrade {
+  id         String     @id @default(cuid())
+  discipline Discipline
+  grade      String
+  order      Int        @default(0)
+
+  @@unique([discipline, grade])
+}
+
+model BvItem {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  groupId   String?
+  group     RabGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  parentBvItemId String?
+  parentBvItem   BvItem?  @relation("BvItemChildren", fields: [parentBvItemId], references: [id], onDelete: Cascade)
+  children       BvItem[] @relation("BvItemChildren")
+
+  isHeaderOnly Boolean @default(false) // true = cuma label, gak ada volume/breakdown
+
+  sourceJobTypeId String?
+  sourceJobType   JobType? @relation(fields: [sourceJobTypeId], references: [id])
+
+  name        String?
+  keterangan  String?
+  paymentUnit String?
+
+  // Label disiplin manual untuk BV item (INTERIOR/SIPIL/GENERAL). Kalau null,
+  // dianggap GENERAL.
+  disciplineLabel String? @default("GENERAL")
+
+  totalVolume Decimal @db.Decimal(14, 4)
+
+  ecommerceLink     String?
+  nameEcommerceLink String?
+  linkedRabItemId   String?  @unique
+  linkedRabItem     RabItem? @relation(fields: [linkedRabItemId], references: [id], onDelete: SetNull)
+
+  linkedGroupId String? // <-- TAMBAH: khusus header, nunjuk sub-group yg dibuat otomatis
+  linkedGroup   RabGroup? @relation("HeaderLinkedGroup", fields: [linkedGroupId], references: [id], onDelete: SetNull)
+
+  breakdowns BvBreakdown[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([groupId])
+  @@index([parentBvItemId])
+}
+
+model BvBreakdown {
+  id       String @id @default(cuid())
+  bvItemId String
+  bvItem   BvItem @relation(fields: [bvItemId], references: [id], onDelete: Cascade)
+
+  keterangan String?
+
+  panjang    Decimal? @db.Decimal(10, 4)
+  isPChecked Boolean  @default(false)
+
+  lebar      Decimal? @db.Decimal(10, 4)
+  isLChecked Boolean  @default(false)
+
+  tinggi     Decimal? @db.Decimal(10, 4)
+  isTChecked Boolean  @default(false)
+
+  luas          Decimal? @db.Decimal(10, 4)
+  isLuasChecked Boolean  @default(false)
+
+  keliling     Decimal? @db.Decimal(10, 4)
+  isKelChecked Boolean  @default(false)
+
+  diameter Decimal? @db.Decimal(10, 4)
+  // Diameter biasanya hanya untuk pelengkap deskripsi, jadi tidak perlu checkbox
+
+  berat          Decimal? @db.Decimal(10, 4)
+  isBeratChecked Boolean  @default(false)
+
+  jumlahSisi Decimal? @db.Decimal(10, 4)
+  jumlahBh   Decimal? @db.Decimal(10, 4)
+  waste      Decimal? @default(0) @db.Decimal(6, 4)
+
+  // Kolom 'modeHitung' DIHAPUS karena digantikan logika Checkbox di atas
+
+  subTotal Decimal @db.Decimal(14, 4)
+
+  @@index([bvItemId])
+}
+
+model TimeSchedule {
+  id        String  @id @default(cuid())
+  rabItemId String  @unique
+  rabItem   RabItem @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  startDate DateTime
+  endDate   DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model DailyProgress {
+  id        String  @id @default(cuid())
+  rabItemId String
+  rabItem   RabItem @relation(fields: [rabItemId], references: [id], onDelete: Cascade)
+
+  date            DateTime // tanggal (jam diabaikan)
+  progressPercent Decimal  @db.Decimal(6, 2) // input dari lapangan, misal 25.00
+
+  photoUrls String[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([rabItemId, date]) // 1 item cuma boleh 1 catatan per tanggal
+  @@index([rabItemId])
+}
+
+// 1. Tabel Header Survey (Satu proyek bisa disurvey beberapa kali)
+model SurveyReport {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id])
+
+  surveyDate   DateTime // Contoh: 28 Mei 2025
+  surveyorName String // Contoh: "Itho Arch Dives"
+  notes        String? // Catatan umum / informasi tambahan
+
+  areas SurveyArea[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// 2. Tabel Area/Ruangan yang disurvey
+model SurveyArea {
+  id             String       @id @default(cuid())
+  surveyReportId String
+  surveyReport   SurveyReport @relation(fields: [surveyReportId], references: [id], onDelete: Cascade)
+
+  areaName          String // Contoh: "R.Tamu", "R.Tidur 01"
+  analisa           String? @db.Text // Kondisi existing
+  penanganan        String? @db.Text // Solusi yang ditawarkan
+  informasiTambahan String? @db.Text // Info tambahan soal warna, dll
+
+  photoUrl     String? // DEPRECATED - dibiarin biar data lama gak rusak, area baru pake relasi "photos" di bawah
+  photoCaption String? // Caption di bawah grid foto, contoh: "KONDISI KAIN GORDAIN DAN RELL R.TAMU"
+
+  photos     SurveyPhoto[]
+  dimensions SurveyDimension[]
+}
+
+// 2b. Tabel Foto per Area (1 area bisa punya beberapa foto, ditampilkan grid di PDF)
+model SurveyPhoto {
+  id           String     @id @default(cuid())
+  surveyAreaId String
+  surveyArea   SurveyArea @relation(fields: [surveyAreaId], references: [id], onDelete: Cascade)
+
+  url   String // Path file, contoh: "/uploads/surveys/survey-xxx.jpg"
+  order Int    @default(0) // Urutan tampil di grid (0,1,2,3)
+
+  createdAt DateTime @default(now())
+}
+
+// 3. Tabel Detail Dimensi (Karena 1 area bisa ada banyak jendela/ukuran)
+model SurveyDimension {
+  id           String     @id @default(cuid())
+  surveyAreaId String
+  surveyArea   SurveyArea @relation(fields: [surveyAreaId], references: [id], onDelete: Cascade)
+
+  panjang Decimal? @db.Decimal(10, 4)
+  lebar   Decimal? @db.Decimal(10, 4) // Contoh: 4.1
+  tinggi  Decimal? @db.Decimal(10, 4) // Contoh: 3.0
+  luasan  Decimal? @db.Decimal(10, 4) // Contoh: 12.3
+
+  keterangan String? // Opsional (misal: "Jendela Kiri", "Jendela Kanan")
+}
+
+model ComplaintReport {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  categories ComplaintCategory[]
+}
+
+model ComplaintCategory {
+  id                String          @id @default(cuid())
+  complaintReportId String
+  complaintReport   ComplaintReport @relation(fields: [complaintReportId], references: [id], onDelete: Cascade)
+  name              String
+  order             Int
+
+  items ComplaintItem[]
+}
+
+model ComplaintItem {
+  id         String            @id @default(cuid())
+  categoryId String
+  category   ComplaintCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  order      Int
+  defectList String
+
+  // Field untuk nanti (sudah aman karena opsional/default)
+  repairDate         DateTime?
+  status             Boolean   @default(false)
+  repairDefectReport String?
+
+  photos ComplaintPhoto[]
+}
+
+model ComplaintPhoto {
+  id     String        @id @default(cuid())
+  itemId String
+  item   ComplaintItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  url    String
+  order  Int
+
+  // TAMBAHAN BARU: Penanda foto
+  type String @default("BEFORE") // Isinya bisa "BEFORE" atau "AFTER"
+}
+
+// Tambahkan di dalam model Project
+// basts Bast[]
+
+model Bast {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  bastNumber   String // NO. BAST
+  spkNumber    String // NO. SPK
+  handoverDate DateTime // Tanggal BAST
+
+  pihakPertamaName     String // Nama Pemberi Tugas (Bisa dari Client atau custom)
+  pihakPertamaPosition String @default("Pemberi Tugas")
+
+  pihakKeduaName     String // Nama Kontraktor
+  pihakKeduaPosition String @default("Penerima Pekerjaan")
+
+  statusText String @default("SELESAI DIKERJAKAN 100% dan DITERIMA DENGAN BAIK")
+
+  photos BastPhoto[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+model BastPhoto {
+  id     String @id @default(cuid())
+  bastId String
+  bast   Bast   @relation(fields: [bastId], references: [id], onDelete: Cascade)
+
+  url   String
+  order Int    @default(0)
+
+  @@index([bastId])
+}
+
+//FINANCE
+
+enum RabStatus {
+  DRAFT // Masih bisa diotak-atik oleh Estimator
+  LOCKED // Sudah fix dan dikirim ke Finance (Tidak bisa diedit sembarangan)
+  REVISION // Sedang dalam revisi (jika ada addendum/perubahan)
+}
+
+enum ProcurementStatus {
+  PENDING // Menunggu diproses Finance
+  PARTIAL // Sebagian barang sudah di-PO / dibeli
+  COMPLETED // Semua kebutuhan sudah dibeli
+}
+
+enum POStatus {
+  BELUM_APPROVE // baru dibuat purchasing, belum dilihat finance
+  MENUNGGU_ATASAN // finance sudah ACC, nunggu PROJECT_MANAGER
+  APPROVED // dua tingkat lolos
+  REJECTED
+}
+
+enum KategoriPO {
+  MATERIAL
+  HABIS_PAKAI
+}
+
+/// Permintaan pembelian habis pakai dari Item Tracking (lapangan).
+/// Dipakai saat PO induk sudah COMPLETED tapi lapangan masih butuh barang.
+model PermintaanHabisPakai {
+  id       String  @id @default(cuid())
+  nomor    String? @unique
+  seq      Int     @default(autoincrement())
+
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // PO induk yang sudah selesai tapi masih butuh tambahan
+  poId String?
+  po   PurchaseOrder? @relation(fields: [poId], references: [id])
+
+  mrItemId String?
+  mrItem   MaterialRequestItem? @relation(fields: [mrItemId], references: [id])
+
+  itemName  String
+  unit      String   @default("-")
+  qty       Float    @default(0)
+  alasan    String?  @db.Text
+  catatan   String?  @db.Text
+
+  // PENDING -> sudah dibuatkan PO (LINKED) / ditolak
+  status String @default("PENDING")
+
+  // PO habis pakai yang lahir dari permintaan ini
+  poHabisPakaiId String?
+  poHabisPakai   PurchaseOrder? @relation("POHabisPakai", fields: [poHabisPakaiId], references: [id])
+
+  requestedById String?
+  requestedBy   User?   @relation("RequestedHabisPakai", fields: [requestedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+}
+
+enum TaxGroup {
+  PPN
+  NON_PPN
+}
+
+enum SupplierType {
+  BAHAN
+  JASA
+}
+
+enum SupplierStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// =========================================================
+// FINANCE & PROCUREMENT (KEBUTUHAN MATERIAL & ALAT DARI RAB)
+// =========================================================
+
+/// Tabel Header ketika RAB dikirim ke Finance (Bill of Materials)
+model MaterialRequest {
+  id        String                @id @default(cuid())
+  projectId String
+  project   Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items     MaterialRequestItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model MaterialRequestItem {
+  id       String          @id @default(cuid())
+  headerId String
+  header   MaterialRequest @relation(fields: [headerId], references: [id], onDelete: Cascade)
+
+  // -- DATA DASAR --
+  itemName   String
+  unit       String
+  discipline String? // SIPIL atau INTERIOR
+
+  // -- ANGKA & HARGA (Batas Budget dari Perencana) --
+  estimatedVolume Float
+  pricePerUnit    Float
+  totalPrice      Float
+  volumePekerjaan Float?
+  status          ProcurementStatus @default(PENDING)
+
+  // -- JADWAL & ALOKASI (Otomatis dari Sistem) --
+  scheduleRange String? // Contoh: "W1 - W4"
+  groupName     String?
+  jobName       String?
+
+  // -- KOLOM CATATAN (Berdasarkan Role) --
+  catatanPerencana String? @db.Text
+
+  // -- KOLOM FINANCE --
+  isCompleted    Boolean             @default(false)
+  orderedVolume  Float               @default(0)
+  catatanFinance String?             @db.Text
+  poItems        PurchaseOrderItem[]
+  permintaanHabisPakai PermintaanHabisPakai[]
+
+  // (Kolom lapangan sudah berhasil dihilangkan dari sini)
+}
+
+// ==========================================
+// FASE 2: MODUL PURCHASE ORDER (PO)
+// ==========================================
+
+// 1. MASTER DATA SUPPLIER (Untuk field "Nama Supplier", "Attn", "No. Telepon")
+model Supplier {
+  id                  String                @id @default(uuid())
+  seq                 Int                   @default(autoincrement())
+  code                String?               @unique
+  name                String
+  type                SupplierType?
+  address             String?
+  address2            String?
+  phone               String?
+  fax                 String?
+  taxGroup            TaxGroup?
+  npwp                String?
+  email               String?
+  contactName         String?
+  creditLimit         Decimal?              @default(0)
+  bankAccount         String?
+  status              SupplierStatus?       @default(ACTIVE)
+  orders              PurchaseOrder[]
+  items               SupplierItem[]
+  returPembelian      ReturPembelian[]
+  pengajuanPembayaran PengajuanPembayaran[] @relation("PengajuanSupplier")
+  pembayaranSupplier  PembayaranSupplier[]  @relation("PembayaranSupplier")
+  invoicePenagihan    InvoicePenagihan[]    @relation("InvoiceSupplier")
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+}
+
+model SupplierPriceHistory {
+  id             String       @id @default(uuid())
+  supplierItemId String
+  supplierItem   SupplierItem @relation(fields: [supplierItemId], references: [id])
+  price          Decimal
+  promoPrice     Decimal?
+  effectiveDate  DateTime     @default(now()) // ganti periodMonth+periodYear
+  createdAt      DateTime     @default(now()) // kapan row ini diinput ke sistem
+
+  @@index([supplierItemId, effectiveDate])
+}
+
+model SupplierItem {
+  id         String   @id @default(uuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  itemName          String // nama dasar, cth: "Amplas Klassik"
+  variantName       String? // cth: "80", "100", "120" — null kalau item gak punya varian
+  unit              String
+  currentPrice      Decimal
+  currentPromoPrice Decimal?
+
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  mapping      AhspItemMapping[]
+  priceHistory SupplierPriceHistory[]
+}
+
+model AhspItemMapping {
+  id             String       @id @default(uuid())
+  itemName       String       @unique // nama generik, dicocokkan ke MaterialRequestItem.itemName
+  supplierItemId String
+  supplierItem   SupplierItem @relation(fields: [supplierItemId], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model PurchaseOrder {
+  id       String  @id @default(uuid())
+  poNumber String? @unique
+  seq      Int     @default(autoincrement())
+
+  supplierId   String
+  supplier     Supplier  @relation(fields: [supplierId], references: [id])
+  attn         String?
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id])
+  kategori     String?
+  tanggal      DateTime
+  deliveryDate DateTime?
+  perusahaan   String?   @default("PT DIVES JAYA PERKASA")
+  status       POStatus  @default(BELUM_APPROVE)
+
+  approvedById String?
+  approvedBy   User?     @relation("ApprovedByUser", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+
+  // Tingkat 1: verifikasi Finance (bahan & harga sudah benar)
+  verifiedById String?
+  verifiedBy   User?     @relation("VerifiedByUser", fields: [verifiedById], references: [id])
+  verifiedAt   DateTime?
+  catatanFinance String? @db.Text
+
+  // Sumber PO: turunan RAB atau permintaan habis pakai dari Item Tracking
+  kategoriPO  KategoriPO @default(MATERIAL)
+  sumberPo    String? // id PO induk kalau ini PO habis pakai
+  alasanHabisPakai String? @db.Text
+
+  rejectedById String?
+  rejectedBy   User?     @relation("RejectedByUser", fields: [rejectedById], references: [id])
+  rejectedAt   DateTime?
+  rejectReason String?
+
+  subTotal       Float @default(0)
+  globalDiscount Float @default(0)
+  taxNominal     Float @default(0)
+  grandTotal     Float @default(0)
+
+  penerimaBarang  String?
+  caraPembayaran  String?
+  jadwalPenagihan String?
+  noTelepon       String?
+  kodePoReferensi String?
+  keterangan      String?
+
+  items PurchaseOrderItem[]
+
+  permintaanHabisPakai  PermintaanHabisPakai[] @relation("POHabisPakai")
+  permintaanHabisPakaiInduk PermintaanHabisPakai[]
+
+  returPembelian      ReturPembelian[]
+  pengajuanPembayaran PengajuanPembayaran[]
+  pembayaranSupplier  PembayaranSupplier[]  @relation("PembayaranPO")
+  invoicePenagihan    InvoicePenagihan[]    @relation("InvoicePO")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PurchaseOrderItem {
+  id                String               @id @default(uuid())
+  poId              String
+  purchaseOrder     PurchaseOrder        @relation(fields: [poId], references: [id], onDelete: Cascade)
+  materialRequestId String?
+  materialRequest   MaterialRequestItem? @relation(fields: [materialRequestId], references: [id])
+
+  code         String?
+  description  String
+  description2 String?
+  qty          Float
+  unit         String
+  unitPrice    Float
+  disc1Percent Float   @default(0)
+  disc2Nominal Float   @default(0)
+  total        Float
+
+  // ✅ KOLOM LAPANGAN PINDAH KE SINI:
+  tanggalOnsite  DateTime?
+  updateLapangan String?   @db.Text
+  receivedVolume Float     @default(0)
+  catatanRusak   String?   @db.Text
+
+  deliveryReceipts DeliveryReceipt[]
+
+  returItems ReturPembelianItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// TABEL BARU: RIWAYAT SURAT JALAN (LEVEL 2)
+// ==========================================
+model DeliveryReceipt {
+  id String @id @default(cuid())
+
+  // Relasi ke PurchaseOrderItem (Barang dari PO mana yang dikirim?)
+  poItemId String
+  poItem   PurchaseOrderItem @relation(fields: [poItemId], references: [id], onDelete: Cascade)
+
+  tanggal DateTime @default(now())
+  nomorSJ String
+
+  // Volume yang datang HANYA PADA pengiriman INI saja
+  volumeDiterima Float
+
+  // Catatan khusus untuk pengiriman ini (misal: "2 pecah")
+  catatan String? @db.Text
+
+  // Simpan foto URL (Bisa simpan JSON array jika fotonya banyak)
+  fotoUrls String? @db.Text
+
+  // Fitur Gembok (Menambal Celah #3: Edit Bisu-Bisu)
+  isVerified Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// =========================================================
+// MODUL PEMBELIAN: RETUR, PENGAJUAN BAYAR, PEMBAYARAN, INVOICE
+// =========================================================
+
+enum ReturStatus {
+  PENDING
+  APPROVED_FINANCE
+  APPROVED
+  REJECTED
+}
+
+enum PembayaranStatus {
+  PENDING
+  PAID
+}
+
+enum InvoiceBayarStatus {
+  UNPAID
+  PARTIAL
+  PAID
+}
+
+enum MetodeBayar {
+  TRANSFER
+  CASH
+  CEK
+}
+
+// 1. RETUR PEMBELIAN
+model ReturPembelian {
+  id            String               @id @default(cuid())
+  noTransaksi   String?              @unique
+  seq           Int                  @default(autoincrement())
+  poId          String
+  purchaseOrder PurchaseOrder        @relation(fields: [poId], references: [id])
+  supplierId    String
+  supplier      Supplier             @relation(fields: [supplierId], references: [id])
+  tanggal       DateTime
+  totalNominal  Float                @default(0)
+  alasanRetur   String?              @db.Text
+  status        ReturStatus          @default(PENDING)
+  items         ReturPembelianItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([poId])
+  @@index([supplierId])
+}
+
+model ReturPembelianItem {
+  id          String             @id @default(cuid())
+  returId     String
+  retur       ReturPembelian     @relation(fields: [returId], references: [id], onDelete: Cascade)
+  poItemId    String?
+  poItem      PurchaseOrderItem? @relation(fields: [poItemId], references: [id])
+  itemName    String
+  qty         Float
+  unit        String
+  hargaSatuan Float              @default(0)
+  total       Float              @default(0)
+  catatan     String?            @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([returId])
+}
+
+// 2. PENGAJUAN PEMBAYARAN
+model PengajuanPembayaran {
+  id            String         @id @default(cuid())
+  noPengajuan   String?        @unique
+  seq           Int            @default(autoincrement())
+  supplierId    String
+  supplier      Supplier       @relation("PengajuanSupplier", fields: [supplierId], references: [id])
+  poId          String?
+  purchaseOrder PurchaseOrder? @relation(fields: [poId], references: [id])
+  projectId     String?
+  tanggal       DateTime
+  totalTagihan  Float          @default(0)
+  status        ReturStatus    @default(PENDING)
+  approvedById  String?
+  approvedBy    User?          @relation("ApprovedPengajuanByUser", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+
+  // Jejak verifikasi Finance (tingkat 1)
+  verifiedById  String?
+  verifiedBy    User?          @relation("VerifiedPengajuanByUser", fields: [verifiedById], references: [id])
+  verifiedAt    DateTime?
+  catatanFinance String?       @db.Text
+  rejectReason  String?        @db.Text
+  catatan       String?        @db.Text
+  items         Json?
+
+  pembayaran PembayaranSupplier[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([poId])
+}
+
+// 3. PEMBAYARAN SUPPLIER
+model PembayaranSupplier {
+  id            String               @id @default(cuid())
+  noPembayaran  String?              @unique
+  seq           Int                  @default(autoincrement())
+  supplierId    String
+  supplier      Supplier             @relation("PembayaranSupplier", fields: [supplierId], references: [id])
+  pengajuanId   String?
+  pengajuan     PengajuanPembayaran? @relation(fields: [pengajuanId], references: [id])
+  poId          String?
+  purchaseOrder PurchaseOrder?       @relation("PembayaranPO", fields: [poId], references: [id])
+  tanggal       DateTime
+  jumlahBayar   Float                @default(0)
+  metodeBayar   MetodeBayar          @default(TRANSFER)
+  bankAccount   String?
+  keterangan    String?              @db.Text
+  buktiBayarUrl String?
+  status        PembayaranStatus     @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([pengajuanId])
+}
+
+// 4. INVOICE PENAGIHAN
+model InvoicePenagihan {
+  id                String             @id @default(cuid())
+  supplierId        String
+  supplier          Supplier           @relation("InvoiceSupplier", fields: [supplierId], references: [id])
+  poId              String?
+  purchaseOrder     PurchaseOrder?     @relation("InvoicePO", fields: [poId], references: [id])
+  tanggal           DateTime
+  noInvoice         String
+  tanggalJatuhTempo DateTime?
+  jumlahTagihan     Float              @default(0)
+  statusBayar       InvoiceBayarStatus @default(UNPAID)
+  jumlahDibayar     Float              @default(0)
+  sisaTagihan       Float              @default(0)
+  keterangan        String?            @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([poId])
+}
+
+// ==========================================
+// TABEL KANBAN (TRELLO CLONE)
+// ==========================================
+
+model KanbanBoard {
+  id        String       @id @default(cuid())
+  projectId String       @unique
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  lists     KanbanList[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model KanbanList {
+  id      String       @id @default(cuid())
+  boardId String
+  board   KanbanBoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  title   String
+  order   Int          @default(0)
+  tasks   KanbanTask[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model KanbanTask {
+  id            String     @id @default(cuid())
+  listId        String
+  list          KanbanList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  title         String
+  description   String?    @db.Text
+  dueDate       DateTime?
+  order         Int        @default(0)
+  googleEventId String? // ID dari Google Calendar
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+>>>>>>> 6606e6d (fix rab bv)

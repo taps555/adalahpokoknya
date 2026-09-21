@@ -8,10 +8,11 @@ const { buildRabSheet } = require("../../services/rabExportHelper");
 const {
   buildTimeScheduleSheet,
 } = require("../../services/timeScheduleExportHelper");
+const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
-router.get("/projects/:projectId/export-full", async (req, res) => {
+router.get("/projects/:projectId/export-full", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({
@@ -62,6 +63,8 @@ router.get("/projects/:projectId/export-full", async (req, res) => {
 
 router.get(
   "/projects/:projectId/rab-items/export-combined",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN"),
   async (req, res) => {
     try {
       const { projectId } = req.params;
@@ -101,7 +104,7 @@ router.get(
   },
 );
 
-router.get("/projects/:projectId/export-all-tabs", async (req, res) => {
+router.get("/projects/:projectId/export-all-tabs", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({
