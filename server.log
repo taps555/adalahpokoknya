@@ -1,4 +1,0 @@
-  File "D:\projekbaru\backend\adalahpokoknya\src\index.js", line 4
-    const express = require("express");
-          ^^^^^^^
-SyntaxError: invalid syntax

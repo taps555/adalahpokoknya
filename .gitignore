@@ -1,11 +1,45 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Dependencies
 node_modules
-frontend
-complaints
-progress
-surveys
-surat-jalan
-.env
-samoah
-.env
+
+# Logs
+*.log
+logs/
+
+# Database backup & dumps
+backupo/
+*.sql
+*.dump
+
+# Tool cache / analisis sementara
+graphify-out/
+inspect_*.js
+inspect_*.py
+
+# Uploads & file runtime user
 /public/uploads
-.env
+/public/complaints
+/public/progress
+/public/surveys
+/public/surat-jalan
+/public/samoah
+
+# Frontend build (dilayani terpisah)
+frontend/
+dist/
+
+# Windows artefak
+nul
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.sw?
+.DS_Store
