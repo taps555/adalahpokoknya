@@ -356,7 +356,7 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
   return r; // return next available row
 }
 
-async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode = 'week') {
+async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode = 'week', targetDiscipline = 'ALL') {
   const allGroupsRaw = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
@@ -428,24 +428,27 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
   // Draw Tables
   let nextRow = 2;
 
-  // 1. GENERAL
-  const generalGroups = filterGroupsByDiscipline(allGroupsRaw, 'GENERAL');
-  if (generalGroups.length > 0) {
-    nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - GENERAL", generalGroups, project, periods, nextRow, "FFD9D9D9");
-    nextRow += 5; // Spacing 4 blank rows
+  if (targetDiscipline === 'ALL' || targetDiscipline === 'GENERAL') {
+    const generalGroups = filterGroupsByDiscipline(allGroupsRaw, 'GENERAL');
+    if (generalGroups.length > 0 || targetDiscipline === 'GENERAL') {
+      nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - GENERAL", generalGroups, project, periods, nextRow, "FFD9D9D9");
+      nextRow += 5; 
+    }
   }
 
-  // 2. SIPIL
-  const sipilGroups = filterGroupsByDiscipline(allGroupsRaw, 'SIPIL');
-  if (sipilGroups.length > 0) {
-    nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - SIPIL", sipilGroups, project, periods, nextRow, "FFCCE5FF"); // Light Blue
-    nextRow += 5;
+  if (targetDiscipline === 'ALL' || targetDiscipline === 'SIPIL') {
+    const sipilGroups = filterGroupsByDiscipline(allGroupsRaw, 'SIPIL');
+    if (sipilGroups.length > 0 || targetDiscipline === 'SIPIL') {
+      nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - SIPIL", sipilGroups, project, periods, nextRow, "FFCCE5FF"); 
+      nextRow += 5;
+    }
   }
 
-  // 3. INTERIOR
-  const interiorGroups = filterGroupsByDiscipline(allGroupsRaw, 'INTERIOR');
-  if (interiorGroups.length > 0) {
-    nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - INTERIOR", interiorGroups, project, periods, nextRow, "FFFFE5CC"); // Light Orange
+  if (targetDiscipline === 'ALL' || targetDiscipline === 'INTERIOR') {
+    const interiorGroups = filterGroupsByDiscipline(allGroupsRaw, 'INTERIOR');
+    if (interiorGroups.length > 0 || targetDiscipline === 'INTERIOR') {
+      nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - INTERIOR", interiorGroups, project, periods, nextRow, "FFFFE5CC"); 
+    }
   }
 
   // Set Columns Width

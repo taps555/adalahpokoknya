@@ -20,8 +20,15 @@ router.get("/projects/:projectId/time-schedule/export", async (req, res) => {
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("Time Schedule");
-    await buildTimeScheduleSheet(ws, projectId, project, prisma, req.query.viewMode || 'week');
+    
+    const wsGeneral = wb.addWorksheet("General");
+    await buildTimeScheduleSheet(wsGeneral, projectId, project, prisma, req.query.viewMode || 'week', 'GENERAL');
+
+    const wsSipil = wb.addWorksheet("Sipil");
+    await buildTimeScheduleSheet(wsSipil, projectId, project, prisma, req.query.viewMode || 'week', 'SIPIL');
+
+    const wsInterior = wb.addWorksheet("Interior");
+    await buildTimeScheduleSheet(wsInterior, projectId, project, prisma, req.query.viewMode || 'week', 'INTERIOR');
 
     res.setHeader(
       "Content-Type",

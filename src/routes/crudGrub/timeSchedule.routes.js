@@ -74,6 +74,35 @@ router.put("/rap-items/:id/schedule", async (req, res) => {
   }
 });
 
+/** PUT /projects/:projectId/rap-time-schedule/batch — batch assign / update jadwal */
+router.put("/projects/:projectId/rap-time-schedule/batch", async (req, res) => {
+  try {
+    const { schedules } = req.body; // array of { rabItemId, startDate, endDate }
+    if (!Array.isArray(schedules) || schedules.length === 0) {
+      return res.status(400).json({ error: "Data schedules wajib berupa array dan tidak boleh kosong." });
+    }
+
+    const transactionData = schedules.map(item => {
+      const start = new Date(item.startDate);
+      const end = new Date(item.endDate);
+      return prisma.timeSchedule.upsert({
+        where: { rabItemId: item.rabItemId },
+        update: { startDate: start, endDate: end },
+        create: { rabItemId: item.rabItemId, startDate: start, endDate: end },
+      });
+    });
+
+    const results = await prisma.$transaction(transactionData);
+
+    res.json({ message: `${results.length} jadwal berhasil disimpan`, data: results });
+  } catch (error) {
+    console.error("Error Batch Set Schedule:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+});
+
 /** DELETE /rap-items/:id/schedule — hapus jadwal item */
 router.delete("/rap-items/:id/schedule", async (req, res) => {
   try {

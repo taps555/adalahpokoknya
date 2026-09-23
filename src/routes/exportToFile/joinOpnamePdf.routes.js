@@ -22,7 +22,7 @@ const MIN_ROW_H = 30;
 const PHOTO_W = 60;
 const PHOTO_H = 80;
 const PHOTO_GAP = 6;
-const PHOTO_COLS = 3; 
+const PHOTO_COLS = 2; 
 
 function buildColumns(contentWidth) {
   const no = 30;
@@ -94,7 +94,7 @@ function drawHeader(doc, project, contentWidth, targetDate, titleText) {
   const rowGap = 20;
 
   doc.font("Helvetica-Bold").fontSize(8).fillColor(GREY_TEXT);
-  doc.text("KLIEN", infoX, y + 12);
+  doc.text("NAMA PROJECT", infoX, y + 12);
   doc.text(":", infoX + labelW - 8, y + 12);
   doc.text("LOKASI PROYEK", infoX, y + 12 + rowGap);
   doc.text(":", infoX + labelW - 8, y + 12 + rowGap);
@@ -198,7 +198,7 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
   if (photos.length === 0) {
     doc.fontSize(8).fillColor("#999999").text("Tidak ada foto", X.x2, y + rowH / 2 - 4, { width: COL.foto, align: "center" });
   } else {
-    photos.slice(0, PHOTO_COLS).forEach((photo, i) => {
+    photos.forEach((photo, i) => {
       const col = i % PHOTO_COLS;
       const row = Math.floor(i / PHOTO_COLS);
       const px = X.x2 + PHOTO_GAP + col * (PHOTO_W + PHOTO_GAP);
