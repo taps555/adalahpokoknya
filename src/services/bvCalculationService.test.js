@@ -12,8 +12,10 @@ const {
   disciplineForRab,
   normalizeWorkCategoryCode,
   normalizeProjectWorkCategoryConfigs,
+  normalizeRequiredProjectWorkCategoryConfigs,
   buildWorkCategoryItemWhere,
 } = require("./bvCalculationService");
+const { deleteUploadBatchData } = require("./importService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("./ahspPricingService");
 
 test("menghitung desimal koma dari data BV sipil tanpa NaN", () => {
@@ -348,4 +350,85 @@ test("filter kategori RAB memakai FK dan fallback legacy terbatas", () => {
     { discipline: "INTERIOR" },
   );
   assert.deepEqual(buildWorkCategoryItemWhere({ categoryCode: "GENERAL" }), {});
+});
+
+test("konfigurasi edit proyek menerima SIPIL dan INTERIOR CUSTOM tanpa grade", () => {
+  const categories = [
+    { id: "cat-sipil", code: "SIPIL", name: "Sipil", isActive: true },
+    { id: "cat-interior", code: "INTERIOR", name: "Interior", isActive: true },
+    { id: "cat-mep", code: "MEP", name: "MEP", isActive: true },
+  ];
+
+  assert.deepEqual(
+    normalizeRequiredProjectWorkCategoryConfigs([
+      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", isActive: true },
+      { workCategoryId: "cat-interior", pricingMode: "CUSTOM", isActive: true },
+      { workCategoryId: "cat-mep", pricingMode: "HSPK", grade: "B", isActive: true },
+    ], categories),
+    [
+      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", grade: null, isActive: true },
+      { workCategoryId: "cat-interior", pricingMode: "CUSTOM", grade: null, isActive: true },
+      { workCategoryId: "cat-mep", pricingMode: "HSPK", grade: "B", isActive: true },
+    ],
+  );
+
+  assert.throws(
+    () => normalizeRequiredProjectWorkCategoryConfigs([
+      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", isActive: true },
+    ], categories),
+    /Interior wajib/i,
+  );
+});
+
+test("hapus batch HSPK membersihkan seluruh isi dalam satu transaksi", async () => {
+  const calls = [];
+  const jobTypeIds = ["job-1"];
+  const priceItems = [
+    { id: "price-1", type: "BAHAN", name: "Semen", unit: "zak", price: 0, discipline: null, grade: "A", period: 2027, source: "f.xlsx", workCategoryId: "cat-1" },
+  ];
+  const tx = {
+    jobType: {
+      findMany: async () => [{ id: "job-1" }],
+      deleteMany: async (args) => calls.push(["job", args]),
+    },
+    priceItem: {
+      findMany: async () => priceItems,
+      updateMany: async (args) => calls.push(["price-detach", args]),
+      deleteMany: async (args) => calls.push(["price", args]),
+    },
+    bvItem: { updateMany: async (args) => calls.push(["bv", args]) },
+    rabItem: { updateMany: async (args) => calls.push(["rab", args]) },
+    jobComponent: {
+      findMany: async () => [
+        { id: "comp-shared", jobTypeId: "job-other", priceItemId: "price-1" },
+      ],
+      update: async ({ where, data }) => calls.push(["comp-update", where.id, data]),
+      deleteMany: async (args) => calls.push(["component", args]),
+    },
+    uploadIssue: { deleteMany: async (args) => calls.push(["issue", args]) },
+    uploadBatch: { delete: async (args) => calls.push(["batch", args]) },
+  };
+  const db = { $transaction: async (callback) => callback(tx) };
+
+  await deleteUploadBatchData(db, "batch-1");
+
+  const names = calls.map((entry) => entry[0]);
+  const priceDetach = calls.find(([name]) => name === "price-detach");
+  assert.deepEqual(priceDetach[1], {
+    where: { id: { in: ["price-1"] } },
+    data: { batchId: null },
+  });
+  const componentDelete = calls.find(([name]) => name === "component");
+  assert.deepEqual(componentDelete[1].where, {
+    jobTypeId: { in: jobTypeIds },
+  });
+  const priceDelete = calls.find(([name]) => name === "price");
+  assert.deepEqual(priceDelete[1], {
+    where: { batchId: "batch-1", id: { notIn: ["price-1"] } },
+  });
+  const batchDelete = calls.find(([name]) => name === "batch");
+  assert.deepEqual(batchDelete[1], { where: { id: "batch-1" } });
+  assert.ok(names.indexOf("price-detach") < names.indexOf("component"));
+  assert.ok(names.indexOf("component") < names.indexOf("price"));
+  assert.ok(names.indexOf("price") < names.indexOf("batch"));
 });

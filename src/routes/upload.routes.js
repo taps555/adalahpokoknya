@@ -5,7 +5,7 @@ const path = require('path');
 const upload = require('../middleware/upload');
 const { parsePdfBuffer } = require('../parsers/pdfParser');
 const { parseExcelBuffer } = require('../parsers/excelParser');
-const { importParsedData } = require('../services/importService');
+const { importParsedData, deleteUploadBatchData } = require('../services/importService');
 const { verifyToken, authorizeRoles } = require('../middleware/auth');
 const prisma = require('../lib/prisma');
 
@@ -150,11 +150,9 @@ router.get('/uploads', async (req, res, next) => {
 });
 
 /**
- * DELETE /api/uploads/:id — hapus batch upload beserta data AHSP-nya.
- * Urutan hapus: JobComponent -> JobType -> UploadIssue -> UploadBatch.
- * PriceItem TIDAK dihapus: bisa dipakai snapshot RabItemComponent / upload ulang
- * (upsert by unique key, jadi tidak menjadi duplikat).
- * Relasi BvItem/RabItem ke JobType jadi null otomatis (onDelete: SetNull default).
+ * DELETE /api/uploads/:id — hapus satu paket upload secara transaksional.
+ * Isi eksklusif batch dihapus; PriceItem yang masih dipakai AHSP batch lain
+ * dilepas ownership-nya agar AHSP lain tidak rusak.
  */
 router.delete(
   '/uploads/:id',
@@ -168,26 +166,12 @@ router.delete(
         return res.status(404).json({ error: 'Batch upload tidak ditemukan.' });
       }
 
-      // Pecah relasi BV/RAB items yang menunjuk JobType batch ini supaya
-      // referensi ke data yang akan dihapus tidak menggantung.
-      await prisma.bvItem.updateMany({
-        where: { sourceJobType: { batchId: id } },
-        data: { sourceJobTypeId: null },
-      });
-      await prisma.rabItem.updateMany({
-        where: { sourceJobType: { batchId: id } },
-        data: { sourceJobTypeId: null },
-      });
-
-      await prisma.jobComponent.deleteMany({
-        where: { jobType: { batchId: id } },
-      });
-      await prisma.jobType.deleteMany({ where: { batchId: id } });
-      await prisma.uploadIssue.deleteMany({ where: { batchId: id } });
-      await prisma.uploadBatch.delete({ where: { id } });
+      // Satu transaksi: BV/RAB dilepas tautannya, lalu seluruh isi batch
+      // (komponen, AHSP, harga dasar, issue, riwayat) ikut terhapus bersih.
+      await deleteUploadBatchData(prisma, id);
 
       res.json({
-        message: `Batch "${batch.filename}" (periode ${batch.period}) beserta data AHSP-nya berhasil dihapus.`,
+        message: `Batch "${batch.filename}" (periode ${batch.period}) beserta seluruh data AHSP & harga dasarnya berhasil dihapus.`,
       });
     } catch (err) {
       next(err);
@@ -208,21 +192,7 @@ router.delete(
         return res.status(404).json({ error: 'Batch upload tidak ditemukan.' });
       }
 
-      await prisma.bvItem.updateMany({
-        where: { sourceJobType: { batchId: id } },
-        data: { sourceJobTypeId: null },
-      });
-      await prisma.rabItem.updateMany({
-        where: { sourceJobType: { batchId: id } },
-        data: { sourceJobTypeId: null },
-      });
-
-      await prisma.jobComponent.deleteMany({
-        where: { jobType: { batchId: id } },
-      });
-      await prisma.jobType.deleteMany({ where: { batchId: id } });
-      await prisma.uploadIssue.deleteMany({ where: { batchId: id } });
-      await prisma.uploadBatch.delete({ where: { id } });
+      await deleteUploadBatchData(prisma, id);
 
       res.json({ message: 'Data berhasil dihapus' });
     } catch (err) {
