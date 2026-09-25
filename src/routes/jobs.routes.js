@@ -6,15 +6,35 @@ const { calculateJobPrice } = require('../services/calculateService');
 
 const router = express.Router();
 
-/** GET /api/jobs?period=2026&q=beton&category=... */
+/** GET /api/jobs?period=2026&q=beton&category=...&workCategoryId=... */
 router.get('/jobs', async (req, res) => {
-  const { period, q, category, discipline, grade } = req.query;
+  const { period, q, category, discipline, grade, workCategoryId } = req.query;
   const where = {};
   if (period) where.period = parseInt(period, 10);
   if (category) where.category = { contains: category, mode: 'insensitive' };
   if (q) where.name = { contains: q, mode: 'insensitive' };
-  if (discipline) where.discipline = discipline;
   if (grade) where.grade = grade;
+
+  // Filter kategori: sama dengan buildWorkCategoryItemWhere di BV/RAB —
+  // kategori SIPIL/INTERIOR juga mencakup data legacy (workCategoryId null,
+  // masih memakai discipline) agar master lama tetap kebaca.
+  if (workCategoryId) {
+    const wc = await prisma.workCategory.findUnique({
+      where: { id: workCategoryId },
+      select: { code: true },
+    });
+    const code = String(wc?.code || '').toUpperCase();
+    if (code === 'SIPIL' || code === 'INTERIOR') {
+      where.OR = [
+        { workCategoryId },
+        { workCategoryId: null, discipline: code },
+      ];
+    } else {
+      where.workCategoryId = workCategoryId;
+    }
+  } else if (discipline) {
+    where.discipline = discipline;
+  }
 
   const jobs = await prisma.jobType.findMany({
     where,
@@ -22,6 +42,8 @@ router.get('/jobs', async (req, res) => {
     select: {
       id: true, name: true, paymentUnit: true, category: true,
       period: true, needsReview: true, reference: true, discipline: true, grade: true,
+      workCategoryId: true,
+      workCategory: { select: { id: true, code: true, name: true } },
     },
   });
   res.json(jobs);
