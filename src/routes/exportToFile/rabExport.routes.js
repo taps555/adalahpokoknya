@@ -435,15 +435,21 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles(
       );
       if (config) {
         categories = [config];
-      } else if (activeCategories.length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
+      } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
         categories = [{ workCategoryId: null, workCategory: { code } }];
       } else {
         return res.status(400).json({ error: "Kategori pekerjaan tidak ditemukan/aktif pada project." });
       }
     } else {
-      categories = (project.workCategories || []).filter(
+      const configured = project.workCategories || [];
+      categories = configured.filter(
         (entry) => entry.isActive && entry.workCategory?.isActive,
       );
+      if (categories.length === 0 && configured.length > 0) {
+        // Kategori terkonfigurasi tapi tidak ada yang aktif: jangan fallback
+        // ke sheet berlabel satu kategori dengan filter kosong.
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+      }
       if (categories.length === 0) {
         categories = [{
           workCategoryId: null,

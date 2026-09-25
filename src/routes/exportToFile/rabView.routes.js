@@ -216,7 +216,7 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
           workCategoryId: config.workCategoryId,
           categoryCode: config.workCategory.code,
         });
-      } else if (activeCategories.length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
+      } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
         categoryTitle = code;
         itemWhere = buildWorkCategoryItemWhere({ categoryCode: code });
       } else {
