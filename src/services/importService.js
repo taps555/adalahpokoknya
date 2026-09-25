@@ -296,4 +296,72 @@ async function importParsedData({
   }
 }
 
-module.exports = { importParsedData, classifyResourceType };
+/**
+ * Hapus satu batch upload HSPK BESERTA SELURUH ISINYA, dalam satu transaksi:
+ *   1. lepas tautan master AHSP dari item BV/RAB (snapshot harga tetap utuh),
+ *   2. hapus JobComponent milik JobType batch ini ATAU yang memakai PriceItem batch ini,
+ *   3. hapus JobType batch ini,
+ *   4. hapus PriceItem batch ini (harga dasar ikut hilang sesuai kebutuhan UI),
+ *   5. hapus UploadIssue,
+ *   6. hapus UploadBatch.
+ * Dipakai oleh DELETE /api/uploads/:id dan legacy /api/del/:id.
+ */
+async function deleteUploadBatchData(db, batchId) {
+  await db.$transaction(async (tx) => {
+    const [jobTypes, priceItems] = await Promise.all([
+      tx.jobType.findMany({ where: { batchId }, select: { id: true } }),
+      tx.priceItem.findMany({ where: { batchId }, select: { id: true } }),
+    ]);
+    const jobTypeIds = jobTypes.map((item) => item.id);
+    const priceItemIds = priceItems.map((item) => item.id);
+
+    if (jobTypeIds.length > 0) {
+      await tx.bvItem.updateMany({
+        where: { sourceJobTypeId: { in: jobTypeIds } },
+        data: { sourceJobTypeId: null },
+      });
+      await tx.rabItem.updateMany({
+        where: { sourceJobTypeId: { in: jobTypeIds } },
+        data: { sourceJobTypeId: null },
+      });
+    }
+
+    // PriceItem bisa dipakai AHSP dari batch lain karena importer melakukan upsert.
+    // Lepas ownership hanya untuk harga yang masih dipakai luar batch; harga yang
+    // eksklusif tetap dihapus bersama batch agar tidak meninggalkan data yatim.
+    let sharedPriceIds = [];
+    if (priceItemIds.length > 0) {
+      const sharedComponents = await tx.jobComponent.findMany({
+        where: {
+          priceItemId: { in: priceItemIds },
+          ...(jobTypeIds.length > 0 ? { jobTypeId: { notIn: jobTypeIds } } : {}),
+        },
+        select: { priceItemId: true },
+      });
+      sharedPriceIds = [...new Set(sharedComponents.map((component) => component.priceItemId))];
+      if (sharedPriceIds.length > 0) {
+        await tx.priceItem.updateMany({
+          where: { id: { in: sharedPriceIds } },
+          data: { batchId: null },
+        });
+      }
+    }
+
+    if (jobTypeIds.length > 0) {
+      await tx.jobComponent.deleteMany({
+        where: { jobTypeId: { in: jobTypeIds } },
+      });
+    }
+    await tx.jobType.deleteMany({ where: { batchId } });
+    await tx.priceItem.deleteMany({
+      where: {
+        batchId,
+        ...(sharedPriceIds.length > 0 ? { id: { notIn: sharedPriceIds } } : {}),
+      },
+    });
+    await tx.uploadIssue.deleteMany({ where: { batchId } });
+    await tx.uploadBatch.delete({ where: { id: batchId } });
+  });
+}
+
+module.exports = { importParsedData, classifyResourceType, deleteUploadBatchData };
