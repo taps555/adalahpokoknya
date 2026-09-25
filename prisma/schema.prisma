@@ -45,6 +45,14 @@ enum Role {
   PROJECT_MANAGER
 }
 
+enum Survey3DStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  REVIEW
+  REVISION
+  FINAL
+}
+
 model User {
   id                  String                 @id @default(cuid())
   username            String                 @unique // atau email
@@ -234,6 +242,7 @@ model Project {
 
   rabGroups        RabGroup[]
   surveyReports    SurveyReport[]
+  survey3dResult   Survey3DResult?
   complaintReports ComplaintReport[]
 
   kanbanBoard KanbanBoard?
@@ -501,6 +510,30 @@ model SurveyReport {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model Survey3DResult {
+  id        String          @id @default(cuid())
+  projectId String          @unique
+  project   Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status    Survey3DStatus  @default(NOT_STARTED)
+  gdriveUrl String?
+  notes     String?         @db.Text
+  images    Survey3DImage[]
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
+
+model Survey3DImage {
+  id               String         @id @default(cuid())
+  survey3DResultId String
+  survey3DResult   Survey3DResult @relation(fields: [survey3DResultId], references: [id], onDelete: Cascade)
+  url              String
+  caption          String?
+  order            Int            @default(0)
+  createdAt        DateTime       @default(now())
+
+  @@index([survey3DResultId, order])
 }
 
 // 2. Tabel Area/Ruangan yang disurvey

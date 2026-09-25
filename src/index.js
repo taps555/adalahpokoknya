@@ -22,6 +22,7 @@ const workCategoryRouter = require("./routes/workCategories");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Static serve untuk frontend build
 // Path absolut ke D:\projekbaru\frontend\dist agar tidak bergantung working directory
