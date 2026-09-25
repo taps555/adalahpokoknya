@@ -6,6 +6,7 @@ const upload = require('../middleware/upload');
 const { parsePdfBuffer } = require('../parsers/pdfParser');
 const { parseExcelBuffer } = require('../parsers/excelParser');
 const { importParsedData } = require('../services/importService');
+const { verifyToken, authorizeRoles } = require('../middleware/auth');
 const prisma = require('../lib/prisma');
 
 const router = express.Router();
@@ -92,14 +93,143 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-/** GET /api/uploads — riwayat semua upload */
-router.get('/uploads', async (req, res) => {
-  const batches = await prisma.uploadBatch.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 50,
-  });
-  res.json(batches);
+/** GET /api/uploads — daftar batch upload (riwayat AHSP) beserta kategori & grade */
+router.get('/uploads', async (req, res, next) => {
+  try {
+    const batches = await prisma.uploadBatch.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: {
+        workCategory: { select: { id: true, code: true, name: true } },
+      },
+    });
+
+    // Grade per batch (UploadBatch tidak simpan grade; ambil dari JobType-nya)
+    const grades = await prisma.jobType.groupBy({
+      by: ['batchId', 'grade'],
+      where: { batchId: { not: null } },
+    });
+    const gradeMap = {};
+    for (const g of grades) {
+      if (!g.batchId) continue;
+      gradeMap[g.batchId] = gradeMap[g.batchId] || [];
+      if (g.grade) gradeMap[g.batchId].push(g.grade);
+    }
+
+    // Discipline legacy (batch lama SIPIL/INTERIOR tanpa workCategoryId)
+    const legacyMap = {};
+    const legacy = await prisma.jobType.groupBy({
+      by: ['batchId', 'discipline'],
+      where: { batchId: { not: null }, discipline: { not: null } },
+    });
+    for (const l of legacy) {
+      if (!l.batchId || !l.discipline) continue;
+      legacyMap[l.batchId] = l.discipline;
+    }
+
+    res.json(
+      batches.map((b) => ({
+        id: b.id,
+        filename: b.filename,
+        fileKind: b.fileKind,
+        period: b.period,
+        status: b.status,
+        priceItemCount: b.priceItemCount,
+        jobTypeCount: b.jobTypeCount,
+        errorMessage: b.errorMessage,
+        createdAt: b.createdAt,
+        finishedAt: b.finishedAt,
+        workCategory: b.workCategory,
+        grades: (gradeMap[b.id] || []).sort(),
+        discipline: legacyMap[b.id] || null,
+      })),
+    );
+  } catch (err) {
+    next(err);
+  }
 });
+
+/**
+ * DELETE /api/uploads/:id — hapus batch upload beserta data AHSP-nya.
+ * Urutan hapus: JobComponent -> JobType -> UploadIssue -> UploadBatch.
+ * PriceItem TIDAK dihapus: bisa dipakai snapshot RabItemComponent / upload ulang
+ * (upsert by unique key, jadi tidak menjadi duplikat).
+ * Relasi BvItem/RabItem ke JobType jadi null otomatis (onDelete: SetNull default).
+ */
+router.delete(
+  '/uploads/:id',
+  verifyToken,
+  authorizeRoles('SUPER_ADMIN', 'PROJECT_MANAGER'),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const batch = await prisma.uploadBatch.findUnique({ where: { id } });
+      if (!batch) {
+        return res.status(404).json({ error: 'Batch upload tidak ditemukan.' });
+      }
+
+      // Pecah relasi BV/RAB items yang menunjuk JobType batch ini supaya
+      // referensi ke data yang akan dihapus tidak menggantung.
+      await prisma.bvItem.updateMany({
+        where: { sourceJobType: { batchId: id } },
+        data: { sourceJobTypeId: null },
+      });
+      await prisma.rabItem.updateMany({
+        where: { sourceJobType: { batchId: id } },
+        data: { sourceJobTypeId: null },
+      });
+
+      await prisma.jobComponent.deleteMany({
+        where: { jobType: { batchId: id } },
+      });
+      await prisma.jobType.deleteMany({ where: { batchId: id } });
+      await prisma.uploadIssue.deleteMany({ where: { batchId: id } });
+      await prisma.uploadBatch.delete({ where: { id } });
+
+      res.json({
+        message: `Batch "${batch.filename}" (periode ${batch.period}) beserta data AHSP-nya berhasil dihapus.`,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Legacy: tetap dipertahankan agar pemanggil lama tidak putus */
+router.delete(
+  '/del/:id',
+  verifyToken,
+  authorizeRoles('SUPER_ADMIN', 'PROJECT_MANAGER'),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const batch = await prisma.uploadBatch.findUnique({ where: { id } });
+      if (!batch) {
+        return res.status(404).json({ error: 'Batch upload tidak ditemukan.' });
+      }
+
+      await prisma.bvItem.updateMany({
+        where: { sourceJobType: { batchId: id } },
+        data: { sourceJobTypeId: null },
+      });
+      await prisma.rabItem.updateMany({
+        where: { sourceJobType: { batchId: id } },
+        data: { sourceJobTypeId: null },
+      });
+
+      await prisma.jobComponent.deleteMany({
+        where: { jobType: { batchId: id } },
+      });
+      await prisma.jobType.deleteMany({ where: { batchId: id } });
+      await prisma.uploadIssue.deleteMany({ where: { batchId: id } });
+      await prisma.uploadBatch.delete({ where: { id } });
+
+      res.json({ message: 'Data berhasil dihapus' });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 /** GET /api/uploads/:id/issues — baris yang gagal di-parse otomatis, untuk ditinjau manual */
 router.get('/uploads/:id/issues', async (req, res) => {
@@ -110,22 +240,4 @@ router.get('/uploads/:id/issues', async (req, res) => {
   res.json(issues);
 });
 
-// Di dalam upload.routes.js
-// Tambahkan ini di backend Anda (misal: routes/upload.routes.js)
-
-router.delete('/del/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Logika hapus data di database (sesuaikan dengan nama model Prisma Anda)
-    await prisma.uploadBatch.delete({
-      where: { id: id }
-    });
-
-    res.status(200).json({ message: 'Data berhasil dihapus' });
-  } catch (error) {
-    console.error('Gagal menghapus data:', error);
-    res.status(500).json({ message: 'Gagal menghapus data di database' });
-  }
-});
 module.exports = router;
