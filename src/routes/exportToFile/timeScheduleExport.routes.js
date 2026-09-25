@@ -14,7 +14,7 @@ router.get("/projects/:projectId/time-schedule/export", async (req, res) => {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      include: { client: true },
+      include: { client: true, workCategories: { include: { workCategory: true } } },
     });
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
@@ -24,11 +24,19 @@ router.get("/projects/:projectId/time-schedule/export", async (req, res) => {
     const wsGeneral = wb.addWorksheet("General");
     await buildTimeScheduleSheet(wsGeneral, projectId, project, prisma, req.query.viewMode || 'week', 'GENERAL');
 
-    const wsSipil = wb.addWorksheet("Sipil");
-    await buildTimeScheduleSheet(wsSipil, projectId, project, prisma, req.query.viewMode || 'week', 'SIPIL');
+    const activeCategories = (project.workCategories || [])
+      .filter(c => c.isActive && c.workCategory?.isActive)
+      .map(c => c.workCategory);
 
-    const wsInterior = wb.addWorksheet("Interior");
-    await buildTimeScheduleSheet(wsInterior, projectId, project, prisma, req.query.viewMode || 'week', 'INTERIOR');
+    for (const cat of activeCategories) {
+      const code = cat.code.toUpperCase();
+      // Excel sheet names max length is 31 chars
+      let sheetName = code;
+      if (sheetName.length > 31) sheetName = sheetName.substring(0, 31);
+      
+      const ws = wb.addWorksheet(sheetName);
+      await buildTimeScheduleSheet(ws, projectId, project, prisma, req.query.viewMode || 'week', code);
+    }
 
     res.setHeader(
       "Content-Type",

@@ -2,6 +2,7 @@
 "use strict";
 const express = require("express");
 const prisma = require("../../lib/prisma");
+const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const router = express.Router();
 
 const multer = require("multer");
@@ -131,7 +132,7 @@ module.exports = router;
 router.get("/projects/:projectId/join-opname", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline } = req.query;
+    const { discipline, workCategoryId } = req.query;
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -139,27 +140,42 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
+    let itemWhere = {};
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (config && config.isActive && config.workCategory?.isActive) {
+        itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+      }
+    } else if (discipline && discipline !== 'General') {
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
+
     // reuse pola query yang sama kayak time-schedule (group -> items, + ungrouped)
     const groups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
         items: {
-          where: discipline && discipline !== "General" ? { discipline } : undefined,
+          where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
           include: {
             dailyProgress: true,
             timeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
+            workCategory: true,
           },
           orderBy: { order: "asc" },
         },
         children: {
           include: {
             items: {
-              where: discipline && discipline !== "General" ? { discipline } : undefined,
+              where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
               include: {
                 dailyProgress: true,
                 timeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
+                workCategory: true,
               },
               orderBy: { order: "asc" },
             },
@@ -174,12 +190,13 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       where: {
         projectId,
         groupId: null,
-        ...(discipline && discipline !== "General" ? { discipline } : {}),
+        ...itemWhere,
       },
       include: {
         dailyProgress: true,
         timeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
+        workCategory: true,
       },
       orderBy: { order: "asc" },
     });
@@ -341,6 +358,7 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         groupId: it.groupId,
         groupName: it.groupName,
         discipline: it.discipline,
+        workCategoryCode: it.workCategory ? it.workCategory.code : null,
         hasChildren,
         dailyBreakdown,
         rekapProgress,

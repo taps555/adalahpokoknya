@@ -49,9 +49,15 @@ const thin = { style: "thin" };
 function filterGroupsByDiscipline(groups, disc) {
   if (disc === 'GENERAL') return groups;
   return groups.map(g => {
-    const items = g.items.filter(i => (i.discipline || 'GENERAL') === 'GENERAL' || i.discipline === disc);
+    const items = g.items.filter(i => {
+      const code = i.workCategory?.code || i.discipline || 'GENERAL';
+      return code === 'GENERAL' || code === disc;
+    });
     const children = (g.children || []).map(c => {
-      const cItems = c.items.filter(i => (i.discipline || 'GENERAL') === 'GENERAL' || i.discipline === disc);
+      const cItems = c.items.filter(i => {
+        const code = i.workCategory?.code || i.discipline || 'GENERAL';
+        return code === 'GENERAL' || code === disc;
+      });
       if (cItems.length === 0) return null;
       return { ...c, items: cItems };
     }).filter(Boolean);
@@ -365,6 +371,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
         include: {
           timeSchedule: true,
           bvItem: { select: { id: true, parentBvItemId: true } },
+          workCategory: true,
         },
       },
       children: {
@@ -374,6 +381,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
             include: {
               timeSchedule: true,
               bvItem: { select: { id: true, parentBvItemId: true } },
+              workCategory: true,
             },
           },
         },
@@ -436,18 +444,26 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
     }
   }
 
-  if (targetDiscipline === 'ALL' || targetDiscipline === 'SIPIL') {
-    const sipilGroups = filterGroupsByDiscipline(allGroupsRaw, 'SIPIL');
-    if (sipilGroups.length > 0 || targetDiscipline === 'SIPIL') {
-      nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - SIPIL", sipilGroups, project, periods, nextRow, "FFCCE5FF"); 
-      nextRow += 5;
-    }
-  }
+  if (targetDiscipline !== 'GENERAL') {
+    if (targetDiscipline === 'ALL') {
+      const activeCategories = (project.workCategories || [])
+        .filter(c => c.isActive && c.workCategory?.isActive)
+        .map(c => c.workCategory);
 
-  if (targetDiscipline === 'ALL' || targetDiscipline === 'INTERIOR') {
-    const interiorGroups = filterGroupsByDiscipline(allGroupsRaw, 'INTERIOR');
-    if (interiorGroups.length > 0 || targetDiscipline === 'INTERIOR') {
-      nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - INTERIOR", interiorGroups, project, periods, nextRow, "FFFFE5CC"); 
+      for (const cat of activeCategories) {
+        const code = cat.code.toUpperCase();
+        const groups = filterGroupsByDiscipline(allGroupsRaw, code);
+        if (groups.length > 0) {
+          nextRow = drawTable(ws, `PROJECT TIME SCHEDULE - ${code}`, groups, project, periods, nextRow, "FFCCE5FF");
+          nextRow += 5;
+        }
+      }
+    } else {
+      const groups = filterGroupsByDiscipline(allGroupsRaw, targetDiscipline);
+      if (groups.length > 0 || targetDiscipline !== 'ALL') {
+        nextRow = drawTable(ws, `PROJECT TIME SCHEDULE - ${targetDiscipline}`, groups, project, periods, nextRow, "FFCCE5FF"); 
+        nextRow += 5;
+      }
     }
   }
 

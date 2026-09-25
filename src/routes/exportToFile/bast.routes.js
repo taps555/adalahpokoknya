@@ -209,9 +209,10 @@ function streamBastPdf(bast, res) {
     .text("Notes :", leftMargin, y);
 
   y = doc.y + 5;
+  const statusText = (bast.statusText || "-").replace(/\r/g, "");
   doc
     .font("Times-Roman")
-    .text(bast.statusText || "-", leftMargin, y, { width: contentW, align: "left" });
+    .text(statusText, leftMargin, y, { width: contentW, align: "left" });
 
   y = doc.y + 10;
   doc

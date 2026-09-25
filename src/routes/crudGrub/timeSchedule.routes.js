@@ -1,6 +1,7 @@
 "use strict";
 const express = require("express");
 const prisma = require("../../lib/prisma");
+const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const router = express.Router();
 
 /** PUT /projects/:projectId/start-date — set tanggal mulai proyek */
@@ -122,7 +123,7 @@ router.delete("/rap-items/:id/schedule", async (req, res) => {
 router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline, viewMode = 'week' } = req.query;
+    const { discipline, workCategoryId, viewMode = 'week' } = req.query;
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -130,24 +131,39 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
+    let itemWhere = {};
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (config && config.isActive && config.workCategory?.isActive) {
+        itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+      }
+    } else if (discipline && discipline !== 'General') {
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
+
     const groups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
         items: {
-          where: discipline ? { discipline } : undefined,
+          where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
           include: {
             timeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
+            workCategory: true,
           },
           orderBy: { order: "asc" },
         },
         children: {
           include: {
             items: {
-              where: discipline ? { discipline } : undefined,
+              where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
               include: {
                 timeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
+                workCategory: true,
               },
               orderBy: { order: "asc" },
             },
@@ -162,11 +178,12 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       where: {
         projectId,
         groupId: null,
-        ...(discipline ? { discipline } : {}),
+        ...itemWhere,
       },
       include: {
         timeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
+        workCategory: true,
       },
       orderBy: { order: "asc" },
     });
@@ -340,6 +357,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         isByOwner: it.isByOwner,
         isStip: it.isStip,
         discipline: it.discipline,
+        workCategoryCode: it.workCategory ? it.workCategory.code : null,
       };
     });
 

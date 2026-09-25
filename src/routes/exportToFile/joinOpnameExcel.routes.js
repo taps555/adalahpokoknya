@@ -9,16 +9,19 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
   try {
     const { projectId } = req.params;
     
-    const project = await prisma.project.findUnique({ where: { id: projectId } });
+    const project = await prisma.project.findUnique({ 
+      where: { id: projectId },
+      include: { workCategories: { include: { workCategory: true } } }
+    });
     if (!project) return res.status(404).send("Project not found");
 
     const allGroups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
-        items: { include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } } }, orderBy: { order: "asc" } },
+        items: { include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true }, orderBy: { order: "asc" } },
         children: {
           include: {
-            items: { include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } } }, orderBy: { order: "asc" } }
+            items: { include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true }, orderBy: { order: "asc" } }
           },
           orderBy: { order: "asc" }
         }
@@ -28,22 +31,27 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
 
     const allUngroupedItems = await prisma.rabItem.findMany({
       where: { projectId, groupId: null },
-      include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } } },
+      include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true },
       orderBy: { order: "asc" },
     });
 
     const wb = new ExcelJS.Workbook();
     
-    const disciplines = ["General", "Sipil", "Interior"];
+    const activeCategories = (project.workCategories || [])
+      .filter(c => c.isActive && c.workCategory?.isActive)
+      .map(c => c.workCategory.code.toUpperCase());
+    
+    const disciplines = ["General", ...activeCategories];
     
     for (const discipline of disciplines) {
         const filterItems = (items) => {
             if (discipline === "General") return items;
             const target = discipline.toLowerCase();
             return items.filter(it => {
-                if ((it.discipline || "").toLowerCase() === target) return true;
+                const code = (it.workCategory?.code || it.discipline || "").toLowerCase();
+                if (code === target) return true;
                 const children = items.filter(child => child.bvItem?.parentBvItemId === it.bvItem?.id);
-                if (children.length > 0 && children.some(c => (c.discipline || "").toLowerCase() === target)) return true;
+                if (children.length > 0 && children.some(c => (c.workCategory?.code || c.discipline || "").toLowerCase() === target)) return true;
                 return false;
             });
         };

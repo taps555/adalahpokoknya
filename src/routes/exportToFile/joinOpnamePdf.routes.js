@@ -7,6 +7,7 @@ const path = require("path");
 const fs = require("fs");
 
 const prisma = new PrismaClient();
+const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 
 // ==========================================
 // KONSTANTA STYLE
@@ -228,10 +229,23 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
 router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline, date, type = "daily" } = req.query;
+    const { discipline, workCategoryId, date, type = "daily" } = req.query;
 
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) return res.status(404).send("Project not found");
+
+    let itemWhere = {};
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (config && config.isActive && config.workCategory?.isActive) {
+        itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+      }
+    } else if (discipline && discipline !== 'General') {
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
 
     const targetDate = date ? new Date(date) : new Date();
 
@@ -239,13 +253,15 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
       where: { projectId, parentId: null },
       include: {
         items: {
-          include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } } },
+          where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
+          include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true },
           orderBy: { order: "asc" }
         },
         children: {
           include: {
             items: {
-              include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } } },
+              where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
+              include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true },
               orderBy: { order: "asc" }
             }
           },
@@ -259,33 +275,24 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
       where: {
         projectId,
         groupId: null,
+        ...itemWhere,
       },
       include: {
         dailyProgress: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
+        workCategory: true,
       },
       orderBy: { order: "asc" },
     });
 
-    let rawRabItems = [];
+    let rabItems = [];
     groups.forEach((group) => {
-      rawRabItems.push(...group.items.map((it) => ({ ...it, groupName: group.name.toUpperCase() })));
+      rabItems.push(...group.items.map((it) => ({ ...it, groupName: group.name.toUpperCase() })));
       (group.children || []).forEach((sub) => {
-        rawRabItems.push(...sub.items.map((it) => ({ ...it, groupName: sub.name })));
+        rabItems.push(...sub.items.map((it) => ({ ...it, groupName: sub.name })));
       });
     });
-    rawRabItems.push(...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })));
-
-    let rabItems = rawRabItems;
-    if (discipline && discipline !== "General") {
-      const target = discipline.toLowerCase();
-      rabItems = rawRabItems.filter(it => {
-         if ((it.discipline || "").toLowerCase() === target) return true;
-         const children = rawRabItems.filter(child => child.bvItem?.parentBvItemId === it.bvItem?.id);
-         if (children.length > 0 && children.some(c => (c.discipline || "").toLowerCase() === target)) return true;
-         return false;
-      });
-    }
+    rabItems.push(...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })));
 
     const parentIds = new Set();
     rabItems.forEach((it) => {

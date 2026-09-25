@@ -209,9 +209,10 @@ function streamBast2Pdf(complaint, formData, res) {
     .text("Notes :", leftMargin, y);
 
   y = doc.y + 5;
+  const statusText = (formData.statusText || "-").replace(/\r/g, "");
   doc
     .font("Times-Roman")
-    .text(formData.statusText || "-", leftMargin, y, { width: contentW, align: "left" });
+    .text(statusText, leftMargin, y, { width: contentW, align: "left" });
 
   y = doc.y + 10;
   doc
