@@ -78,12 +78,35 @@ router.get('/jobtypes', async (req, res, next) => {
     const { period, search, category, discipline, grade, workCategoryId } = req.query;
     if (!period) return res.status(400).json({ error: 'period wajib diisi' });
 
+    // Sama dengan buildWorkCategoryItemWhere: kategori SIPIL/INTERIOR juga
+    // mencakup data legacy (workCategoryId null, masih pakai discipline).
+    let categoryWhere = {};
+    if (workCategoryId) {
+      const wc = await prisma.workCategory.findUnique({
+        where: { id: workCategoryId },
+        select: { code: true },
+      });
+      const code = String(wc?.code || '').toUpperCase();
+      if (code === 'SIPIL' || code === 'INTERIOR') {
+        categoryWhere = {
+          OR: [
+            { workCategoryId },
+            { workCategoryId: null, discipline: code },
+          ],
+        };
+      } else {
+        categoryWhere = { workCategoryId };
+      }
+    } else if (discipline) {
+      categoryWhere = { discipline };
+    }
+
     const jobTypes = await prisma.jobType.findMany({
       where: {
         period: Number(period),
         ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
         ...(category ? { category } : {}),
-        ...(workCategoryId ? { workCategoryId } : discipline ? { discipline } : {}),
+        ...categoryWhere,
         ...(grade ? { grade } : {}),
       },
       select: {

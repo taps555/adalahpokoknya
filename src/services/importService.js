@@ -237,7 +237,7 @@ async function importParsedData({
           if (item.price == null || item.coefficient == null) continue;
           const priceItemId = priceItemCache.get(
             priceItemKey(type, item.name, item.unit) +
-              `|${discipline}|${grade}`,
+              `|${discipline}|${grade}|${workCategoryId || ""}`,
           );
           if (!priceItemId) continue;
           componentRows.push({

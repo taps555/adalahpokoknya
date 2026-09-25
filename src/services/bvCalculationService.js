@@ -251,9 +251,22 @@ function validateJobTypeForProject(
     if (config.pricingMode !== "HSPK") {
       return "Kategori project memakai mode CUSTOM; AHSP tidak dapat dipilih.";
     }
-    if (jobType.workCategoryId !== workCategoryId) {
+    const categoryCode = String(config.workCategory?.code || "").toUpperCase();
+    const isLegacySipilInterior = ["SIPIL", "INTERIOR"].includes(categoryCode);
+
+    if (isLegacySipilInterior) {
+      // Kategori SIPIL/INTERIOR menerima data legacy (workCategoryId null,
+      // masih memakai discipline) maupun data baru yang sudah punya workCategoryId.
+      const jobDiscipline = normalizeAhspDiscipline(jobType.discipline);
+      const matchesNew = jobType.workCategoryId === workCategoryId;
+      const matchesLegacy = jobDiscipline === categoryCode;
+      if (!matchesNew && !matchesLegacy) {
+        return `Kategori master AHSP tidak sesuai dengan kategori ${categoryCode}.`;
+      }
+    } else if (jobType.workCategoryId !== workCategoryId) {
       return "Kategori master AHSP tidak sesuai dengan kategori BV.";
     }
+
     if (config.grade && jobType.grade !== config.grade) {
       return "Grade master AHSP tidak sesuai dengan grade kategori project.";
     }
