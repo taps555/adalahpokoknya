@@ -256,7 +256,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
 
     const rabItem = await prisma.rabItem.findUnique({
       where: { id },
-      include: { project: true },
+      include: { project: { include: { workCategories: { include: { workCategory: true } } } } },
     });
     if (!rabItem) return res.status(404).json({ error: "Item RAB tidak ditemukan." });
 
@@ -518,7 +518,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
 
     const items = await prisma.rabItem.findMany({
       where: { id: { in: ids } },
-      include: { project: true },
+      include: { project: { include: { workCategories: { include: { workCategory: true } } } } },
     });
 
     const results = [];
