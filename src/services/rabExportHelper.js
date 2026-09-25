@@ -1,5 +1,7 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
 const prisma = require("../lib/prisma");
 const { buildWorkCategoryItemWhere } = require("./bvCalculationService");
 
@@ -39,6 +41,14 @@ function autoFitColumn(ws, colLetter, minWidth = 1, maxWidth = 60) {
   col.width = Math.min(maxLen + 2, maxWidth);
 }
 
+function normalizeRabExportMode(mode) {
+  const value = String(mode || "COMBINED").trim().toUpperCase();
+  if (["RAP", "COSTING"].includes(value)) return "RAP";
+  if (["RAB", "SELLING"].includes(value)) return "RAB";
+  if (["COMBINED", "BOTH", "GABUNGAN", "RAP_RAB"].includes(value)) return "COMBINED";
+  return null;
+}
+
 function colRange(startCol, endCol) {
   const cols = [];
   let c = startCol.charCodeAt(0);
@@ -50,7 +60,107 @@ function colRange(startCol, endCol) {
   return cols;
 }
 
-async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
+function cloneCell(source, target) {
+  target.value = source.value;
+  target.style = JSON.parse(JSON.stringify(source.style || {}));
+  target.numFmt = source.numFmt;
+}
+
+function safeUnmerge(ws, range) {
+  try {
+    ws.unMergeCells(range);
+  } catch (_) {
+    // The range may not be merged by an older workbook path.
+  }
+}
+
+function addDivesLogo(ws) {
+  const logoPath = path.resolve(__dirname, "../../public/assets/dives.png");
+  if (!fs.existsSync(logoPath)) return;
+  const imageId = ws.workbook.addImage({ filename: logoPath, extension: "png" });
+  ws.addImage(imageId, {
+    tl: { col: 1.15, row: 2.15 },
+    ext: { width: 145, height: 70 },
+  });
+}
+
+function finalizeRabSheet(ws, mode, categoryTitle = "") {
+  // Clear legacy merges before shifting rows; ExcelJS otherwise retains stale merge ranges.
+  Object.keys(ws._merges || {}).forEach((range) => safeUnmerge(ws, range));
+  // The reference BQ workbook starts its visual block on row 3.
+  ws.insertRow(2, []);
+  ["B2:C9", "B3:C10", "D2:J3", "D3:J4"].forEach((range) => safeUnmerge(ws, range));
+  ws.mergeCells("B3:C9");
+  ws.mergeCells("D3:J4");
+  [6, 7, 8, 9].forEach((row) => ws.mergeCells(`F${row}:J${row}`));
+  ["B", "C", "D", "E", "F"].forEach((col) => ws.mergeCells(`${col}11:${col}12`));
+  ws.mergeCells("G11:H11");
+  ws.mergeCells("I11:J11");
+
+  const combinedTitleRange = "D3:J4";
+  const singleTitleRange = "D3:H4";
+  ws.getCell("D3").value = `RENCANA ANGGARAN BIAYA${mode === "COMBINED" ? " RAP & RAB" : ` ${mode}`}`;
+
+  // Legacy helper uses K only to paint an outside border; remove the empty column.
+  ws.spliceColumns(11, 1);
+
+  if (mode !== "COMBINED") {
+    safeUnmerge(ws, combinedTitleRange);
+    [6, 7, 8, 9].forEach((row) => safeUnmerge(ws, `F${row}:J${row}`));
+    safeUnmerge(ws, "G11:H11");
+    safeUnmerge(ws, "I11:J11");
+
+    if (mode === "RAB") {
+      for (let row = 11; row <= ws.rowCount; row++) {
+        cloneCell(ws.getCell(`I${row}`), ws.getCell(`G${row}`));
+        cloneCell(ws.getCell(`J${row}`), ws.getCell(`H${row}`));
+      }
+    }
+
+    ws.spliceColumns(9, 2);
+    ws.mergeCells(singleTitleRange);
+    [6, 7, 8, 9].forEach((row) => ws.mergeCells(`F${row}:H${row}`));
+    ws.mergeCells("G11:H11");
+    ws.getCell("G11").value = mode;
+  }
+
+  const lastCol = mode === "COMBINED" ? "J" : "H";
+  if (categoryTitle) {
+    ws.mergeCells(`D10:${lastCol}10`);
+    ws.getCell("D10").value = `Kategori: ${categoryTitle}`;
+    ws.getCell("D10").font = { bold: true, italic: true, name: "Arial Narrow" };
+  }
+
+  addDivesLogo(ws);
+  ws.pageSetup = {
+    orientation: "landscape",
+    paperSize: 9,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    horizontalCentered: true,
+    printArea: `B3:${lastCol}${ws.rowCount}`,
+    margins: {
+      left: 0.25,
+      right: 0.25,
+      top: 0.35,
+      bottom: 0.35,
+      header: 0.15,
+      footer: 0.15,
+    },
+  };
+  ws.views = [{ state: "frozen", ySplit: 12 }];
+  ws.headerFooter.oddFooter = `&L${mode}${categoryTitle ? ` - ${categoryTitle}` : ""}&RDicetak &D &T`;
+}
+
+async function buildRabSheet(
+  ws,
+  projectId,
+  project,
+  categoryFilter = null,
+  options = {},
+) {
+  const mode = normalizeRabExportMode(options.mode || "COMBINED") || "COMBINED";
   const itemWhere = typeof categoryFilter === "string"
     ? buildWorkCategoryItemWhere({ categoryCode: categoryFilter })
     : buildWorkCategoryItemWhere(categoryFilter || {});
@@ -118,10 +228,10 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
   };
 
   const info = [
-    ["Nama Kegiatan", project.name || "-"],
-    ["Nama Pekerjaan", project?.client.name],
-    ["Lokasi Pekerjaan", project.location],
-    ["Tahun Anggaran", String(project.hspkPeriod)],
+    ["Nama Kegiatan", project.activityName || project.name || "-"],
+    ["Nama Pekerjaan", project.name || "-"],
+    ["Lokasi Pekerjaan", project.location || "-"],
+    ["Tahun Anggaran", String(project.hspkPeriod || "-")],
   ];
 
   let r = 5;
@@ -456,6 +566,9 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
       cell.font = { ...cell.font, name: "Arial Narrow" };
     });
   });
+
+  finalizeRabSheet(ws, mode, options.categoryTitle);
+  return { mode, grandRap, grandRab, groupCount: groups.length };
 }
 
-module.exports = { buildRabSheet };
+module.exports = { buildRabSheet, normalizeRabExportMode };
