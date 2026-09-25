@@ -64,14 +64,27 @@ const SECTION_TYPE = { labor: "UPAH", material: "BAHAN", equipment: "ALAT" };
  */
 async function upsertPriceItem(
   cache,
-  { type, name, unit, price, period, discipline, grade, filename, batchId },
+  { type, name, unit, price, period, discipline, grade, workCategoryId, filename, batchId },
 ) {
-  const key = priceItemKey(type, name, unit) + `|${discipline}|${grade}`;
+  const key = priceItemKey(type, name, unit) + `|${discipline}|${grade}|${workCategoryId || ""}`;
   if (cache.has(key)) return cache.get(key);
 
+  const where = workCategoryId
+    ? { uniq_price_item_work_category: { type, name, unit, period, workCategoryId, grade } }
+    : { uniq_price_item: { type, name, unit, period, discipline, grade } };
+  const categoryData = workCategoryId
+    ? { workCategory: { connect: { id: workCategoryId } } }
+    : {};
   const rec = await prisma.priceItem.upsert({
-    where: { uniq_price_item: { type, name, unit, period, discipline, grade } },
-    update: { price, source: filename, batchId },
+    where,
+    update: {
+      price,
+      source: filename,
+      batch: { connect: { id: batchId } },
+      ...(workCategoryId
+        ? { workCategory: { connect: { id: workCategoryId } } }
+        : {}),
+    },
     create: {
       type,
       name,
@@ -80,8 +93,9 @@ async function upsertPriceItem(
       period,
       discipline,
       grade,
+      ...categoryData,
       source: filename,
-      batchId,
+      batch: { connect: { id: batchId } },
     },
   });
   cache.set(key, rec.id);
@@ -100,11 +114,20 @@ async function importParsedData({
   period,
   discipline,
   grade,
+  workCategoryId,
   filename,
   fileKind,
 }) {
   const batch = await prisma.uploadBatch.create({
-    data: { filename, fileKind, period, status: "PROCESSING" },
+    data: {
+      filename,
+      fileKind,
+      period,
+      ...(workCategoryId
+        ? { workCategory: { connect: { id: workCategoryId } } }
+        : {}),
+      status: "PROCESSING",
+    },
   });
 
   const priceItemCache = new Map();
@@ -121,6 +144,7 @@ async function importParsedData({
         period,
         discipline,
         grade,
+        workCategoryId,
         filename,
         batchId: batch.id,
       });
@@ -139,6 +163,7 @@ async function importParsedData({
             period,
             discipline,
             grade,
+            workCategoryId,
             filename,
             batchId: batch.id,
           });
@@ -155,15 +180,25 @@ async function importParsedData({
       if (!hasComponents) continue;
 
       const jt = await prisma.jobType.upsert({
-        where: {
-          uniq_job_type: {
-            name: job.name,
-            paymentUnit: job.paymentUnit,
-            period,
-            discipline,
-            grade,
-          },
-        },
+        where: workCategoryId
+          ? {
+              uniq_job_type_work_category: {
+                name: job.name,
+                paymentUnit: job.paymentUnit,
+                period,
+                workCategoryId,
+                grade,
+              },
+            }
+          : {
+              uniq_job_type: {
+                name: job.name,
+                paymentUnit: job.paymentUnit,
+                period,
+                discipline,
+                grade,
+              },
+            },
         update: {
           category: job.category || undefined,
           reference: job.reference || undefined,
@@ -171,6 +206,9 @@ async function importParsedData({
           batch: { connect: { id: batch.id } },
           needsReview: !!job.needsReview,
           overhead: job.overhead,
+          ...(workCategoryId
+            ? { workCategory: { connect: { id: workCategoryId } } }
+            : {}),
         },
         create: {
           name: job.name,
@@ -180,6 +218,9 @@ async function importParsedData({
           period,
           discipline,
           grade,
+          ...(workCategoryId
+            ? { workCategory: { connect: { id: workCategoryId } } }
+            : {}),
           source: filename,
           batch: { connect: { id: batch.id } },
           needsReview: !!job.needsReview,

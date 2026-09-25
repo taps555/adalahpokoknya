@@ -1,6 +1,7 @@
 "use strict";
 
 const prisma = require("../lib/prisma");
+const { buildWorkCategoryItemWhere } = require("./bvCalculationService");
 
 const ROMAN = [
   "I",
@@ -49,11 +50,10 @@ function colRange(startCol, endCol) {
   return cols;
 }
 
-async function buildRabSheet(ws, projectId, project, discipline) {
-  const itemWhere = {};
-  if (discipline && discipline !== "GENERAL") {
-    itemWhere.discipline = discipline;
-  }
+async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
+  const itemWhere = typeof categoryFilter === "string"
+    ? buildWorkCategoryItemWhere({ categoryCode: categoryFilter })
+    : buildWorkCategoryItemWhere(categoryFilter || {});
 
   const rawGroups = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },

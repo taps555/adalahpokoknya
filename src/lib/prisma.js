@@ -1,15 +1,16 @@
 'use strict';
 
+// Force reload Prisma Client supaya versi baru (dengan workCategoryId) ter-load
+delete require.cache[require.resolve('@prisma/client')];
+
 const { PrismaClient } = require('@prisma/client');
 
-// Singleton supaya tidak buka banyak koneksi saat nodemon reload dsb.
+// Singleton supaya tidak buka banyak koneksi
 const globalForPrisma = globalThis;
 
-const prisma =
-  globalForPrisma.prisma ||
-  new PrismaClient({
-    log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
-  });
+const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
+});
 
 if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.prisma = prisma;

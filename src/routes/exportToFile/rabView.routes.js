@@ -3,6 +3,7 @@
 const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
+const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 
 const router = express.Router();
 
@@ -182,14 +183,30 @@ function renderRapHtml(project, groups) {
 router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
-    const project = await prisma.project.findUnique({
-      where: { id: projectId },
-    });
+    const { workCategoryId, discipline } = req.query;
+    const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) return res.status(404).send("Project tidak ditemukan.");
+
+    let itemWhere = {};
+    let categoryTitle = "GENERAL";
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (!config || !config.isActive || !config.workCategory?.isActive) {
+        return res.status(400).send("Kategori pekerjaan tidak aktif pada project.");
+      }
+      categoryTitle = config.workCategory.name;
+      itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+    } else if (discipline) {
+      categoryTitle = discipline;
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
 
     const allGroups = await prisma.rabGroup.findMany({
       where: { projectId },
-      include: { items: true },
+      include: { items: { where: itemWhere } },
       orderBy: { order: "asc" },
     });
     const byId = new Map(allGroups.map((group) => [group.id, { ...group, children: [] }]));

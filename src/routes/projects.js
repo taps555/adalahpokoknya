@@ -3,6 +3,7 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../lib/prisma");
+const { normalizeProjectWorkCategoryConfigs } = require("../services/bvCalculationService");
 
 // POST /api/projects
 // body: { name, location, hspkPeriod, interiorGrade, sipilGrade, clientId?, clientName? }
@@ -87,7 +88,7 @@ router.post("/", async (req, res, next) => {
         sipilGrade: sipilGrade || null,
         clientId: finalClientId,
       },
-      include: { client: true },
+      include: { client: true, workCategories: { include: { workCategory: true } } },
     });
 
     res.status(201).json(project);
@@ -101,11 +102,12 @@ router.get("/:id", async (req, res, next) => {
   try {
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
-      include: { 
-        client: true, 
+      include: {
+        client: true,
         pairedProject: true,
         rabItems: true,
-        purchaseOrders: true
+        purchaseOrders: true,
+        workCategories: { include: { workCategory: true } },
       },
     });
     if (!project)
@@ -127,7 +129,7 @@ router.get("/", async (req, res, next) => {
 
     const projects = await prisma.project.findMany({
       where,
-      include: { client: true },
+      include: { client: true, workCategories: { include: { workCategory: true } } },
       orderBy: { createdAt: "desc" },
     });
     res.json(projects);
@@ -270,10 +272,50 @@ router.put("/:id", async (req, res, next) => {
   }
 });
 
+// PUT /api/projects/:id/categories
+router.put("/:id/categories", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { categories } = req.body;
+
+    const existing = await prisma.project.findUnique({ where: { id } });
+    if (!existing)
+      return res.status(404).json({ error: "Project tidak ditemukan" });
+
+    const activeCategories = await prisma.workCategory.findMany({
+      where: { isActive: true },
+    });
+    const normalized = normalizeProjectWorkCategoryConfigs(categories, activeCategories);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.projectWorkCategory.deleteMany({ where: { projectId: id } });
+      await tx.projectWorkCategory.createMany({
+        data: normalized.map((cfg) => ({
+          projectId: id,
+          workCategoryId: cfg.workCategoryId,
+          pricingMode: cfg.pricingMode,
+          grade: cfg.grade,
+          isActive: cfg.isActive,
+        })),
+      });
+    });
+
+    const updated = await prisma.project.findUnique({
+      where: { id },
+      include: { client: true, workCategories: { include: { workCategory: true } } },
+    });
+    res.json({ message: "Kategori proyek berhasil disimpan.", data: updated });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
 // DELETE /api/projects/:id
 router.delete("/:id", async (req, res, next) => {
   try {
-    const { id } = req.params;
     const existing = await prisma.project.findUnique({ where: { id } });
     if (!existing)
       return res.status(404).json({ error: "Project tidak ditemukan" });

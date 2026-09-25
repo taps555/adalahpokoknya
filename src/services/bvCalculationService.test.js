@@ -10,6 +10,9 @@ const {
   validateJobTypeForProject,
   gradeForBv,
   disciplineForRab,
+  normalizeWorkCategoryCode,
+  normalizeProjectWorkCategoryConfigs,
+  buildWorkCategoryItemWhere,
 } = require("./bvCalculationService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("./ahspPricingService");
 
@@ -239,4 +242,110 @@ test("menghitung waste persen dari data BV sipil", () => {
   });
 
   assert.equal(subtotal, 11.592);
+});
+
+test("normalisasi kode kategori master stabil dan menolak sentinel GENERAL", () => {
+  assert.equal(normalizeWorkCategoryCode(" Landscape taman "), "LANDSCAPE_TAMAN");
+  assert.equal(normalizeWorkCategoryCode("M.E.P"), "M_E_P");
+  assert.throws(() => normalizeWorkCategoryCode("GENERAL"), /bukan kategori master/i);
+  assert.throws(() => normalizeWorkCategoryCode("Semua"), /bukan kategori master/i);
+  assert.throws(() => normalizeWorkCategoryCode("---"), /kode kategori/i);
+});
+
+test("konfigurasi kategori proyek membedakan HSPK dan CUSTOM", () => {
+  const categories = [
+    { id: "cat-sipil", code: "SIPIL", isActive: true },
+    { id: "cat-landscape", code: "LANDSCAPE", isActive: true },
+    { id: "cat-inactive", code: "ARSIP", isActive: false },
+  ];
+
+  assert.deepEqual(normalizeProjectWorkCategoryConfigs([
+    { workCategoryId: "cat-sipil", pricingMode: "HSPK", grade: " b " },
+    { workCategoryId: "cat-landscape", pricingMode: "CUSTOM", grade: "A" },
+  ], categories), [
+    { workCategoryId: "cat-sipil", pricingMode: "HSPK", grade: "B", isActive: true },
+    { workCategoryId: "cat-landscape", pricingMode: "CUSTOM", grade: null, isActive: true },
+  ]);
+
+  assert.throws(
+    () => normalizeProjectWorkCategoryConfigs([
+      { workCategoryId: "cat-sipil", pricingMode: "HSPK" },
+    ], categories),
+    /grade.*HSPK/i,
+  );
+  assert.throws(
+    () => normalizeProjectWorkCategoryConfigs([
+      { workCategoryId: "cat-inactive", pricingMode: "CUSTOM" },
+    ], categories),
+    /tidak aktif/i,
+  );
+  assert.throws(
+    () => normalizeProjectWorkCategoryConfigs([
+      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM" },
+      { workCategoryId: "cat-sipil", pricingMode: "HSPK", grade: "A" },
+    ], categories),
+    /duplikat/i,
+  );
+});
+
+test("validasi AHSP kategori dinamis mengikuti konfigurasi proyek", () => {
+  const hspkProject = {
+    hspkPeriod: 2026,
+    workCategories: [{
+      workCategoryId: "cat-landscape",
+      pricingMode: "HSPK",
+      grade: "L2",
+      isActive: true,
+      workCategory: { id: "cat-landscape", code: "LANDSCAPE" },
+    }],
+  };
+  const jobType = {
+    period: 2026,
+    workCategoryId: "cat-landscape",
+    grade: "L2",
+  };
+
+  assert.equal(
+    validateJobTypeForProject(jobType, hspkProject, "LANDSCAPE", null, "cat-landscape"),
+    null,
+  );
+  assert.equal(gradeForBv({ workCategoryId: "cat-landscape" }, hspkProject), "L2");
+
+  const customProject = {
+    ...hspkProject,
+    workCategories: [{
+      ...hspkProject.workCategories[0],
+      pricingMode: "CUSTOM",
+      grade: null,
+    }],
+  };
+  assert.match(
+    validateJobTypeForProject(jobType, customProject, "LANDSCAPE", null, "cat-landscape"),
+    /mode CUSTOM/i,
+  );
+  assert.match(
+    validateJobTypeForProject({ ...jobType, workCategoryId: "cat-mep" }, hspkProject, "LANDSCAPE", null, "cat-landscape"),
+    /kategori/i,
+  );
+});
+
+test("filter kategori RAB memakai FK dan fallback legacy terbatas", () => {
+  assert.deepEqual(
+    buildWorkCategoryItemWhere({ workCategoryId: "cat-mep", categoryCode: "MEP" }),
+    { workCategoryId: "cat-mep" },
+  );
+  assert.deepEqual(
+    buildWorkCategoryItemWhere({ workCategoryId: "cat-sipil", categoryCode: "SIPIL" }),
+    {
+      OR: [
+        { workCategoryId: "cat-sipil" },
+        { workCategoryId: null, discipline: "SIPIL" },
+      ],
+    },
+  );
+  assert.deepEqual(
+    buildWorkCategoryItemWhere({ categoryCode: "INTERIOR" }),
+    { discipline: "INTERIOR" },
+  );
+  assert.deepEqual(buildWorkCategoryItemWhere({ categoryCode: "GENERAL" }), {});
 });

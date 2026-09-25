@@ -2,7 +2,7 @@
 const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
-const { redactSellingFields } = require("../../services/bvCalculationService");
+const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const router = express.Router();
 
 const redactSellingResponse = (req, res, next) => {
@@ -88,12 +88,20 @@ router.post("/projects/:projectId/rab-groups", protectRapWrite, async (req, res)
 router.get("/projects/:projectId/rab-groups", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline } = req.query;
-
-    const validDisciplines = ["SIPIL", "INTERIOR"];
-    const itemWhere = discipline && validDisciplines.includes(discipline)
-      ? { discipline }
-      : undefined;
+    const { discipline, workCategoryId } = req.query;
+    let itemWhere = {};
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (!config || !config.isActive || !config.workCategory?.isActive) {
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+      }
+      itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+    } else if (discipline) {
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
 
     const groups = await prisma.rabGroup.findMany({
       where: { projectId },
@@ -104,6 +112,7 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
           include: {
             bvItem: { select: { id: true, parentBvItemId: true } }, // <-- tambah
             components: true,
+            workCategory: true,
           },
         },
       },

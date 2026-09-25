@@ -5,7 +5,7 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const { calculateJobPrice } = require("../../services/calculateService");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
-const { redactSellingFields, validateJobTypeForProject } = require("../../services/bvCalculationService");
+const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
 
 const redactSellingResponse = (req, res, next) => {
@@ -57,13 +57,23 @@ router.use(
 router.get("/projects/:projectId/rab-items", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline } = req.query;
+    const { discipline, workCategoryId } = req.query;
+    let itemWhere = {};
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (!config || !config.isActive || !config.workCategory?.isActive) {
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+      }
+      itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+    } else if (discipline) {
+      itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
+    }
     const items = await prisma.rabItem.findMany({
-      where: {
-        projectId,
-        ...(discipline ? { discipline } : {}),
-      },
-      include: { components: true },
+      where: { projectId, ...itemWhere },
+      include: { components: true, workCategory: true },
       orderBy: [{ order: "asc" }],
     });
     res.json(items);
@@ -115,7 +125,7 @@ router.put("/rab-items/:id", async (req, res) => {
           ...(isByOwner !== undefined ? { isByOwner } : {}),
           ...(isStip !== undefined ? { isStip } : {}),
         },
-        include: { components: true },
+        include: { components: true, workCategory: true },
       });
 
       // Hapus jika ada komponen bahan nyangkut di si Induk
@@ -196,7 +206,7 @@ router.put("/rab-items/:id", async (req, res) => {
         ...(isByOwner !== undefined ? { isByOwner } : {}),
         ...(isStip !== undefined ? { isStip } : {}),
       },
-      include: { components: true },
+      include: { components: true, workCategory: true },
     });
 
     res.json({ message: "Item RAB berhasil diperbarui", data: updated });
@@ -227,8 +237,7 @@ router.delete("/rab-items/:id", async (req, res) => {
 router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
     const { id } = req.params;
-    // ===== [TAMBAHAN 1]: Tangkap customOverhead dari request body =====
-    const { newJobTypeId, customOverhead, ahspDiscipline } = req.body;
+    const { newJobTypeId, customOverhead, ahspDiscipline, workCategoryId } = req.body;
 
     if (!newJobTypeId)
       return res
@@ -256,6 +265,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
       rabItem.project,
       rabItem.discipline || "GENERAL",
       ahspDiscipline,
+      workCategoryId || rabItem.workCategoryId,
     );
     if (scopeError) return res.status(400).json({ error: scopeError });
 
@@ -316,6 +326,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
         category: calc.jobType.category,
         reference: calc.jobType.reference,
         discipline: calc.jobType.discipline,
+        workCategoryId: workCategoryId || calc.jobType.workCategoryId || rabItem.workCategoryId,
         grade: calc.jobType.grade,
 
         overheadPercent: overhead,
@@ -330,7 +341,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
           create: newComponents,
         },
       },
-      include: { components: true },
+      include: { components: true, workCategory: true },
     });
 
     res.json({
@@ -413,7 +424,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
 
     const items = await prisma.rabItem.findMany({
       where: { id: { in: ids } },
-      include: { components: true },
+      include: { components: true, workCategory: true },
     });
 
     const results = [];
@@ -487,7 +498,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
 
 router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
-    const { ids, newJobTypeId, customOverhead, ahspDiscipline } = req.body;
+    const { ids, newJobTypeId, customOverhead, ahspDiscipline, workCategoryId } = req.body;
 
     if (!Array.isArray(ids) || ids.length === 0)
       return res
@@ -527,6 +538,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
         existing.project,
         existing.discipline || "GENERAL",
         ahspDiscipline,
+        workCategoryId || existing.workCategoryId,
       );
       if (scopeError) {
         skipped.push({ id: existing.id, reason: scopeError });
@@ -577,6 +589,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
           category: calc.jobType.category,
           reference: calc.jobType.reference,
           discipline: calc.jobType.discipline,
+          workCategoryId: workCategoryId || calc.jobType.workCategoryId || existing.workCategoryId,
           grade: calc.jobType.grade,
 
           overheadPercent: overhead,

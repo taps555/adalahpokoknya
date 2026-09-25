@@ -389,6 +389,7 @@ const express = require("express");
 const ExcelJS = require("exceljs");
 const prisma = require("../../lib/prisma");
 const { buildRabSheet } = require("../../services/rabExportHelper");
+const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
@@ -403,10 +404,23 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles(
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
-    const discipline = req.query.discipline;
+    const { discipline, workCategoryId } = req.query;
+    let categoryFilter;
+    if (workCategoryId) {
+      const config = await prisma.projectWorkCategory.findUnique({
+        where: { projectId_workCategoryId: { projectId, workCategoryId } },
+        include: { workCategory: true },
+      });
+      if (!config || !config.isActive || !config.workCategory?.isActive) {
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+      }
+      categoryFilter = { workCategoryId, categoryCode: config.workCategory.code };
+    } else {
+      categoryFilter = discipline || null;
+    }
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("RAB");
-    await buildRabSheet(ws, projectId, project, discipline);
+    await buildRabSheet(ws, projectId, project, categoryFilter);
 
     res.setHeader(
       "Content-Type",

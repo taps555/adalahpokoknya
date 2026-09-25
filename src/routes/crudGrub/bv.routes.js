@@ -142,6 +142,7 @@ router.post(
       isHeaderOnly,
       disciplineLabel,
       ahspDiscipline,
+      workCategoryId,
     } = req.body;
 
     if (typeof isHeaderOnly !== "boolean") {
@@ -159,6 +160,7 @@ router.post(
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
+      include: { workCategories: { include: { workCategory: true } } },
     });
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
@@ -195,6 +197,15 @@ router.post(
     const finalDisciplineLabel = parent
       ? parent.disciplineLabel
       : normalizeDisciplineLabel(disciplineLabel);
+    const finalWorkCategoryId = workCategoryId || (parent ? parent.workCategoryId : null) || null;
+    const projectCategory = finalWorkCategoryId
+      ? project.workCategories.find((entry) =>
+          entry.workCategoryId === finalWorkCategoryId && entry.isActive,
+        )
+      : null;
+    if (finalWorkCategoryId && !projectCategory) {
+      return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+    }
     let finalName = name;
     let finalUnit = paymentUnit;
 
@@ -211,6 +222,7 @@ router.post(
         project,
         finalDisciplineLabel,
         ahspDiscipline,
+        finalWorkCategoryId,
       );
       if (scopeError) return res.status(400).json({ error: scopeError });
       finalName = jobType.name;
@@ -245,6 +257,7 @@ router.post(
         ecommerceLink: ecommerceLink || null,
         nameEcommerceLink: nameEcommerceLink || null,
         disciplineLabel: finalDisciplineLabel,
+        workCategoryId: finalWorkCategoryId,
         totalVolume,
         breakdowns: { create: breakdownRows },
       },
@@ -280,12 +293,14 @@ router.get("/projects/:projectId/bv-items", verifyToken, async (req, res) => {
         linkedRabItem: true,
         parentBvItem: { select: { linkedRabItemId: true } },
         sourceJobType: true,
+        workCategory: true,
         children: {
           include: {
             breakdowns: true,
             linkedRabItem: true,
             parentBvItem: { select: { linkedRabItemId: true } },
             sourceJobType: true,
+            workCategory: true,
           },
           orderBy: { createdAt: "asc" },
         },
@@ -322,6 +337,7 @@ router.put(
       isHeaderOnly,
       disciplineLabel,
       ahspDiscipline,
+      workCategoryId,
     } = req.body;
 
     const existing = await prisma.bvItem.findUnique({ where: { id } });
@@ -377,6 +393,11 @@ router.put(
       : disciplineLabel !== undefined
         ? normalizeDisciplineLabel(disciplineLabel)
         : existing.disciplineLabel;
+    const finalWorkCategoryId = selectedParent
+      ? selectedParent.workCategoryId || null
+      : workCategoryId !== undefined
+        ? workCategoryId || null
+        : existing.workCategoryId || null;
 
     const typeChange =
       existing.linkedRabItemId &&
@@ -422,12 +443,22 @@ router.put(
             .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
         const project = await prisma.project.findUnique({
           where: { id: existing.projectId },
+          include: { workCategories: { include: { workCategory: true } } },
         });
+        const activeCategory = finalWorkCategoryId
+          ? project.workCategories.find((entry) =>
+              entry.workCategoryId === finalWorkCategoryId && entry.isActive,
+            )
+          : null;
+        if (finalWorkCategoryId && !activeCategory) {
+          return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+        }
         const scopeError = validateJobTypeForProject(
           jobType,
           project,
           finalDisciplineLabel,
           ahspDiscipline,
+          finalWorkCategoryId,
         );
         if (scopeError) return res.status(400).json({ error: scopeError });
         finalName = jobType.name;
@@ -506,6 +537,9 @@ router.put(
             : {}),
           ...(ecommerceLink !== undefined ? { ecommerceLink } : {}),
           ...(nameEcommerceLink !== undefined ? { nameEcommerceLink } : {}),
+          ...(workCategoryId !== undefined || selectedParent
+            ? { workCategoryId: finalWorkCategoryId }
+            : {}),
           totalVolume,
           ...(breakdownUpdate ? { breakdowns: breakdownUpdate } : {}),
         },
@@ -527,13 +561,33 @@ router.put(
             id: { in: [id, ...subtreeIds] },
             linkedRabItemId: { not: null },
           },
-          select: { linkedRabItemId: true },
+          select: { linkedRabItemId: true, workCategoryId: true },
         });
         const rabIds = affectedBvItems.map((item) => item.linkedRabItemId).filter(Boolean);
         if (rabIds.length > 0) {
           await tx.rabItem.updateMany({
             where: { id: { in: rabIds } },
             data: { discipline: finalLabel === "GENERAL" ? null : finalLabel },
+          });
+        }
+      }
+
+      if (workCategoryId !== undefined && !selectedParent) {
+        const subtreeIds = await collectBvSubtreeIds([id]);
+        const allIds = [id, ...subtreeIds];
+        await tx.bvItem.updateMany({
+          where: { id: { in: allIds } },
+          data: { workCategoryId: finalWorkCategoryId },
+        });
+        const affectedBvItems = await tx.bvItem.findMany({
+          where: { id: { in: allIds }, linkedRabItemId: { not: null } },
+          select: { linkedRabItemId: true },
+        });
+        const rabIds = affectedBvItems.map((item) => item.linkedRabItemId).filter(Boolean);
+        if (rabIds.length > 0) {
+          await tx.rabItem.updateMany({
+            where: { id: { in: rabIds } },
+            data: { workCategoryId: finalWorkCategoryId },
           });
         }
       }
@@ -691,6 +745,7 @@ async function pastikanIndukTerlink(tx, bvItem) {
       volume: Number(parent.totalVolume) || 0,
       isHeaderOnly: true,
       discipline: disciplineForRab(parent),
+      workCategoryId: parent.workCategoryId || null,
       grade: gradeForBv(parent, proj),
       overheadPercent: 0,
       rapUnitPrice: 0,
@@ -927,6 +982,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
           volume: vol,
           isHeaderOnly: bvItem.isHeaderOnly || false,
           discipline: disciplineForRab(bvItem, ahspDiscipline),
+          workCategoryId: bvItem.workCategoryId || null,
           grade: gradeForBv(bvItem, bvProject, ahspDiscipline),
 
           rapUnitPrice: rapUnitPrice,
@@ -978,6 +1034,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
               discipline: (childBv.disciplineLabel === "GENERAL" || !childBv.disciplineLabel)
                 ? null
                 : childBv.disciplineLabel,
+              workCategoryId: childBv.workCategoryId || null,
               grade: gradeForBv(childBv, bvProject),
               rapUnitPrice: childRapSatuan,
               rapTotalPrice: childRapSatuan * childVol,
@@ -1138,6 +1195,7 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
             discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
               ? null
               : bvItem.disciplineLabel,
+            workCategoryId: bvItem.workCategoryId || null,
             grade: gradeForBv(bvItem, bulkProject),
             sourceJobTypeId: bvItem.sourceJobTypeId || null,
 
@@ -1860,8 +1918,13 @@ async function buildBqSheetXLSX(ws, projectId, project, discFilter) {
 // Karena buildBvSheet mengambil semua groups, kita perlu filter bvItems per disciplineLabel.
 // Kita modifikasi approach: gunakan buildBvSheet langsung (ambil semua), tapi perlu filter.
 // Untuk simplicity, kita buat versi yang accept filter.
-async function buildBvSheetFiltered(wb, projectId, project, labelFilter) {
-  const ws = wb.addWorksheet(`BV ${labelFilter.charAt(0) + labelFilter.slice(1).toLowerCase()}`);
+async function buildBvSheetFiltered(
+  wb,
+  projectId,
+  project,
+  { sheetName, workCategoryId = null, categoryCode = "GENERAL" },
+) {
+  const ws = wb.addWorksheet(sheetName);
   // Patch: sementara ambil semua data, nanti filter di helper
   // Karena helper sudah complex, kita filter groups: hanya yang punya bvItems dengan label sesuai
   const groups = await prisma.rabGroup.findMany({
@@ -1899,43 +1962,35 @@ async function buildBvSheetFiltered(wb, projectId, project, labelFilter) {
     orderBy: { order: "asc" },
   });
 
-  // Filter: hanya groups yang punya bvItems (recursive) dengan label sesuai
-  // TAPI: untuk "GENERAL" — tampilkan SEMUA (interior + sipil + tanpa label)
-  const hasLabelRecursive = (items, label) => {
-    if (label === "GENERAL") return true; // General = semua
-    return items.some(it => {
-      const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
-      return lbl === label || lbl === "GENERAL" || (it.children && hasLabelRecursive(it.children, label));
+  // Filter utama memakai FK kategori. disciplineLabel dipertahankan untuk data legacy.
+  const filterBvItemsRecursive = (items) => {
+    if (!workCategoryId && categoryCode === "GENERAL") return items || [];
+
+    return (items || []).flatMap((item) => {
+      const children = filterBvItemsRecursive(item.children || []);
+      const itemLabel = String(item.disciplineLabel || "GENERAL").toUpperCase();
+      const matches = workCategoryId
+        ? item.workCategoryId === workCategoryId
+          || (!item.workCategoryId
+            && ["SIPIL", "INTERIOR"].includes(categoryCode)
+            && itemLabel === categoryCode)
+        : !item.workCategoryId && itemLabel === categoryCode;
+      if (!matches && children.length === 0) return [];
+      return [{ ...item, children }];
     });
   };
 
-  const filterBvItemsRecursive = (items, label) => {
-    if (label === "GENERAL") return items; // General = tampilkan semua
-    return items.filter(it => {
-      const lbl = (it.disciplineLabel || "GENERAL").toUpperCase();
-      if (lbl === label || lbl === "GENERAL") {
-        // Keep this item, but also filter its children
-        if (it.children) it.children = filterBvItemsRecursive(it.children, label);
-        return true;
-      }
-      // Check if any children match
-      if (it.children && hasLabelRecursive(it.children, label)) {
-        if (it.children) it.children = filterBvItemsRecursive(it.children, label);
-        return true;
-      }
-      return false;
-    });
-  };
-
-  // Filter groups
-  const filteredGroups = groups.map(group => {
-    const filteredBv = filterBvItemsRecursive([...(group.bvItems || [])], labelFilter);
-    const filteredChildren = (group.children || []).map(sub => {
-      const subFiltered = filterBvItemsRecursive([...(sub.bvItems || [])], labelFilter);
-      return { ...sub, bvItems: subFiltered };
-    }).filter(sub => sub.bvItems.length > 0);
+  const filteredGroups = groups.map((group) => {
+    const filteredBv = filterBvItemsRecursive(group.bvItems || []);
+    const filteredChildren = (group.children || []).map((sub) => ({
+      ...sub,
+      bvItems: filterBvItemsRecursive(sub.bvItems || []),
+    })).filter((sub) => sub.bvItems.length > 0);
     return { ...group, bvItems: filteredBv, children: filteredChildren };
-  }).filter(group => (group.bvItems && group.bvItems.length > 0) || (group.children && group.children.length > 0));
+  }).filter((group) =>
+    (group.bvItems && group.bvItems.length > 0) ||
+    (group.children && group.children.length > 0),
+  );
 
   // Sekarang panggil buildBvSheet tapi dengan data yang sudah difilter
   // buildBvSheet mengambil dari prisma sendiri, jadi kita perlu approach berbeda
@@ -2173,29 +2228,84 @@ router.get(
   async (req, res) => {
   try {
     const { projectId } = req.params;
-    const project = await prisma.project.findUnique({ where: { id: projectId }, include: { client: true } });
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        client: true,
+        workCategories: {
+          where: { isActive: true },
+          include: { workCategory: true },
+          orderBy: { workCategory: { sortOrder: "asc" } },
+        },
+      },
+    });
     if (!project) return res.status(404).json({ error: "Project tidak ditemukan" });
-    const wb = new ExcelJS.Workbook();
-    wb.creator = "Dives Corp"; wb.created = new Date();
 
-    // BV sheets — format lengkap sama dengan web (19 kolom dengan breakdown)
-    await buildBvSheetFiltered(wb, projectId, project, "GENERAL");
-    await buildBvSheetFiltered(wb, projectId, project, "SIPIL");
-    await buildBvSheetFiltered(wb, projectId, project, "INTERIOR");
+    const requestedScope = String(req.query.scope || "ALL").trim().toUpperCase();
+    const requestedWorkCategoryId = String(req.query.workCategoryId || "").trim() || null;
+    const safeSheetName = (name) => String(name || "KATEGORI")
+      .replace(/[\\/?*\[\]:]/g, " ")
+      .trim()
+      .slice(0, 28);
+    const configuredCategories = (project.workCategories || [])
+      .filter((entry) => entry.workCategory?.isActive !== false)
+      .map((entry) => ({
+        sheetName: `BV ${safeSheetName(entry.workCategory.code)}`,
+        workCategoryId: entry.workCategoryId,
+        categoryCode: entry.workCategory.code,
+        categoryName: entry.workCategory.name,
+      }));
+    const legacyCategories = configuredCategories.length > 0
+      ? []
+      : [
+          { sheetName: "BV CV", workCategoryId: null, categoryCode: "SIPIL", categoryName: "Civil" },
+          { sheetName: "BV INT", workCategoryId: null, categoryCode: "INTERIOR", categoryName: "Interior" },
+        ];
+    const categorySheets = configuredCategories.length > 0 ? configuredCategories : legacyCategories;
+    const generalSheet = {
+      sheetName: "BV GENERAL",
+      workCategoryId: null,
+      categoryCode: "GENERAL",
+      categoryName: "Semua",
+    };
 
-    // BQ sheets — format RAB (NO, ITEM, SPESIFIKASI, SAT, VOL, RAP, RAB)
-    const bqSheets = [
-      ["BQ General", "GENERAL"],
-      ["BQ Sipil", "SIPIL"],
-      ["BQ Interior", "INTERIOR"],
-    ];
-    for (const [name, discFilter] of bqSheets) {
-      const ws = wb.addWorksheet(name);
-      await buildBqSheetXLSX(ws, projectId, project, discFilter);
+    let selectedSheets;
+    if (requestedWorkCategoryId) {
+      const selectedCategory = configuredCategories.find(
+        (entry) => entry.workCategoryId === requestedWorkCategoryId,
+      );
+      if (!selectedCategory) {
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada proyek ini." });
+      }
+      selectedSheets = [selectedCategory];
+    } else if (requestedScope === "ALL") {
+      selectedSheets = [generalSheet, ...categorySheets];
+    } else if (requestedScope === "GENERAL") {
+      selectedSheets = [generalSheet];
+    } else {
+      const normalizedScope = requestedScope === "CIVIL" ? "SIPIL" : requestedScope;
+      const selectedCategory = categorySheets.find(
+        (entry) => String(entry.categoryCode).toUpperCase() === normalizedScope,
+      );
+      if (!selectedCategory) {
+        return res.status(400).json({ error: "Scope export BV tidak valid." });
+      }
+      selectedSheets = [selectedCategory];
     }
 
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "Dives Corp";
+    wb.created = new Date();
+
+    for (const sheetConfig of selectedSheets) {
+      await buildBvSheetFiltered(wb, projectId, project, sheetConfig);
+    }
+
+    const exportCode = requestedWorkCategoryId
+      ? selectedSheets[0].categoryCode
+      : requestedScope;
     const safeName = (project.name || "proyek").replace(/[^a-zA-Z0-9]/g, "_");
-    const filename = `BV_${safeName}.xlsx`;
+    const filename = `BV_${exportCode}_${safeName}.xlsx`;
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     const buffer = await wb.xlsx.writeBuffer();

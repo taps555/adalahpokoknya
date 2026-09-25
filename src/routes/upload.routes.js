@@ -33,10 +33,23 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Field "period" (tahun HSPK) wajib diisi, contoh: 2026.' });
     }
 
-    const { discipline, grade } = req.body;
-    if (!discipline || !['SIPIL', 'INTERIOR'].includes(discipline)) {
-      return res.status(400).json({ error: 'Field "discipline" wajib diisi: SIPIL atau INTERIOR.' });
+    const { discipline, grade, workCategoryId } = req.body;
+
+    // Jalur dinamis: kategori master dipilih, discipline boleh kosong.
+    if (workCategoryId) {
+      const category = await prisma.workCategory.findUnique({
+        where: { id: workCategoryId },
+      });
+      if (!category || !category.isActive) {
+        return res.status(400).json({ error: 'Kategori pekerjaan tidak ditemukan atau tidak aktif.' });
+      }
+    } else {
+      // Jalur legacy: wajib discipline SIPIL/INTERIOR.
+      if (!discipline || !['SIPIL', 'INTERIOR'].includes(discipline)) {
+        return res.status(400).json({ error: 'Field "discipline" wajib diisi: SIPIL atau INTERIOR, atau pilih workCategoryId.' });
+      }
     }
+
     if (!grade) {
       return res.status(400).json({ error: 'Field "grade" wajib diisi, contoh: A, B, atau C.' });
     }
@@ -63,6 +76,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       period,
       discipline,
       grade,
+      workCategoryId,
       filename: req.file.originalname,
       fileKind,
     });

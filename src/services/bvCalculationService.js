@@ -201,6 +201,13 @@ function normalizeAhspDiscipline(value) {
 
 function gradeForBv(bvItem, project, requestedDiscipline = null) {
   if (!project) return null;
+
+  const dynamicConfig = (project.workCategories || []).find((config) =>
+    config.workCategoryId === bvItem?.workCategoryId
+    || config.workCategory?.id === bvItem?.workCategoryId,
+  );
+  if (dynamicConfig) return dynamicConfig.grade || null;
+
   const itemLabel = String(bvItem?.disciplineLabel || "GENERAL").trim().toUpperCase();
   const label = itemLabel === "GENERAL"
     ? normalizeAhspDiscipline(requestedDiscipline) || "GENERAL"
@@ -222,10 +229,35 @@ function redactSellingFields(value) {
   );
 }
 
-function validateJobTypeForProject(jobType, project, disciplineLabel, requestedDiscipline = null) {
+function validateJobTypeForProject(
+  jobType,
+  project,
+  disciplineLabel,
+  requestedDiscipline = null,
+  workCategoryId = null,
+) {
   if (!jobType || !project) return "Master AHSP atau project tidak ditemukan.";
   if (Number(jobType.period) !== Number(project.hspkPeriod)) {
     return "Periode master AHSP tidak sesuai dengan periode HSPK project.";
+  }
+
+  if (workCategoryId) {
+    const config = (project.workCategories || []).find((entry) =>
+      entry.workCategoryId === workCategoryId || entry.workCategory?.id === workCategoryId,
+    );
+    if (!config || !config.isActive) {
+      return "Kategori pekerjaan tidak aktif pada project.";
+    }
+    if (config.pricingMode !== "HSPK") {
+      return "Kategori project memakai mode CUSTOM; AHSP tidak dapat dipilih.";
+    }
+    if (jobType.workCategoryId !== workCategoryId) {
+      return "Kategori master AHSP tidak sesuai dengan kategori BV.";
+    }
+    if (config.grade && jobType.grade !== config.grade) {
+      return "Grade master AHSP tidak sesuai dengan grade kategori project.";
+    }
+    return null;
   }
 
   const itemLabel = String(disciplineLabel || "GENERAL").trim().toUpperCase();
@@ -252,11 +284,87 @@ function validateJobTypeForProject(jobType, project, disciplineLabel, requestedD
 
 function disciplineForRab(bvItem, ahspDiscipline = null) {
   const itemLabel = String(bvItem?.disciplineLabel || "GENERAL").trim().toUpperCase();
-  if (itemLabel !== "GENERAL") return itemLabel;
+  if (["SIPIL", "INTERIOR"].includes(itemLabel)) return itemLabel;
   const requested = normalizeAhspDiscipline(ahspDiscipline);
   if (requested) return requested;
-  // fallback bila sourceJobType sudah punya discipline
   return null;
+}
+
+function buildWorkCategoryItemWhere({ workCategoryId = null, categoryCode = null } = {}) {
+  const code = String(categoryCode || "").trim().toUpperCase();
+  if (workCategoryId) {
+    if (["SIPIL", "INTERIOR"].includes(code)) {
+      return {
+        OR: [
+          { workCategoryId },
+          { workCategoryId: null, discipline: code },
+        ],
+      };
+    }
+    return { workCategoryId };
+  }
+  if (["SIPIL", "INTERIOR"].includes(code)) return { discipline: code };
+  return {};
+}
+
+function normalizeWorkCategoryCode(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!normalized || normalized.length > 40) {
+    throw new TypeError("Kode kategori wajib berisi huruf/angka dan maksimal 40 karakter.");
+  }
+  if (["GENERAL", "SEMUA", "ALL"].includes(normalized)) {
+    throw new TypeError(`${normalized} bukan kategori master; gunakan sebagai filter gabungan.`);
+  }
+  return normalized;
+}
+
+function normalizeProjectWorkCategoryConfigs(configs, categories) {
+  if (!Array.isArray(configs) || configs.length === 0) {
+    throw new TypeError("Minimal satu kategori pekerjaan proyek wajib dipilih.");
+  }
+
+  const categoryById = new Map((categories || []).map((category) => [category.id, category]));
+  const seen = new Set();
+  const normalized = configs.map((config) => {
+    const workCategoryId = String(config?.workCategoryId || "").trim();
+    const category = categoryById.get(workCategoryId);
+    if (!category) throw new TypeError("Kategori pekerjaan tidak ditemukan.");
+    if (!category.isActive) {
+      throw new TypeError(`Kategori ${category.code || category.name} tidak aktif.`);
+    }
+    if (seen.has(workCategoryId)) {
+      throw new TypeError(`Kategori ${category.code || category.name} duplikat.`);
+    }
+    seen.add(workCategoryId);
+
+    const pricingMode = String(config?.pricingMode || "CUSTOM").trim().toUpperCase();
+    if (!["HSPK", "CUSTOM"].includes(pricingMode)) {
+      throw new TypeError("Sumber harga kategori harus HSPK atau CUSTOM.");
+    }
+    const grade = pricingMode === "HSPK"
+      ? String(config?.grade || "").trim().toUpperCase()
+      : null;
+    if (pricingMode === "HSPK" && !grade) {
+      throw new TypeError(`Grade wajib dipilih untuk kategori HSPK ${category.code || category.name}.`);
+    }
+
+    return {
+      workCategoryId,
+      pricingMode,
+      grade,
+      isActive: config?.isActive !== false,
+    };
+  });
+
+  if (!normalized.some((config) => config.isActive)) {
+    throw new TypeError("Minimal satu kategori pekerjaan proyek harus aktif.");
+  }
+  return normalized;
 }
 
 module.exports = {
@@ -270,4 +378,7 @@ module.exports = {
   gradeForBv,
   normalizeAhspDiscipline,
   disciplineForRab,
+  normalizeWorkCategoryCode,
+  normalizeProjectWorkCategoryConfigs,
+  buildWorkCategoryItemWhere,
 };

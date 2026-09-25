@@ -17,6 +17,7 @@ const rabGrub = require("./routes/crudGrub/rabGrub.routes");
 const exportExcel = require("./routes/exportToFile/rabExport.routes");
 
 const bv = require("./routes/crudGrub/bv.routes");
+const workCategoryRouter = require("./routes/workCategories");
 
 const app = express();
 app.use(cors());
@@ -45,6 +46,9 @@ app.use("/api", exportExcel);
 
 //bv
 app.use("/api", bv);
+
+//work categories (master kategori pekerjaan dinamis)
+app.use("/api/work-categories", workCategoryRouter);
 
 app.use("/api", require("./routes/exportToFile/bvExport.routes"));
 app.use("/api", require("./routes/exportToFile/fullExport.routes"));

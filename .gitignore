@@ -9,6 +9,16 @@ node_modules
 # Logs
 *.log
 logs/
+backend_foreground.log
+backend_out.log
+backend_run.log
+
+# Script test/temporer
+tmp_*.js
+test*.js
+check*.js
+inspect_*.js
+inspect_*.py
 
 # Database backup & dumps
 backupo/
