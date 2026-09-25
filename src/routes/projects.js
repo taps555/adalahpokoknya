@@ -3,13 +3,20 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../lib/prisma");
+const { verifyToken, authorizeRoles } = require("../middleware/auth");
 const {
   normalizeRequiredProjectWorkCategoryConfigs,
 } = require("../services/bvCalculationService");
 
+const PROJECT_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+
 // POST /api/projects
 // body: { name, location, hspkPeriod, interiorGrade, sipilGrade, categories?, clientId?, clientName? }
-router.post("/", async (req, res, next) => {
+router.post(
+  "/",
+  verifyToken,
+  authorizeRoles(...PROJECT_MUTATION_ROLES),
+  async (req, res, next) => {
   try {
     const {
       name,
@@ -268,7 +275,11 @@ router.put("/:id/pair", async (req, res, next) => {
 });
 
 // PUT /api/projects/:id
-router.put("/:id", async (req, res, next) => {
+router.put(
+  "/:id",
+  verifyToken,
+  authorizeRoles(...PROJECT_MUTATION_ROLES),
+  async (req, res, next) => {
   try {
     const { id } = req.params;
     const {
