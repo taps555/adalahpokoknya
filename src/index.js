@@ -75,6 +75,7 @@ app.use("/api", require("./routes/crudGrub/survey.routes"));
 
 app.use("/api", require("./routes/crudGrub/complain.routes"));
 app.use("/api", require("./routes/crudGrub/bast.routes"));
+app.use("/api", require("./routes/crudGrub/bast2.routes"));
 app.use("/api", require("./routes/crudGrub/lapangan.routes"));
 app.use("/api", require("./routes/crudGrub/rab.routes"));
 app.use("/api", require("./routes/crudGrub/supplier.route"));

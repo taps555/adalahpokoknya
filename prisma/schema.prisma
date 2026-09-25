@@ -240,6 +240,7 @@ model Project {
 
   // 👇 PAHAT BARIS INI DI SINI 👇
   basts Bast[]
+  bast2s Bast2[]
 
   pairedProjectId String?  @unique // <-- TAMBAH
   pairedProject   Project? @relation("ProjectPair", fields: [pairedProjectId], references: [id]) // <-- TAMBAH
@@ -555,6 +556,7 @@ model ComplaintReport {
   updatedAt DateTime @updatedAt
 
   categories ComplaintCategory[]
+  bast2s     Bast2[]
 }
 
 model ComplaintCategory {
@@ -630,6 +632,27 @@ model BastPhoto {
   order Int    @default(0)
 
   @@index([bastId])
+}
+
+model Bast2 {
+  id                 String   @id @default(cuid())
+  projectId          String
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  complaintReportId  String?
+  complaintReport    ComplaintReport? @relation(fields: [complaintReportId], references: [id], onDelete: SetNull)
+  
+  bastNumber         String
+  spkNumber          String
+  handoverDate       DateTime
+  pihakPertamaName   String
+  pihakKeduaName     String
+  statusText         String
+  
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([projectId])
 }
 
 //FINANCE
