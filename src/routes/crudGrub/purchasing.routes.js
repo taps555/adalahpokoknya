@@ -727,26 +727,40 @@ router.put(
           },
         });
 
-        // Jika PO cash/transfer, langsung buat PembayaranSupplier
+        // Saat pengajuan di-approve, selalu siapkan draft PembayaranSupplier default BELUM_BAYAR (PENDING)
         const poForPayment = await prisma.purchaseOrder.findUnique({
           where: { id: existing.poId },
         });
-        if (poForPayment && /cash|transfer/i.test(poForPayment.caraPembayaran || "")) {
+        if (poForPayment) {
           const sudahAda = await prisma.pembayaranSupplier.findFirst({
             where: { poId: poForPayment.id },
           });
           if (!sudahAda) {
             const seq = await prisma.pembayaranSupplier.count({});
             const noPembayaran = `BYR-${String(seq + 1).padStart(5, "0")}`;
+            const totalTagihan = Number(poForPayment.grandTotal || poForPayment.subTotal || 0);
+
+            const cara = String(poForPayment.caraPembayaran || "").toLowerCase();
+            let metodeDefault = "TRANSFER";
+            if (cara.includes("cash")) metodeDefault = "CASH";
+            else if (cara.includes("cek")) metodeDefault = "CEK";
+            else if (cara.includes("giro")) metodeDefault = "GIRO";
+            else if (cara.includes("tempo") || cara.includes("cicil") || cara.includes("termin") || cara.includes("kredit")) {
+              metodeDefault = "TEMPO";
+            }
+
             await prisma.pembayaranSupplier.create({
               data: {
                 noPembayaran,
                 supplierId: poForPayment.supplierId,
                 poId: poForPayment.id,
                 tanggal: new Date(),
-                jumlahBayar: poForPayment.grandTotal || poForPayment.subTotal || 0,
-                metodeBayar: /cash/i.test(poForPayment.caraPembayaran || "") ? "CASH" : "TRANSFER",
-                keterangan: `Pembayaran otomatis PO ${poForPayment.poNumber || poForPayment.id}`,
+                totalTagihan,
+                jumlahBayar: 0,
+                totalTerbayar: 0,
+                sisaBayar: totalTagihan,
+                metodeBayar: metodeDefault,
+                keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
                 status: "PENDING",
               },
             });
@@ -878,6 +892,7 @@ router.get("/pembayaran-supplier", async (req, res) => {
       include: {
         supplier: { select: { name: true, id: true, type: true } },
         pengajuan: { select: { noPengajuan: true, id: true } },
+        rekeningBank: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
@@ -905,6 +920,7 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       include: {
         supplier: true,
         pengajuan: true,
+        rekeningBank: true,
         purchaseOrder: { include: { supplier: true, project: true, items: { include: { materialRequest: true } } } },
       },
     });
@@ -930,17 +946,74 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       poId,
       tanggal,
       bankAccount,
+      rekeningBankId,
       keterangan,
       buktiBayarUrl,
+      akunKasBank = req.body.akunKasBank || "",
+      tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
+      status,
     } = req.body;
 
-    // FIX: frontend mengirim `jumlah` + `metode`; kontrak DB memakai
-    // `jumlahBayar` + `metodeBayar`. Dulu nilai FE hilang -> tersimpan 0.
-    const jumlahBayar = req.body.jumlahBayar ?? req.body.jumlah ?? 0;
+    const jumlahBayarInput = Number(req.body.jumlahBayar ?? req.body.jumlah ?? 0);
     const metodeBayar = req.body.metodeBayar ?? req.body.metode ?? "TRANSFER";
+    const totalTagihanInput = Number(req.body.totalTagihan ?? 0);
+    const tanggalForm = tanggal ? new Date(tanggal) : new Date();
+    const tanggalBayarInput = req.body.tanggalBayar ? new Date(req.body.tanggalBayar) : null;
 
     if (!supplierId) {
       return res.status(400).json({ error: "Supplier wajib diisi" });
+    }
+    if (Number.isNaN(jumlahBayarInput) || jumlahBayarInput < 0) {
+      return res.status(400).json({ error: "Jumlah bayar harus angka >= 0" });
+    }
+
+    const po = poId
+      ? await prisma.purchaseOrder.findUnique({
+          where: { id: poId },
+          include: {
+            items: { include: { materialRequest: true } },
+            project: { select: { id: true, name: true } },
+            permintaanHabisPakai: { select: { id: true, poId: true } },
+          },
+        })
+      : null;
+
+    const totalTagihan = Math.max(
+      0,
+      totalTagihanInput || Number(po?.grandTotal || po?.subTotal || 0),
+    );
+
+    if (totalTagihan > 0 && jumlahBayarInput > totalTagihan) {
+      return res.status(400).json({ error: "Jumlah bayar tidak boleh melebihi total tagihan" });
+    }
+
+    const totalTerbayar = jumlahBayarInput;
+    const sisaBayar = Math.max(totalTagihan - totalTerbayar, 0);
+
+    let autoStatus = "PENDING";
+    if (totalTagihan > 0 && totalTerbayar >= totalTagihan) autoStatus = "PAID";
+    else if (totalTerbayar > 0) autoStatus = "PARTIAL";
+
+    if (status && ["PENDING", "PARTIAL", "PAID"].includes(status)) {
+      autoStatus = status;
+    }
+
+    const paymentHistory = [];
+    if (jumlahBayarInput > 0) {
+      paymentHistory.push({
+        id: `PMT-${Date.now()}`,
+        tanggal: (tanggalBayarInput || tanggalForm).toISOString(),
+        jumlah: jumlahBayarInput,
+        metodeBayar,
+        rekeningBankId: rekeningBankId || null,
+        tipeAkunKasBank,
+        akunKasBank: akunKasBank || null,
+        tipeEntry:
+          metodeBayar === "TEMPO"
+            ? (sisaBayar <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
+            : "PEMBAYARAN",
+        keterangan: keterangan || null,
+      });
     }
 
     const created = await prisma.pembayaranSupplier.create({
@@ -948,17 +1021,24 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         supplierId,
         pengajuanId: pengajuanId || null,
         poId: poId || null,
-        tanggal: new Date(tanggal),
-        jumlahBayar: Number(jumlahBayar || 0),
+        tanggal: tanggalForm,
+        totalTagihan,
+        jumlahBayar: jumlahBayarInput,
+        totalTerbayar,
+        sisaBayar,
         metodeBayar: metodeBayar || "TRANSFER",
         bankAccount,
+        rekeningBankId: rekeningBankId || null,
         keterangan,
+        paymentHistory,
         buktiBayarUrl,
+        status: autoStatus,
+        tanggalBayar: jumlahBayarInput > 0 ? (tanggalBayarInput || tanggalForm) : null,
       },
     });
 
     // Generate noPembayaran: PBY/bulan/tahun/seq
-    const now = new Date(tanggal);
+    const now = tanggalForm;
     const bulan = String(now.getMonth() + 1).padStart(2, "0");
     const tahun = now.getFullYear();
     const urutan = String(created.seq).padStart(3, "0");
@@ -967,7 +1047,57 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
     const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: created.id },
       data: { noPembayaran },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        rekeningBank: true,
+        purchaseOrder: {
+          include: {
+            items: { include: { materialRequest: true } },
+            permintaanHabisPakai: { select: { id: true, poId: true } },
+          },
+        },
+      },
     });
+
+    // Jika langsung ada pembayaran, langsung posting ke buku besar
+    if (jumlahBayarInput > 0) {
+      try {
+        const { createTransaksiBukuBesar } = require("./glBank.routes.js");
+        const rekening = rekeningBankId
+          ? await prisma.masterRekeningBank.findUnique({ where: { id: rekeningBankId } })
+          : null;
+
+        const namaAkun = akunKasBank?.trim()
+          || (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
+          || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
+
+        const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(pembayaran.purchaseOrder || po);
+
+        const tipeLabel =
+          metodeBayar === "TEMPO"
+            ? (sisaBayar <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
+            : "Pembayaran Supplier";
+
+        await createTransaksiBukuBesar({
+          tanggal: tanggalBayarInput || tanggalForm,
+          tipeAkun: tipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
+          namaAkun,
+          jenis: "KELUAR",
+          nominal: jumlahBayarInput,
+          noReferensi: noPembayaran,
+          pihak: pembayaran.supplier?.name || "Supplier",
+          keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
+          keteranganVolume: ketVol,
+          keteranganHarga: ketHrg,
+          poId: pembayaran.poId,
+          pengajuanId: pembayaran.pengajuanId,
+          pembayaranId: pembayaran.id,
+          createdById: req.user?.userId || req.user?.id || null,
+        });
+      } catch (bbErr) {
+        console.error("Auto-create buku besar saat create pembayaran error:", bbErr);
+      }
+    }
 
     res.json({
       message: "Pembayaran supplier berhasil dibuat",
@@ -991,104 +1121,194 @@ const fmtRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFra
 router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
   try {
     const {
-          supplierId,
-          pengajuanId,
-          poId,
-          tanggal,
-          jumlahBayar,
-          metodeBayar,
-          jatuhTempo,
-          tanggalBayar,
-          bankAccount,
-          keterangan,
-          buktiBayarUrl,
-          akunKasBank = req.body.akunKasBank || "",
-          tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
-        } = req.body;
+      supplierId,
+      pengajuanId,
+      poId,
+      tanggal,
+      jumlahBayar,
+      metodeBayar,
+      jatuhTempo,
+      tanggalBayar,
+      bankAccount,
+      rekeningBankId,
+      keterangan,
+      buktiBayarUrl,
+      akunKasBank = req.body.akunKasBank || "",
+      tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
+      status,
+      tambahPembayaran = Boolean(req.body.tambahPembayaran),
+      totalTagihan: totalTagihanInput,
+    } = req.body;
 
-        // Tentukan status otomatis berdasarkan kelengkapan data pembayaran
-        // Status = PAID jika semua data keuangan terisi: jumlah > 0, metode, tanggalBayar
-        const jmlBayar = Number(jumlahBayar || 0);
-        const metode = metodeBayar || null;
-        const tglBayar = tanggalBayar ? new Date(tanggalBayar) : null;
-
-        const existing = await prisma.pembayaranSupplier.findUnique({
-          where: { id: req.params.id },
-          include: { purchaseOrder: { include: { items: { include: { materialRequest: true } } } }, supplier: true },
-        });
-        if (!existing) return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
-
-        let autoStatus = existing.status || "PENDING";
-        if (req.body.status && ["PENDING", "PAID"].includes(req.body.status)) {
-          autoStatus = req.body.status;
-        } else if (jmlBayar > 0 && metode && tglBayar) {
-          autoStatus = "PAID";
-        }
-
-        const pembayaran = await prisma.pembayaranSupplier.update({
+    const existing = await prisma.pembayaranSupplier.findUnique({
       where: { id: req.params.id },
-      data: {
-        supplierId: supplierId || undefined,
-        pengajuanId: pengajuanId !== undefined ? pengajuanId : undefined,
-        poId: poId !== undefined ? poId : undefined,
-        tanggal: tanggal ? new Date(tanggal) : undefined,
-        jumlahBayar: jmlBayar,
-        metodeBayar: metode || undefined,
-        jatuhTempo: jatuhTempo ? new Date(jatuhTempo) : null,
-        tanggalBayar: tglBayar,
-        bankAccount,
-        keterangan,
-        buktiBayarUrl,
-        status: autoStatus,
-      },
       include: {
-        supplier: { select: { id: true, name: true } },
+        supplier: true,
+        rekeningBank: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
+            project: { select: { id: true, name: true } },
             permintaanHabisPakai: { select: { id: true, poId: true } },
           },
         },
       },
     });
+    if (!existing) return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
 
-    // Auto-create Buku Besar KELUAR saat status berubah menjadi PAID
-    const statusBerubahJadiPaid = autoStatus === "PAID" && existing.status !== "PAID";
-    if (statusBerubahJadiPaid) {
+    const poFinalId = poId ?? existing.poId;
+    const poFinal = poFinalId
+      ? await prisma.purchaseOrder.findUnique({
+          where: { id: poFinalId },
+          include: {
+            items: { include: { materialRequest: true } },
+            project: { select: { id: true, name: true } },
+            permintaanHabisPakai: { select: { id: true, poId: true } },
+          },
+        })
+      : existing.purchaseOrder;
+
+    const metodeFinal = metodeBayar || existing.metodeBayar || "TRANSFER";
+    const tanggalFinal = tanggal ? new Date(tanggal) : existing.tanggal;
+    const tanggalBayarFinal = tanggalBayar
+      ? new Date(tanggalBayar)
+      : (existing.tanggalBayar || (tambahPembayaran ? new Date() : null));
+
+    const jumlahInput = Number(jumlahBayar ?? 0);
+    if (Number.isNaN(jumlahInput) || jumlahInput < 0) {
+      return res.status(400).json({ error: "Jumlah bayar harus angka >= 0" });
+    }
+
+    const totalTagihan = Math.max(
+      0,
+      Number(
+        totalTagihanInput
+        ?? existing.totalTagihan
+        ?? poFinal?.grandTotal
+        ?? poFinal?.subTotal
+        ?? 0,
+      ),
+    );
+
+    const existingTerbayar = Number(existing.totalTerbayar ?? existing.jumlahBayar ?? 0);
+    let totalTerbayarBaru = existingTerbayar;
+
+    if (tambahPembayaran) {
+      if (jumlahInput <= 0) {
+        return res.status(400).json({ error: "Nominal cicilan/pelunasan harus > 0" });
+      }
+      totalTerbayarBaru += jumlahInput;
+    } else if (jumlahBayar !== undefined && jumlahBayar !== null && jumlahBayar !== "") {
+      totalTerbayarBaru = jumlahInput;
+    }
+
+    if (totalTagihan > 0 && totalTerbayarBaru > totalTagihan) {
+      return res.status(400).json({ error: "Total pembayaran melebihi total tagihan" });
+    }
+
+    const sisaBayarBaru = Math.max(totalTagihan - totalTerbayarBaru, 0);
+
+    let autoStatus = "PENDING";
+    if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "PAID";
+    else if (totalTerbayarBaru > 0) autoStatus = "PARTIAL";
+
+    if (status && ["PENDING", "PARTIAL", "PAID"].includes(status)) {
+      autoStatus = status;
+    }
+
+    const nominalJurnal = Math.max(totalTerbayarBaru - existingTerbayar, 0);
+
+    const paymentHistory = Array.isArray(existing.paymentHistory)
+      ? [...existing.paymentHistory]
+      : [];
+
+    if (nominalJurnal > 0) {
+      paymentHistory.push({
+        id: `PMT-${Date.now()}`,
+        tanggal: (tanggalBayarFinal || new Date()).toISOString(),
+        jumlah: nominalJurnal,
+        metodeBayar: metodeFinal,
+        rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
+        tipeAkunKasBank,
+        akunKasBank: akunKasBank || null,
+        tipeEntry:
+          metodeFinal === "TEMPO"
+            ? (sisaBayarBaru <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
+            : "PEMBAYARAN",
+        keterangan: keterangan || null,
+      });
+    }
+
+    const pembayaran = await prisma.pembayaranSupplier.update({
+      where: { id: req.params.id },
+      data: {
+        supplierId: supplierId || undefined,
+        pengajuanId: pengajuanId !== undefined ? pengajuanId : undefined,
+        poId: poId !== undefined ? poId : undefined,
+        tanggal: tanggalFinal,
+        totalTagihan,
+        jumlahBayar: nominalJurnal > 0 ? nominalJurnal : Number(existing.jumlahBayar || 0),
+        totalTerbayar: totalTerbayarBaru,
+        sisaBayar: sisaBayarBaru,
+        metodeBayar: metodeFinal,
+        jatuhTempo: jatuhTempo ? new Date(jatuhTempo) : existing.jatuhTempo,
+        tanggalBayar: nominalJurnal > 0 ? tanggalBayarFinal : existing.tanggalBayar,
+        bankAccount,
+        rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
+        keterangan,
+        paymentHistory,
+        buktiBayarUrl,
+        status: autoStatus,
+      },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        rekeningBank: true,
+        purchaseOrder: {
+          include: {
+            items: { include: { materialRequest: true } },
+            permintaanHabisPakai: { select: { id: true, poId: true } },
+            project: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+
+    if (nominalJurnal > 0) {
       const { createTransaksiBukuBesar } = require("./glBank.routes.js");
       try {
-        const namaAkun = akunKasBank?.trim() || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
-        const noReferensi = pembayaran.noPembayaran || existing.noPembayaran || req.params.id;
-        const po = pembayaran.purchaseOrder || existing.purchaseOrder;
-        const supplier = pembayaran.supplier || existing.supplier;
-        const pihak = supplier?.name || "Supplier";
+        const rekening = rekeningBankId
+          ? await prisma.masterRekeningBank.findUnique({ where: { id: rekeningBankId } })
+          : existing.rekeningBank;
+        const namaAkun = akunKasBank?.trim()
+          || (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
+          || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
 
+        const po = pembayaran.purchaseOrder || existing.purchaseOrder;
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
 
-        // Over/under qty & harga per item PO vs RAP (sudah dihitung di keteranganVolume/Harga)
-        const overKeterangan = (ketVol || ketHrg)
-          ? `[Over/Under PO] ${[ketVol, ketHrg].filter(Boolean).join(" | ")}`
-          : "[Over/Under PO] Tidak ada data RAP";
+        const tipeLabel =
+          metodeFinal === "TEMPO"
+            ? (sisaBayarBaru <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
+            : "Pembayaran Supplier";
 
         await createTransaksiBukuBesar({
-          tanggal: tglBayar || pembayaran.tanggal || new Date(),
-          tipeAkun: tipeAkunKasBank === "BANK" ? "BANK" : "KAS",
+          tanggal: tanggalBayarFinal || pembayaran.tanggal || new Date(),
+          tipeAkun: tipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
           namaAkun,
           jenis: "KELUAR",
-          nominal: jmlBayar,
-          noReferensi,
-          pihak,
-          keterangan: `${keterangan || ""} ${overKeterangan}`.trim() || `Pembayaran PO ${po?.poNumber || ""}`,
+          nominal: nominalJurnal,
+          noReferensi: pembayaran.noPembayaran || existing.noPembayaran || req.params.id,
+          pihak: pembayaran.supplier?.name || existing.supplier?.name || "Supplier",
+          keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
           keteranganVolume: ketVol,
           keteranganHarga: ketHrg,
           poId: po?.id || pembayaran.poId || existing.poId,
           pengajuanId: pembayaran.pengajuanId || existing.pengajuanId,
           pembayaranId: pembayaran.id,
-          createdById: req.user?.id || null,
+          createdById: req.user?.userId || req.user?.id || null,
         });
       } catch (bbErr) {
         console.error("Auto-create buku besar error:", bbErr);
-        // Jangan gagalkan update pembayaran jika buku besar error
       }
     }
 

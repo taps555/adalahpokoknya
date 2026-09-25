@@ -248,6 +248,7 @@ model Project {
   // Relasi ke Purchase Order (Fase 2)
   purchaseOrders       PurchaseOrder[]
   permintaanHabisPakai PermintaanHabisPakai[]
+  bukuBesarTransaksi   BukuBesarTransaksi[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -982,6 +983,7 @@ enum ReturStatus {
 
 enum PembayaranStatus {
   PENDING
+  PARTIAL
   PAID
 }
 
@@ -995,6 +997,8 @@ enum MetodeBayar {
   TRANSFER
   CASH
   CEK
+  GIRO
+  TEMPO
 }
 
 // 1. RETUR PEMBELIAN
@@ -1086,10 +1090,16 @@ model PembayaranSupplier {
   poId          String?
   purchaseOrder PurchaseOrder?       @relation("PembayaranPO", fields: [poId], references: [id])
   tanggal       DateTime
+  totalTagihan  Float                @default(0)
   jumlahBayar   Float                @default(0)
+  totalTerbayar Float                @default(0)
+  sisaBayar     Float                @default(0)
   metodeBayar   MetodeBayar          @default(TRANSFER)
   bankAccount   String?
+  rekeningBankId String?
+  rekeningBank   MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id])
   keterangan    String?              @db.Text
+  paymentHistory Json?
   buktiBayarUrl String?
   status        PembayaranStatus     @default(PENDING)
   jatuhTempo    DateTime?
@@ -1102,6 +1112,7 @@ model PembayaranSupplier {
 
   @@index([supplierId])
   @@index([pengajuanId])
+  @@index([rekeningBankId])
 }
 
 // 4. INVOICE PENAGIHAN
@@ -1180,8 +1191,31 @@ model AkunBukuBesar {
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
 
+  bukuBesarTransaksi BukuBesarTransaksi[]
+
   @@unique([namaAkun, tipeAkun])
   @@index([tipeAkun])
+}
+
+model MasterRekeningBank {
+  id            String   @id @default(cuid())
+  namaRekening  String
+  tipeRekening  String?
+  mataUang      String   @default("IDR")
+  kodeAkunGl    String?
+  namaBank      String?
+  nomorRekening String   @unique
+  alamatBank    String?
+  isDefault     Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  pembayaranSuppliers PembayaranSupplier[]
+  bukuBesarTransaksi  BukuBesarTransaksi[]
+
+  @@index([isActive])
+  @@index([isDefault])
 }
 
 // ==========================================
@@ -1211,6 +1245,15 @@ model BukuBesarTransaksi {
   keteranganHarga  String?                 @db.Text
   saldoBerjalan    Float // saldo setelah transaksi ini
 
+  // Input manual style SMC POS
+  projectId        String?
+  project          Project?                @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  akunBukuBesarId  String?
+  akunBukuBesar    AkunBukuBesar?          @relation(fields: [akunBukuBesarId], references: [id], onDelete: SetNull)
+  rekeningBankId   String?
+  rekeningBank     MasterRekeningBank?     @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
+  sumberTransaksi  String?                 @default("MANUAL") // MANUAL | PEMBAYARAN_SUPPLIER | SISTEM
+
   // Relasi opsional ke PO / pembayaran / invoice
   poId          String?
   purchaseOrder PurchaseOrder?       @relation("TransaksiKePO", fields: [poId], references: [id], onDelete: SetNull)
@@ -1230,4 +1273,8 @@ model BukuBesarTransaksi {
   @@index([poId])
   @@index([pengajuanId])
   @@index([pembayaranId])
+  @@index([projectId])
+  @@index([akunBukuBesarId])
+  @@index([rekeningBankId])
 }
+
