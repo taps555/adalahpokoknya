@@ -206,7 +206,12 @@ function streamBast2Pdf(complaint, formData, res) {
   y = doc.y + 10;
   doc
     .font("Times-Roman")
-    .text(`Notes : ${formData.statusText || "-"}`, leftMargin, y);
+    .text("Notes :", leftMargin, y);
+
+  y = doc.y + 5;
+  doc
+    .font("Times-Roman")
+    .text(formData.statusText || "-", leftMargin, y, { width: contentW, align: "left" });
 
   y = doc.y + 10;
   doc

@@ -206,7 +206,12 @@ function streamBastPdf(bast, res) {
   y = doc.y + 10;
   doc
     .font("Times-Roman")
-    .text(`Notes : ${bast.statusText || "-"}`, leftMargin, y);
+    .text("Notes :", leftMargin, y);
+
+  y = doc.y + 5;
+  doc
+    .font("Times-Roman")
+    .text(bast.statusText || "-", leftMargin, y, { width: contentW, align: "left" });
 
   y = doc.y + 10;
   doc

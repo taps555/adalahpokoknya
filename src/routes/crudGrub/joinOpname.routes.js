@@ -45,6 +45,10 @@ router.put(
           .json({ error: "Field date dan progressPercent wajib diisi." });
       }
 
+      let finalProgress = Number(progressPercent);
+      if (finalProgress > 100) finalProgress = 100;
+
+
       const rabItem = await prisma.rabItem.findUnique({ where: { id } });
       if (!rabItem) {
         return res.status(404).json({ error: "Item RAB tidak ditemukan." });
@@ -59,12 +63,27 @@ router.put(
       const normalizedDate = new Date(date);
       normalizedDate.setUTCHours(0, 0, 0, 0);
 
-      // Ambil dulu record existing di tanggal ini (kalau ada)
-      const existingProgress = await prisma.dailyProgress.findUnique({
-        where: {
-          rabItemId_date: { rabItemId: id, date: normalizedDate },
-        },
+      // Ambil semua progress existing untuk item ini
+      const allExisting = await prisma.dailyProgress.findMany({
+        where: { rabItemId: id },
       });
+
+      let existingSumExcludingToday = 0;
+      let existingProgressForToday = null;
+
+      for (const p of allExisting) {
+        if (p.date.getTime() === normalizedDate.getTime()) {
+          existingProgressForToday = p;
+        } else {
+          existingSumExcludingToday += Number(p.progressPercent);
+        }
+      }
+
+      if (existingSumExcludingToday + finalProgress > 100) {
+        return res.status(400).json({ error: `Total akumulasi progress tidak boleh melebihi 100%. (Progress sebelum hari ini: ${existingSumExcludingToday}%)` });
+      }
+
+      const existingProgress = existingProgressForToday;
 
       // Gabung foto lama + foto baru
       const mergedPhotoUrls = [
@@ -72,7 +91,7 @@ router.put(
         ...newPhotoUrls,
       ];
 
-      const updateData = { progressPercent: Number(progressPercent) };
+      const updateData = { progressPercent: finalProgress };
       if (mergedPhotoUrls.length > 0) {
         updateData.photoUrls = mergedPhotoUrls;
       }
@@ -80,7 +99,7 @@ router.put(
       const createData = {
         rabItemId: id,
         date: normalizedDate,
-        progressPercent: Number(progressPercent),
+        progressPercent: finalProgress,
       };
       if (mergedPhotoUrls.length > 0) {
         createData.photoUrls = mergedPhotoUrls;
@@ -224,21 +243,20 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
     }
 
     function statusFor(rekapPercent) {
-      if (rekapPercent === 0) return "BELUM MULAI";
-      if (rekapPercent === 100) return "SELESAI";
-      if (rekapPercent > 100) return "VOLUME OVER";
-      if (rekapPercent <= 94) return "ON PROGRESS";
-      return "QC CHECK"; // 95-99
+      if (rekapPercent >= 100) return "SELESAI";
+      if (rekapPercent >= 95) return "QUALITY CHECK";
+      if (rekapPercent >= 51) return "ON PROGRESS";
+      return "BELUM MULAI"; // 0-50%
     }
 
     const itemsData = rabItems.map(it => {
       const hasChildren = parentIds.has(it.bvItem?.id);
       
-      let maxProgressSoFar = 0;
+      let sumProgress = 0;
       const progressByDate = new Map(
         (it.dailyProgress || []).map((p) => {
           const pVal = Number(p.progressPercent);
-          if (pVal > maxProgressSoFar) maxProgressSoFar = pVal;
+          sumProgress += pVal;
           return [
             new Date(p.date).toISOString().slice(0, 10),
             { percent: pVal, photoUrls: p.photoUrls || [] }
@@ -260,7 +278,7 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         actualRapTotal,
         weight,
         progressByDate,
-        maxProgressSoFar
+        maxProgressSoFar: sumProgress // keeping property name for compatibility but it's now sum
       };
     });
 
@@ -286,18 +304,13 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       const tsStart = it.timeSchedule?.startDate ? new Date(it.timeSchedule.startDate).setHours(0,0,0,0) : null;
       const tsEnd = it.timeSchedule?.endDate ? new Date(it.timeSchedule.endDate).setHours(0,0,0,0) : null;
 
-      let lastPercent = 0;
       const dailyBreakdown = days.map((day) => {
         const key = day.date.toISOString().slice(0, 10);
         const dayTime = new Date(day.date).setHours(0,0,0,0);
 
         const pData = hasChildren ? null : progressByDate.get(key);
         
-        if (pData) {
-           lastPercent = pData.percent;
-        }
-
-        const progress = lastPercent;
+        const progress = pData ? pData.percent : 0;
         const photoUrls = pData ? pData.photoUrls : [];
 
         let inSchedule = true;

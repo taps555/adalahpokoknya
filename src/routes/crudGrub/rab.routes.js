@@ -48,6 +48,7 @@ router.use(
   verifyToken,
   protectSelling,
   (req, res, next) => {
+    if (req.path.includes("/progress")) return next();
     if (req.method === "GET") return redactSellingResponse(req, res, next);
     redactSellingResponse(req, res, () => protectRapWrite(req, res, next));
   },
