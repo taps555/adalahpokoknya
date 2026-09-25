@@ -6,6 +6,8 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { streamSurveyPdf } = require("../exportToFile/surveyView.routes"); // taro 1 folder sama file ini
+const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { normalizeSurvey3dPayload } = require("../../services/survey3dValidation");
 
 const MAX_PHOTOS_PER_AREA = 20;
 
@@ -31,6 +33,172 @@ const surveyStorage = multer.diskStorage({
 //   area 1: photo_1_0, photo_1_1, dst
 // Pola field: `photo_{areaIndex}_{photoIndex}`
 const uploadSurvey = multer({ storage: surveyStorage });
+
+// ==========================================
+// KONFIGURASI MULTER UNTUK SCREENSHOT HASIL DESAIN 3D
+// ==========================================
+const survey3dStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const dir = "./public/uploads/survey-3d";
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    cb(null, dir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, "survey3d-" + uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
+const uploadSurvey3d = multer({
+  storage: survey3dStorage,
+  fileFilter: function (req, file, cb) {
+    if (/^image\//.test(file.mimetype)) return cb(null, true);
+    cb(new Error("File screenshot 3D harus berupa gambar (jpg/png/webp)."));
+  },
+});
+
+const MAX_IMAGES_3D = 20;
+
+function removeSurvey3dFiles(urls) {
+  for (const url of urls) {
+    if (!url?.startsWith("/uploads/survey-3d/")) continue;
+    fs.unlink(path.join("./public", url), (error) => {
+      if (error && error.code !== "ENOENT") {
+        console.error("Gagal menghapus screenshot 3D:", error.message);
+      }
+    });
+  }
+}
+
+router.get("/projects/:projectId/survey-3d", verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true },
+    });
+    if (!project) return res.status(404).json({ error: "Project tidak ditemukan." });
+
+    const result = await prisma.survey3DResult.findUnique({
+      where: { projectId },
+      include: { images: { orderBy: { order: "asc" } } },
+    });
+
+    res.json(result || {
+      projectId,
+      status: "NOT_STARTED",
+      gdriveUrl: null,
+      notes: null,
+      images: [],
+    });
+  } catch (error) {
+    console.error("Error Get Survey 3D:", error);
+    res.status(500).json({ error: "Gagal mengambil hasil desain 3D." });
+  }
+});
+
+router.put(
+  "/projects/:projectId/survey-3d",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  uploadSurvey3d.array("images", MAX_IMAGES_3D),
+  async (req, res) => {
+    const uploadedUrls = (req.files || []).map(
+      (file) => `/uploads/survey-3d/${file.filename}`,
+    );
+
+    try {
+      const { projectId } = req.params;
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { id: true },
+      });
+      if (!project) {
+        removeSurvey3dFiles(uploadedUrls);
+        return res.status(404).json({ error: "Project tidak ditemukan." });
+      }
+
+      let rawData;
+      let normalized;
+      try {
+        rawData = JSON.parse(req.body.survey3dData || "{}");
+        normalized = normalizeSurvey3dPayload(rawData);
+      } catch (error) {
+        removeSurvey3dFiles(uploadedUrls);
+        return res.status(400).json({ error: error.message });
+      }
+
+      const existing = await prisma.survey3DResult.findUnique({
+        where: { projectId },
+        include: { images: { orderBy: { order: "asc" } } },
+      });
+      const existingById = new Map(
+        (existing?.images || []).map((image) => [image.id, image]),
+      );
+      const requestedExisting = Array.isArray(rawData.existingImages)
+        ? rawData.existingImages
+        : [];
+      const retained = requestedExisting
+        .filter((image) => image?.id && existingById.has(image.id))
+        .map((image) => ({
+          url: existingById.get(image.id).url,
+          caption: String(image.caption || "").trim() || null,
+        }));
+
+      if (retained.length + uploadedUrls.length > MAX_IMAGES_3D) {
+        removeSurvey3dFiles(uploadedUrls);
+        return res.status(400).json({
+          error: `Maksimal ${MAX_IMAGES_3D} gambar untuk satu hasil desain 3D.`,
+        });
+      }
+
+      const removedUrls = (existing?.images || [])
+        .filter((image) => !retained.some((item) => item.url === image.url))
+        .map((image) => image.url);
+      const newImages = uploadedUrls.map((url, index) => ({
+        url,
+        caption: String(req.body[`caption_${index}`] || "").trim() || null,
+      }));
+      const allImages = [...retained, ...newImages];
+
+      const saved = await prisma.$transaction(async (tx) => {
+        const result = await tx.survey3DResult.upsert({
+          where: { projectId },
+          create: { projectId, ...normalized },
+          update: normalized,
+        });
+
+        await tx.survey3DImage.deleteMany({
+          where: { survey3DResultId: result.id },
+        });
+        if (allImages.length > 0) {
+          await tx.survey3DImage.createMany({
+            data: allImages.map((image, order) => ({
+              survey3DResultId: result.id,
+              url: image.url,
+              caption: image.caption,
+              order,
+            })),
+          });
+        }
+
+        return tx.survey3DResult.findUnique({
+          where: { id: result.id },
+          include: { images: { orderBy: { order: "asc" } } },
+        });
+      });
+
+      removeSurvey3dFiles(removedUrls);
+      res.json(saved);
+    } catch (error) {
+      removeSurvey3dFiles(uploadedUrls);
+      console.error("Error Update Survey 3D:", error);
+      res.status(500).json({ error: "Gagal menyimpan hasil desain 3D." });
+    }
+  },
+);
 
 // ==========================================
 // POST: CREATE SURVEY REPORT (Data + Foto multi per area, maks 20/area)
