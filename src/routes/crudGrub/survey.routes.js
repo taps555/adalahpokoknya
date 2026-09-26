@@ -83,7 +83,10 @@ router.get("/projects/:projectId/survey-3d", verifyToken, async (req, res) => {
 
     const result = await prisma.survey3DResult.findUnique({
       where: { projectId },
-      include: { images: { orderBy: { order: "asc" } } },
+      include: {
+        images: { orderBy: { order: "asc" } },
+        resources: { orderBy: { order: "asc" } },
+      },
     });
 
     res.json(result || {
@@ -92,6 +95,7 @@ router.get("/projects/:projectId/survey-3d", verifyToken, async (req, res) => {
       gdriveUrl: null,
       notes: null,
       images: [],
+      resources: [],
     });
   } catch (error) {
     console.error("Error Get Survey 3D:", error);
@@ -132,7 +136,10 @@ router.put(
 
       const existing = await prisma.survey3DResult.findUnique({
         where: { projectId },
-        include: { images: { orderBy: { order: "asc" } } },
+        include: {
+          images: { orderBy: { order: "asc" } },
+          resources: { orderBy: { order: "asc" } },
+        },
       });
       const existingById = new Map(
         (existing?.images || []).map((image) => [image.id, image]),
@@ -162,12 +169,13 @@ router.put(
         caption: String(req.body[`caption_${index}`] || "").trim() || null,
       }));
       const allImages = [...retained, ...newImages];
+      const { resources, ...resultData } = normalized;
 
       const saved = await prisma.$transaction(async (tx) => {
         const result = await tx.survey3DResult.upsert({
           where: { projectId },
-          create: { projectId, ...normalized },
-          update: normalized,
+          create: { projectId, ...resultData },
+          update: resultData,
         });
 
         await tx.survey3DImage.deleteMany({
@@ -184,9 +192,24 @@ router.put(
           });
         }
 
+        await tx.survey3DResource.deleteMany({
+          where: { survey3DResultId: result.id },
+        });
+        if (resources.length > 0) {
+          await tx.survey3DResource.createMany({
+            data: resources.map((resource) => ({
+              survey3DResultId: result.id,
+              ...resource,
+            })),
+          });
+        }
+
         return tx.survey3DResult.findUnique({
           where: { id: result.id },
-          include: { images: { orderBy: { order: "asc" } } },
+          include: {
+            images: { orderBy: { order: "asc" } },
+            resources: { orderBy: { order: "asc" } },
+          },
         });
       });
 

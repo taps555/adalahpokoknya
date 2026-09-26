@@ -521,8 +521,23 @@ model Survey3DResult {
   gdriveUrl String?
   notes     String?         @db.Text
   images    Survey3DImage[]
+  resources Survey3DResource[]
   createdAt DateTime        @default(now())
   updatedAt DateTime        @updatedAt
+}
+
+model Survey3DResource {
+  id               String         @id @default(cuid())
+  survey3DResultId String
+  survey3DResult   Survey3DResult @relation(fields: [survey3DResultId], references: [id], onDelete: Cascade)
+  type             String
+  title            String
+  url              String
+  order            Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([survey3DResultId, order])
 }
 
 model Survey3DImage {
