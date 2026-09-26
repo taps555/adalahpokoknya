@@ -179,6 +179,29 @@ function finalizeRabSheet(ws, mode, categoryTitle = "") {
   ws.headerFooter.oddFooter = "";
 }
 
+function buildRabCategoryItemWhere(categoryFilter = null) {
+  const filter = typeof categoryFilter === "string"
+    ? { categoryCode: categoryFilter }
+    : (categoryFilter || {});
+  const categoryCode = String(filter.categoryCode || "").trim().toUpperCase();
+
+  // GENERAL berarti item yang benar-benar belum masuk kategori/disiplin apa pun,
+  // bukan filter kosong yang mengambil seluruh isi proyek.
+  if (!filter.workCategoryId && categoryCode === "GENERAL") {
+    return { workCategoryId: null, discipline: null };
+  }
+
+  return buildWorkCategoryItemWhere(filter);
+}
+
+function categoryActivityName(categoryCode, projectName = "") {
+  const code = String(categoryCode || "GENERAL").trim().toUpperCase();
+  if (["SIPIL", "CIVIL", "CV"].includes(code)) return "Pekerjaan Civil";
+  if (["INTERIOR", "INT"].includes(code)) return "Pekerjaan Interior dan Furniture";
+  if (code === "GENERAL") return "Pekerjaan General";
+  return `Pekerjaan ${code || projectName || "General"}`;
+}
+
 function flattenRabItems(group) {
   const items = [...(group.items || [])];
   for (const child of group.children || []) {
@@ -208,6 +231,56 @@ function buildRabParentItemIds(group) {
   return parentIds;
 }
 
+function arrangeRabItems(items = []) {
+  const ordered = [...items].sort(
+    (a, b) => Number(a.order || 0) - Number(b.order || 0),
+  );
+  const byId = new Map(ordered.map((item) => [item.id, item]));
+  const rabIdByBvId = new Map(
+    ordered
+      .filter((item) => item.id && item.bvItem?.id)
+      .map((item) => [item.bvItem.id, item.id]),
+  );
+  const childrenByParent = new Map();
+  const roots = [];
+
+  for (const item of ordered) {
+    const parentId = item.parentId || rabIdByBvId.get(item.bvItem?.parentBvItemId);
+    if (parentId && byId.has(parentId) && parentId !== item.id) {
+      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+      childrenByParent.get(parentId).push(item);
+    } else {
+      roots.push(item);
+    }
+  }
+
+  const rows = [];
+  const visited = new Set();
+  const visit = (item, depth) => {
+    if (visited.has(item.id)) return;
+    visited.add(item.id);
+    const children = childrenByParent.get(item.id) || [];
+    rows.push({ item, depth, children });
+    children.forEach((child) => visit(child, depth + 1));
+  };
+  roots.forEach((item) => visit(item, 0));
+  ordered.forEach((item) => visit(item, 0));
+  return rows;
+}
+
+function deriveRabItemNumber(item, children, fallbackNumber) {
+  const ownCode = String(item?.name || "").match(/^\s*([A-Z]{1,6}\d+[A-Z0-9]*)\s*-/i)?.[1];
+  if (ownCode) return ownCode.toUpperCase();
+
+  for (const child of children || []) {
+    const childCode = String(child?.name || "").match(
+      /^\s*([A-Z]{1,6}\d+[A-Z0-9]*)-[A-Z0-9]+(?:\s|$)/i,
+    )?.[1];
+    if (childCode) return childCode.toUpperCase();
+  }
+  return String(fallbackNumber);
+}
+
 function sumRabLeafTotals(group, parentIds = buildRabParentItemIds(group)) {
   let rap = 0;
   let rab = 0;
@@ -229,23 +302,25 @@ async function buildRabSheet(
   options = {},
 ) {
   const mode = normalizeRabExportMode(options.mode || "COMBINED") || "COMBINED";
-  const itemWhere = typeof categoryFilter === "string"
-    ? buildWorkCategoryItemWhere({ categoryCode: categoryFilter })
-    : buildWorkCategoryItemWhere(categoryFilter || {});
+  const itemWhere = buildRabCategoryItemWhere(categoryFilter);
 
   const rawGroups = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
       items: {
         where: itemWhere,
-        include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+        include: {
+          bvItem: { select: { id: true, parentBvItemId: true, keterangan: true } },
+        },
         orderBy: { order: "asc" },
       },
       children: {
         include: {
           items: {
             where: itemWhere,
-            include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+            include: {
+              bvItem: { select: { id: true, parentBvItemId: true, keterangan: true } },
+            },
             orderBy: { order: "asc" },
           },
         },
@@ -296,7 +371,10 @@ async function buildRabSheet(
   };
 
   const info = [
-    ["Nama Kegiatan", project.activityName || project.name || "-"],
+    [
+      "Nama Kegiatan",
+      project.activityName || categoryActivityName(options.categoryTitle, project.name),
+    ],
     ["Nama Pekerjaan", project.name || "-"],
     ["Lokasi Pekerjaan", project.location || "-"],
     ["Tahun Anggaran", String(project.hspkPeriod || "-")],
@@ -422,12 +500,23 @@ async function buildRabSheet(
     grandRab = 0;
 
   function writeItem(item, num, hasChildren) {
-    const isChild = !!item.bvItem?.parentBvItemId;
+    const isChild = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+    const isParent = Boolean(hasChildren || item.isHeaderOnly);
+    const displayName = /^\s*-\s*/.test(item.name || "")
+      ? String(item.name).trim()
+      : `${isChild ? "- " : ""}${item.name || ""}`;
     ws.getCell(`B${r}`).value = num;
     ws.getCell(`B${r}`).alignment = { horizontal: "center" };
-    ws.getCell(`C${r}`).value = (isChild ? "- " : "") + item.name;
+    ws.getCell(`C${r}`).value = displayName;
+    ws.getCell(`D${r}`).value = isParent ? "" : (item.bvItem?.keterangan || "");
 
-    if (item.isByOwner) {
+    if (isParent) {
+      ["E", "F", "G", "H", "I", "J"].forEach((col) => {
+        ws.getCell(`${col}${r}`).value = "";
+        ws.getCell(`${col}${r}`).font = { bold: false };
+        ws.getCell(`${col}${r}`).alignment = { horizontal: "center" };
+      });
+    } else if (item.isByOwner) {
       colRange("B", "J").forEach((col) => {
         ws.getCell(`${col}${r}`).fill = {
           type: "pattern",
@@ -442,12 +531,6 @@ async function buildRabSheet(
       ws.getCell(`E${r}`).value = item.paymentUnit;
       ws.getCell(`F${r}`).value = Number(item.volume);
       fmtVol(ws.getCell(`F${r}`));
-    } else if (hasChildren) {
-      ["E", "F", "G", "H", "I", "J"].forEach((col) => {
-        ws.getCell(`${col}${r}`).value = "";
-        ws.getCell(`${col}${r}`).font = { bold: false };
-        ws.getCell(`${col}${r}`).alignment = { horizontal: "center" };
-      });
     } else {
       ws.getCell(`E${r}`).value = item.paymentUnit;
       ws.getCell(`F${r}`).value = Number(item.volume);
@@ -471,15 +554,18 @@ async function buildRabSheet(
     const parentIds = buildRabParentItemIds(group);
 
     let n = 1;
-    for (let i = 0; i < group.items.length; i++) {
-      const item = group.items[i];
-      const isChild = !!item.bvItem?.parentBvItemId;
-      const hasChildren = item.isHeaderOnly || parentIds.has(item.id);
-      writeItem(item, isChild ? "" : String(n++), hasChildren);
-
-      const nextItem = group.items[i + 1];
-      const nextIsChild = nextItem ? !!nextItem.bvItem?.parentBvItemId : false;
-      if (isChild && !nextIsChild) r++;
+    for (const row of arrangeRabItems(group.items || [])) {
+      const { item, depth, children } = row;
+      const isChildRow = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+      const isHeader = item.isHeaderOnly || parentIds.has(item.id);
+      const number = isChildRow
+        ? ""
+        : isHeader
+          ? deriveRabItemNumber(item, children, n++)
+          : depth === 0
+            ? String(n++)
+            : "";
+      writeItem(item, number, isHeader);
     }
 
     for (const sub of group.children || []) {
@@ -488,17 +574,18 @@ async function buildRabSheet(
       ws.getRow(r).font = { bold: true };
       r++;
 
-      for (let i = 0; i < sub.items.length; i++) {
-        const item = sub.items[i];
-        const isChild = !!item.bvItem?.parentBvItemId;
-        const hasChildren = item.isHeaderOnly || parentIds.has(item.id);
-        writeItem(item, isChild ? "" : String(n++), hasChildren);
-
-        const nextItem = sub.items[i + 1];
-        const nextIsChild = nextItem
-          ? !!nextItem.bvItem?.parentBvItemId
-          : false;
-        if (isChild && !nextIsChild) r++;
+      for (const row of arrangeRabItems(sub.items || [])) {
+        const { item, depth, children } = row;
+        const isChildRow = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+        const isHeader = item.isHeaderOnly || parentIds.has(item.id);
+        const number = isChildRow
+          ? ""
+          : isHeader
+            ? deriveRabItemNumber(item, children, n++)
+            : depth === 0
+              ? String(n++)
+              : "";
+        writeItem(item, number, isHeader);
       }
     }
 
@@ -617,4 +704,8 @@ module.exports = {
   normalizeRabExportMode,
   buildRabParentItemIds,
   sumRabLeafTotals,
+  arrangeRabItems,
+  deriveRabItemNumber,
+  buildRabCategoryItemWhere,
+  categoryActivityName,
 };

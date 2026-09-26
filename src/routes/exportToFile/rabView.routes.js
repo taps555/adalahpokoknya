@@ -5,14 +5,18 @@ const path = require("path");
 const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
-const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const {
   normalizeRabExportMode,
   buildRabParentItemIds,
   sumRabLeafTotals,
+  arrangeRabItems,
+  deriveRabItemNumber,
+  buildRabCategoryItemWhere,
+  categoryActivityName,
 } = require("../../services/rabExportHelper");
 
 const router = express.Router();
+const RAP_VIEW_ROLES = new Set(["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"]);
 
 function escapeHtml(s) {
   return String(s ?? "").replace(
@@ -58,54 +62,77 @@ const ROMAN = [
 function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false) {
   const unitKey = mode === "RAB" ? "rabUnitPrice" : "rapUnitPrice";
   const totalKey = mode === "RAB" ? "rabTotalPrice" : "rapTotalPrice";
+  const unitPriceHeading = "HARGA SATUAN";
+  const totalHeading = "TOTAL HARGA";
   let grandTotal = 0;
   let rowsHtml = "";
 
   groups.forEach((group, idx) => {
-    rowsHtml += `<tr class="group-row"><td>${ROMAN[idx] || idx + 1}</td><td colspan="5">${escapeHtml(String(group.name || "").toUpperCase())}</td></tr>`;
+    rowsHtml += `<tr class="group-row"><td>${ROMAN[idx] || idx + 1}</td><td colspan="6">${escapeHtml(String(group.name || "").toUpperCase())}</td></tr>`;
     let n = 1;
     const parentIds = buildRabParentItemIds(group);
-    const writeItem = (item, indent) => {
-      const isParent = item.isHeaderOnly || parentIds.has(item.id);
-      const ownerClass = item.isByOwner && !isParent ? ' class="owner-row"' : "";
-      const unit = isParent ? "" : escapeHtml(item.paymentUnit);
-      const volume = isParent
-        ? ""
-        : Number(item.volume || 0).toLocaleString("id-ID", { maximumFractionDigits: 2 });
-      const unitPrice = isParent
-        ? ""
-        : item.isByOwner
-          ? "By Owner"
-          : fmtRp(item[unitKey]);
-      const totalPrice = isParent
-        ? ""
-        : item.isByOwner
-          ? "By Owner"
-          : fmtRp(item[totalKey]);
-      rowsHtml += `<tr${ownerClass}>
-        <td>${n++}</td>
-        <td class="left">${indent ? "&nbsp;&nbsp;- " : ""}${escapeHtml(item.name)}</td>
-        <td>${unit}</td>
-        <td class="num">${volume}</td>
-        <td class="num">${unitPrice}</td>
-        <td class="num">${totalPrice}</td>
-      </tr>`;
-    };
-    const writeGroup = (current, depth) => {
-      for (const item of current.items || []) writeItem(item, depth > 0);
-      for (const child of current.children || []) {
-        rowsHtml += `<tr class="subgroup-row"><td>${n++}</td><td colspan="5">${"&nbsp;&nbsp;".repeat(depth + 1)}${escapeHtml(child.name)}</td></tr>`;
-        writeGroup(child, depth + 1);
+
+    const renderItems = (items) => {
+      for (const row of arrangeRabItems(items || [])) {
+        const { item, depth, children } = row;
+        const isChildRow = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+        const isParent = item.isHeaderOnly || parentIds.has(item.id);
+        const number = isChildRow
+          ? ""
+          : isParent
+            ? deriveRabItemNumber(item, children, n++)
+            : depth === 0
+              ? String(n++)
+              : "";
+        const rawName = /^\s*-\s*/.test(item.name || "")
+          ? String(item.name).trim()
+          : `${depth > 0 ? "- " : ""}${item.name || ""}`;
+        const unit = isParent ? "" : escapeHtml(item.paymentUnit || "");
+        const volume = isParent
+          ? ""
+          : Number(item.volume || 0).toLocaleString("id-ID", {
+              maximumFractionDigits: 2,
+            });
+        const unitPrice = isParent
+          ? ""
+          : item.isByOwner
+            ? "By Owner"
+            : fmtRp(item[unitKey]);
+        const totalPrice = isParent
+          ? ""
+          : item.isByOwner
+            ? "By Owner"
+            : fmtRp(item[totalKey]);
+        rowsHtml += `<tr${item.isByOwner && !isParent ? ' class="owner-row"' : ""}>
+          <td>${number}</td>
+          <td class="left${depth > 0 ? " child-item" : ""}">${escapeHtml(rawName)}</td>
+          <td class="left">${isParent ? "" : escapeHtml(item.bvItem?.keterangan || "")}</td>
+          <td>${unit}</td>
+          <td class="num">${volume}</td>
+          <td class="num">${unitPrice}</td>
+          <td class="num">${totalPrice}</td>
+        </tr>`;
       }
     };
-    writeGroup(group, 0);
+
+    const renderSubgroups = (children, depth = 0) => {
+      for (const child of children || []) {
+        const groupNumber = child.reference || String(n++);
+        rowsHtml += `<tr class="subgroup-row"><td>${escapeHtml(groupNumber)}</td><td colspan="6">${"&nbsp;&nbsp;".repeat(depth)}${escapeHtml(child.name || "")}</td></tr>`;
+        renderItems(child.items);
+        renderSubgroups(child.children, depth + 1);
+      }
+    };
+
+    renderItems(group.items);
+    renderSubgroups(group.children);
     const totals = sumRabLeafTotals(group, parentIds);
     const subtotal = mode === "RAB" ? totals.rab : totals.rap;
     grandTotal += subtotal;
-    rowsHtml += `<tr class="subtotal-row"><td colspan="5">Sub Total ${mode}</td><td class="num">${fmtRp(subtotal)}</td></tr>`;
+    rowsHtml += `<tr class="subtotal-row"><td colspan="6">Sub Total ${mode}</td><td class="num">${fmtRp(subtotal)}</td></tr>`;
   });
 
-  const documentTitle = isInvoice ? "INVOICE" : `RENCANA ANGGARAN BIAYA ${mode}`;
+  const documentTitle = isInvoice ? "INVOICE" : "RENCANA ANGGARAN BIAYA";
   const clientLine = isInvoice
     ? `<p><strong>Kepada:</strong> ${escapeHtml(project.client?.name || "Client")}</p>`
     : "";
@@ -138,12 +165,15 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
   table.rab { width: 100%; border-collapse: collapse; table-layout: fixed; }
   table.rab th, table.rab td { border: 1px solid #6b7280; padding: 5px 7px; vertical-align: middle; }
   table.rab th { background: #d9d9d9; text-align: center; }
-  table.rab th:nth-child(1) { width: 6%; }
-  table.rab th:nth-child(2) { width: 39%; }
-  table.rab th:nth-child(3) { width: 8%; }
-  table.rab th:nth-child(4) { width: 9%; }
-  table.rab th:nth-child(5), table.rab th:nth-child(6) { width: 19%; }
+  table.rab th:nth-child(1) { width: 5%; }
+  table.rab th:nth-child(2) { width: 31%; }
+  table.rab th:nth-child(3) { width: 24%; }
+  table.rab th:nth-child(4) { width: 7%; }
+  table.rab th:nth-child(5) { width: 8%; }
+  table.rab th:nth-child(6), table.rab th:nth-child(7) { width: 12.5%; }
   .left { text-align: left; }
+  .child-item { padding-left: 14px !important; }
+  .spacer-row td { height: 10px; padding: 0 !important; border-left-color: #6b7280; border-right-color: #6b7280; }
   .num { text-align: right; white-space: nowrap; }
   .group-row { background: #eaf1f7; font-weight: bold; }
   .subgroup-row { font-weight: 600; }
@@ -161,15 +191,18 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
   <div class="header">
     <div class="logo">${divesLogoHtml()}</div>
     <div class="info"><h1>${documentTitle}</h1><table>
-      <tr><td>Nama Kegiatan</td><td>:</td><td>${escapeHtml(project.activityName || project.name)}</td></tr>
+      <tr><td>Nama Kegiatan</td><td>:</td><td>${escapeHtml(project.activityName || categoryActivityName(categoryCode, project.name))}</td></tr>
       <tr><td>Nama Pekerjaan</td><td>:</td><td>${escapeHtml(project.name)}</td></tr>
       <tr><td>Lokasi Pekerjaan</td><td>:</td><td>${escapeHtml(project.location)}</td></tr>
       <tr><td>Tahun Anggaran</td><td>:</td><td>${escapeHtml(project.hspkPeriod)}</td></tr>
     </table></div>
   </div>
   ${clientLine}<p class="category">Kategori: ${escapeHtml(categoryCode)}</p>
-  <table class="rab"><thead><tr><th>NO</th><th>${isInvoice ? "URAIAN PEKERJAAN" : "ITEM PEKERJAAN"}</th><th>SAT.</th><th>VOL.</th><th>HARGA SATUAN${isInvoice ? "" : ` ${mode}`}</th><th>${isInvoice ? "JUMLAH" : `TOTAL HARGA ${mode}`}</th></tr></thead>
-  <tbody>${rowsHtml}<tr class="grand-row"><td colspan="5">${isInvoice ? "TOTAL INVOICE" : `GRAND TOTAL ${mode}`}</td><td class="num">${fmtRp(grandTotal)}</td></tr></tbody></table>
+  <table class="rab"><thead>
+    <tr><th rowspan="2">NO</th><th rowspan="2">ITEM PEKERJAAN</th><th rowspan="2">SPESIFIKASI RINGKAS</th><th rowspan="2">SAT.</th><th rowspan="2">VOL.</th><th colspan="2">${mode}</th></tr>
+    <tr><th>${unitPriceHeading}</th><th>${totalHeading}</th></tr>
+  </thead>
+  <tbody>${rowsHtml}<tr class="grand-row"><td colspan="6">${isInvoice ? "TOTAL INVOICE" : `GRAND TOTAL ${mode}`}</td><td class="num">${fmtRp(grandTotal)}</td></tr></tbody></table>
   ${approval}
 </main></body></html>`;
 }
@@ -182,6 +215,9 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
     const mode = isInvoice ? "RAB" : normalizeRabExportMode(req.query.mode || "RAP");
     if (!mode || mode === "COMBINED") {
       return res.status(400).send("Mode view harus RAP atau RAB.");
+    }
+    if (!RAP_VIEW_ROLES.has(req.user?.role)) {
+      return res.status(403).send("Akses RAP hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA.");
     }
     if ((mode === "RAB" || isInvoice) && req.user?.role !== "SUPER_ADMIN") {
       return res.status(403).send("Akses RAB Selling hanya untuk SUPER_ADMIN.");
@@ -196,7 +232,7 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
     });
     if (!project) return res.status(404).send("Project tidak ditemukan.");
 
-    let itemWhere = {};
+    let itemWhere = buildRabCategoryItemWhere({ categoryCode: "GENERAL" });
     let categoryTitle = "GENERAL";
     if (workCategoryId) {
       const config = await prisma.projectWorkCategory.findUnique({
@@ -207,7 +243,10 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
         return res.status(400).send("Kategori pekerjaan tidak aktif pada project.");
       }
       categoryTitle = config.workCategory.code;
-      itemWhere = buildWorkCategoryItemWhere({ workCategoryId, categoryCode: config.workCategory.code });
+      itemWhere = buildRabCategoryItemWhere({
+        workCategoryId,
+        categoryCode: config.workCategory.code,
+      });
     } else if (discipline) {
       const code = String(discipline).trim().toUpperCase();
       const activeCategories = (project.workCategories || []).filter(
@@ -218,13 +257,13 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
       );
       if (config) {
         categoryTitle = config.workCategory.code;
-        itemWhere = buildWorkCategoryItemWhere({
+        itemWhere = buildRabCategoryItemWhere({
           workCategoryId: config.workCategoryId,
           categoryCode: config.workCategory.code,
         });
       } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
         categoryTitle = code;
-        itemWhere = buildWorkCategoryItemWhere({ categoryCode: code });
+        itemWhere = buildRabCategoryItemWhere({ categoryCode: code });
       } else {
         return res.status(400).send("Kategori pekerjaan tidak ditemukan/aktif pada project.");
       }
@@ -235,7 +274,12 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
       include: {
         items: {
           where: itemWhere,
-          include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+          include: {
+            bvItem: {
+              select: { id: true, parentBvItemId: true, keterangan: true },
+            },
+          },
+          orderBy: { order: "asc" },
         },
       },
       orderBy: { order: "asc" },

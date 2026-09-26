@@ -389,18 +389,47 @@ const express = require("express");
 const ExcelJS = require("exceljs");
 const prisma = require("../../lib/prisma");
 const { buildRabSheet, normalizeRabExportMode } = require("../../services/rabExportHelper");
-const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
-const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
+const RAP_EXPORT_ROLES = new Set(["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"]);
 
-router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+function rabSheetCategoryCode(categoryCode) {
+  const code = String(categoryCode || "GENERAL").trim().toUpperCase();
+  if (["SIPIL", "CIVIL"].includes(code)) return "CV";
+  if (code === "INTERIOR") return "INT";
+  return code || "GENERAL";
+}
+
+function uniqueSheetName(usedNames, mode, categoryCode) {
+  const safeCode = rabSheetCategoryCode(categoryCode)
+    .replace(/[\\/*?:\[\]]/g, "-")
+    .slice(0, 25);
+  const baseName = `${mode} ${safeCode}`.slice(0, 31);
+  let sheetName = baseName;
+  let suffix = 2;
+  while (usedNames.has(sheetName.toLocaleLowerCase())) {
+    const suffixText = ` (${suffix++})`;
+    sheetName = `${baseName.slice(0, 31 - suffixText.length)}${suffixText}`;
+  }
+  usedNames.add(sheetName.toLocaleLowerCase());
+  return sheetName;
+}
+
+router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
     const { discipline, workCategoryId } = req.query;
     const mode = normalizeRabExportMode(req.query.mode || "COMBINED");
     if (!mode) {
       return res.status(400).json({ error: "Mode export harus RAP, RAB, atau COMBINED." });
+    }
+    // Role-aware: PM/Perencana hanya boleh RAP (costing). RAB/COMBINED tetap SUPER_ADMIN.
+    if (!RAP_EXPORT_ROLES.has(req.user?.role)) {
+      return res.status(403).json({ error: "Akses Ditolak! Fitur export hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA." });
+    }
+    if (mode !== "RAP" && req.user?.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ error: "Export RAB/Combined hanya untuk SUPER_ADMIN." });
     }
 
     const project = await prisma.project.findUnique({
@@ -451,35 +480,70 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles(
         return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
       }
       if (categories.length === 0) {
-        categories = [{
-          workCategoryId: null,
-          workCategory: { code: project.discipline || "GENERAL" },
-        }];
+        const legacyRows = await prisma.rabItem.findMany({
+          where: { projectId, workCategoryId: null, discipline: { not: null } },
+          distinct: ["discipline"],
+          select: { discipline: true },
+        });
+        categories = legacyRows
+          .map((row) => row.discipline)
+          .filter(Boolean)
+          .map((code) => ({ workCategoryId: null, workCategory: { code } }));
+        if (categories.length === 0 && project.discipline) {
+          categories = [{
+            workCategoryId: null,
+            workCategory: { code: project.discipline },
+          }];
+        }
       }
     }
 
     const wb = new ExcelJS.Workbook();
     const usedSheetNames = new Set();
-    for (const config of categories) {
+
+    const generalConfig = { workCategoryId: null, workCategory: { code: "GENERAL" } };
+    const renderCategorySheet = async (config, modeOverride = null) => {
       const categoryCode = config.workCategory?.code || "GENERAL";
-      const baseName = `${mode === "COMBINED" ? "RAP-RAB" : mode} ${categoryCode}`
-        .replace(/[\\/*?:\[\]]/g, "-")
-        .slice(0, 31);
-      let sheetName = baseName;
-      let suffix = 2;
-      while (usedSheetNames.has(sheetName.toLocaleLowerCase())) {
-        const suffixText = ` (${suffix++})`;
-        sheetName = `${baseName.slice(0, 31 - suffixText.length)}${suffixText}`;
-      }
-      usedSheetNames.add(sheetName.toLocaleLowerCase());
+      const sheetMode = modeOverride || mode;
+      const sheetName = uniqueSheetName(
+        usedSheetNames,
+        sheetMode === "COMBINED" ? "RAP-RAB" : sheetMode,
+        categoryCode,
+      );
       const ws = wb.addWorksheet(sheetName);
       const categoryFilter = config.workCategoryId
         ? { workCategoryId: config.workCategoryId, categoryCode }
         : categoryCode;
       await buildRabSheet(ws, projectId, project, categoryFilter, {
-        mode,
+        mode: sheetMode,
         categoryTitle: categoryCode,
       });
+    };
+
+    const renderGeneralSheet = async (generalMode) => renderCategorySheet(generalConfig, generalMode);
+
+    const explicitCategory = Boolean(workCategoryId || discipline);
+
+    if (mode === "COMBINED") {
+      // Tombol "Semua Kategori": GENERAL dulu, lalu pasangan RAP/RAB per kategori.
+      // Pilihan kategori eksplisit tetap hanya menghasilkan kategori itu.
+      if (!explicitCategory && req.user?.role === "SUPER_ADMIN") {
+        await renderGeneralSheet("RAP");
+        await renderGeneralSheet("RAB");
+      }
+      for (const config of categories) {
+        if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
+        await renderCategorySheet(config, "RAP");
+        await renderCategorySheet(config, "RAB");
+      }
+    } else {
+      // RAP tersedia bagi SUPER_ADMIN, PROJECT_MANAGER, dan PERENCANA.
+      // GENERAL hanya memuat workCategoryId=null + discipline=null.
+      if (!explicitCategory) await renderGeneralSheet(mode);
+      for (const config of categories) {
+        if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
+        await renderCategorySheet(config);
+      }
     }
 
     const filenameMode = mode === "COMBINED" ? "RAP_RAB" : mode;
