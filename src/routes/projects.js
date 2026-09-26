@@ -3,11 +3,20 @@
 const express = require("express");
 const router = express.Router();
 const prisma = require("../lib/prisma");
-const { normalizeProjectWorkCategoryConfigs } = require("../services/bvCalculationService");
+const { verifyToken, authorizeRoles } = require("../middleware/auth");
+const {
+  normalizeRequiredProjectWorkCategoryConfigs,
+} = require("../services/bvCalculationService");
+
+const PROJECT_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
 
 // POST /api/projects
 // body: { name, location, hspkPeriod, interiorGrade, sipilGrade, categories?, clientId?, clientName? }
-router.post("/", async (req, res, next) => {
+router.post(
+  "/",
+  verifyToken,
+  authorizeRoles(...PROJECT_MUTATION_ROLES),
+  async (req, res, next) => {
   try {
     const {
       name,
@@ -75,7 +84,7 @@ router.post("/", async (req, res, next) => {
 
     let normalizedCategories;
     try {
-      normalizedCategories = normalizeProjectWorkCategoryConfigs(
+      normalizedCategories = normalizeRequiredProjectWorkCategoryConfigs(
         requestedConfigs,
         activeCategories,
       );
@@ -266,92 +275,180 @@ router.put("/:id/pair", async (req, res, next) => {
 });
 
 // PUT /api/projects/:id
-router.put("/:id", async (req, res, next) => {
+router.put(
+  "/:id",
+  verifyToken,
+  authorizeRoles(...PROJECT_MUTATION_ROLES),
+  async (req, res, next) => {
   try {
     const { id } = req.params;
     const {
       name,
       location,
       hspkPeriod,
-      discipline,
-      grade,
-      interiorGrade,
-      sipilGrade,
+      categories,
       clientId,
       clientName,
     } = req.body;
 
-    const existing = await prisma.project.findUnique({ where: { id } });
-    if (!existing)
+    const existing = await prisma.project.findUnique({
+      where: { id },
+      include: { workCategories: true },
+    });
+    if (!existing) {
       return res.status(404).json({ error: "Project tidak ditemukan" });
+    }
 
-    if (name !== undefined && !name.trim()) {
+    if (name !== undefined && !String(name).trim()) {
       return res.status(400).json({ error: "Nama proyek wajib diisi" });
     }
-    if (location !== undefined && !location.trim()) {
+    if (location !== undefined && !String(location).trim()) {
       return res.status(400).json({ error: "Lokasi wajib diisi" });
     }
 
-    const data = {};
-    if (name !== undefined) data.name = name.trim();
-    if (location !== undefined) data.location = location.trim();
-    if (discipline !== undefined) data.discipline = discipline || null;
-    if (grade !== undefined) data.grade = grade || null;
-    if (interiorGrade !== undefined) data.interiorGrade = interiorGrade || null;
-    if (sipilGrade !== undefined) data.sipilGrade = sipilGrade || null;
+    const finalPeriod = hspkPeriod !== undefined
+      ? Number(hspkPeriod)
+      : existing.hspkPeriod;
+    if (!Number.isInteger(finalPeriod) || finalPeriod < 2000 || finalPeriod > 2100) {
+      return res.status(400).json({ error: "Periode data HSPK/AHSP tidak valid" });
+    }
 
-    const finalPeriod =
-      hspkPeriod !== undefined ? Number(hspkPeriod) : existing.hspkPeriod;
-    const finalInterior =
-      interiorGrade !== undefined ? interiorGrade || null : existing.interiorGrade;
-    const finalSipil =
-      sipilGrade !== undefined ? sipilGrade || null : existing.sipilGrade;
+    const activeCategories = await prisma.workCategory.findMany({
+      where: { isActive: true },
+      orderBy: { sortOrder: "asc" },
+    });
+    const categoryById = new Map(activeCategories.map((category) => [category.id, category]));
+    const categoryByCode = new Map(
+      activeCategories.map((category) => [String(category.code).toUpperCase(), category]),
+    );
 
-    data.hspkPeriod = finalPeriod;
+    // Edit memakai konfigurasi dari form yang sama dengan Create. Untuk klien lama
+    // yang tidak mengirim `categories`, pertahankan konfigurasi yang sudah tersimpan.
+    let requestedConfigs = Array.isArray(categories)
+      ? categories
+      : existing.workCategories.map((config) => ({
+          workCategoryId: config.workCategoryId,
+          pricingMode: config.pricingMode,
+          grade: config.grade,
+          isActive: config.isActive,
+        }));
 
-    // validasi data HSPK hanya kalau grade/periode berubah
-    if (hspkPeriod !== undefined || interiorGrade !== undefined) {
-      const interiorExists = await prisma.jobType.findFirst({
-        where: { period: finalPeriod, discipline: "INTERIOR", grade: finalInterior },
-      });
-      if (!interiorExists && finalInterior) {
-        return res.status(400).json({
-          error: `Data HSPK Interior periode ${finalPeriod} grade ${finalInterior} tidak ditemukan`,
-        });
+    // Migrasi aman untuk proyek legacy yang belum mempunyai ProjectWorkCategory.
+    if (requestedConfigs.length === 0) {
+      requestedConfigs = ["SIPIL", "INTERIOR"]
+        .map((code) => {
+          const category = categoryByCode.get(code);
+          if (!category) return null;
+          const legacyGrade = code === "SIPIL" ? existing.sipilGrade : existing.interiorGrade;
+          return {
+            workCategoryId: category.id,
+            pricingMode: legacyGrade ? "HSPK" : "CUSTOM",
+            grade: legacyGrade || null,
+            isActive: true,
+          };
+        })
+        .filter(Boolean);
+    }
+
+    let normalizedCategories;
+    try {
+      normalizedCategories = normalizeRequiredProjectWorkCategoryConfigs(
+        requestedConfigs,
+        activeCategories,
+      );
+    } catch (err) {
+      if (err instanceof TypeError) {
+        return res.status(400).json({ error: err.message });
       }
+      throw err;
     }
 
-    if (hspkPeriod !== undefined || sipilGrade !== undefined) {
-      const sipilExists = await prisma.jobType.findFirst({
-        where: { period: finalPeriod, discipline: "SIPIL", grade: finalSipil },
+    // Mode HSPK wajib menunjuk grade yang benar-benar ada pada periode+kategori.
+    for (const config of normalizedCategories) {
+      if (!config.isActive || config.pricingMode !== "HSPK") continue;
+      const category = categoryById.get(config.workCategoryId);
+      const code = String(category?.code || "").toUpperCase();
+
+      const dynamicExists = await prisma.jobType.findFirst({
+        where: {
+          period: finalPeriod,
+          workCategoryId: config.workCategoryId,
+          grade: config.grade,
+        },
+        select: { id: true },
       });
-      if (!sipilExists && finalSipil) {
-        return res.status(400).json({
-          error: `Data HSPK Sipil periode ${finalPeriod} grade ${finalSipil} tidak ditemukan`,
+      if (dynamicExists) continue;
+
+      if (code === "SIPIL" || code === "INTERIOR") {
+        const legacyExists = await prisma.jobType.findFirst({
+          where: { period: finalPeriod, discipline: code, grade: config.grade },
+          select: { id: true },
         });
+        if (legacyExists) continue;
       }
-    }
 
-    if (clientId) {
-      data.clientId = clientId;
-    } else if (clientName && clientName.trim()) {
-      const existingClient = await prisma.client.findFirst({
-        where: { name: { equals: clientName.trim(), mode: "insensitive" } },
+      return res.status(400).json({
+        error: `Data HSPK ${category?.name || code} periode ${finalPeriod} grade ${config.grade} tidak ditemukan`,
       });
-      data.clientId = existingClient
-        ? existingClient.id
-        : (await prisma.client.create({ data: { name: clientName.trim() } }))
-            .id;
     }
 
-    const project = await prisma.project.update({
-      where: { id },
-      data,
-      include: { client: true },
+    const gradeForCode = (code) => {
+      const category = categoryByCode.get(code);
+      const config = normalizedCategories.find(
+        (item) => item.workCategoryId === category?.id && item.isActive,
+      );
+      return config?.pricingMode === "HSPK" ? config.grade : null;
+    };
+
+    const project = await prisma.$transaction(async (tx) => {
+      let finalClientId = clientId || existing.clientId;
+      if (!clientId && clientName !== undefined) {
+        if (!String(clientName).trim()) {
+          throw new TypeError("Client wajib diisi");
+        }
+        const existingClient = await tx.client.findFirst({
+          where: { name: { equals: String(clientName).trim(), mode: "insensitive" } },
+        });
+        finalClientId = existingClient
+          ? existingClient.id
+          : (await tx.client.create({ data: { name: String(clientName).trim() } })).id;
+      }
+
+      await tx.projectWorkCategory.deleteMany({ where: { projectId: id } });
+      await tx.projectWorkCategory.createMany({
+        data: normalizedCategories.map((config) => ({
+          projectId: id,
+          workCategoryId: config.workCategoryId,
+          pricingMode: config.pricingMode,
+          grade: config.grade,
+          isActive: config.isActive,
+        })),
+      });
+
+      return tx.project.update({
+        where: { id },
+        data: {
+          name: name !== undefined ? String(name).trim() : existing.name,
+          location: location !== undefined ? String(location).trim() : existing.location,
+          hspkPeriod: finalPeriod,
+          discipline: null,
+          grade: null,
+          interiorGrade: gradeForCode("INTERIOR"),
+          sipilGrade: gradeForCode("SIPIL"),
+          clientId: finalClientId,
+        },
+        include: {
+          client: true,
+          workCategories: { include: { workCategory: true } },
+        },
+      });
     });
 
     res.json(project);
   } catch (err) {
+    if (err instanceof TypeError) {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
@@ -369,7 +466,10 @@ router.put("/:id/categories", async (req, res, next) => {
     const activeCategories = await prisma.workCategory.findMany({
       where: { isActive: true },
     });
-    const normalized = normalizeProjectWorkCategoryConfigs(categories, activeCategories);
+    const normalized = normalizeRequiredProjectWorkCategoryConfigs(
+      categories,
+      activeCategories,
+    );
 
     await prisma.$transaction(async (tx) => {
       await tx.projectWorkCategory.deleteMany({ where: { projectId: id } });
@@ -398,24 +498,30 @@ router.put("/:id/categories", async (req, res, next) => {
 });
 
 // DELETE /api/projects/:id
-router.delete("/:id", async (req, res, next) => {
-  try {
-    const existing = await prisma.project.findUnique({ where: { id } });
-    if (!existing)
-      return res.status(404).json({ error: "Project tidak ditemukan" });
+router.delete(
+  "/:id",
+  verifyToken,
+  authorizeRoles(...PROJECT_MUTATION_ROLES),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const existing = await prisma.project.findUnique({ where: { id } });
+      if (!existing)
+        return res.status(404).json({ error: "Project tidak ditemukan" });
 
-    // lepas pairing dulu, biar pasangan gak nyantol id yang dihapus
-    if (existing.pairedProjectId) {
-      await prisma.project.update({
-        where: { id: existing.pairedProjectId },
-        data: { pairedProjectId: null },
-      });
+      // lepas pairing dulu, biar pasangan gak nyantol id yang dihapus
+      if (existing.pairedProjectId) {
+        await prisma.project.update({
+          where: { id: existing.pairedProjectId },
+          data: { pairedProjectId: null },
+        });
+      }
+
+      await prisma.project.delete({ where: { id } });
+      res.status(204).send();
+    } catch (err) {
+      next(err);
     }
-
-    await prisma.project.delete({ where: { id } });
-    res.status(204).send();
-  } catch (err) {
-    next(err);
-  }
-});
+  },
+);
 module.exports = router;

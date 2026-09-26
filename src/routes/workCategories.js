@@ -82,6 +82,42 @@ router.put("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, r
   }
 });
 
+// GET /api/work-categories/:id/references
+router.get(
+  "/:id/references",
+  verifyToken,
+  authorizeRoles(...CATEGORY_ROLES),
+  async (req, res) => {
+    try {
+      const category = await prisma.workCategory.findUnique({
+        where: { id: req.params.id },
+        select: {
+          id: true,
+          _count: {
+            select: {
+              projectConfigs: true,
+              priceItems: true,
+              jobTypes: true,
+              uploadBatches: true,
+              bvItems: true,
+              rabItems: true,
+            },
+          },
+        },
+      });
+
+      if (!category) {
+        return res.status(404).json({ error: "Kategori tidak ditemukan." });
+      }
+
+      res.json({ references: category._count });
+    } catch (err) {
+      console.error("Error Get WorkCategory References:", err);
+      res.status(500).json({ error: err.message || "Terjadi kesalahan." });
+    }
+  },
+);
+
 // DELETE /api/work-categories/:id
 router.delete("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
   try {
@@ -89,21 +125,65 @@ router.delete("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req
     const existing = await prisma.workCategory.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: "Kategori tidak ditemukan." });
 
-    // Cek apakah sudah direferensikan
-    const refCount = await prisma.projectWorkCategory.count({
-      where: { workCategoryId: id },
-    });
-    if (refCount > 0) {
-      // Hanya nonaktifkan, bukan hard delete
-      await prisma.workCategory.update({ where: { id }, data: { isActive: false } });
-      return res.json({
-        message: "Kategori sudah dipakai proyek; dinonaktifkan (bukan dihapus).",
+    const detached = await prisma.$transaction(async (tx) => {
+      const projectConfigs = await tx.projectWorkCategory.deleteMany({
+        where: { workCategoryId: id },
       });
-    }
+      const priceItems = await tx.priceItem.updateMany({
+        where: { workCategoryId: id },
+        data: { workCategoryId: null },
+      });
+      const jobTypes = await tx.jobType.updateMany({
+        where: { workCategoryId: id },
+        data: { workCategoryId: null },
+      });
+      const uploadBatches = await tx.uploadBatch.updateMany({
+        where: { workCategoryId: id },
+        data: { workCategoryId: null },
+      });
+      const bvItems = await tx.bvItem.updateMany({
+        where: { workCategoryId: id },
+        data: { workCategoryId: null },
+      });
+      const rabItems = await tx.rabItem.updateMany({
+        where: { workCategoryId: id },
+        data: { workCategoryId: null },
+      });
+      const deleted = await tx.workCategory
+        .delete({ where: { id } })
+        .catch((e) => {
+          if (e.code === "P2025") return null;
+          throw e;
+        });
 
-    await prisma.workCategory.delete({ where: { id } });
-    res.json({ message: "Kategori berhasil dihapus." });
+      if (!deleted) {
+        const conflict = new Error("Kategori sudah dihapus sebelumnya.");
+        conflict.status = 404;
+        throw conflict;
+      }
+
+      return {
+        deleted,
+        referencesDetached: {
+          projectConfigs: projectConfigs.count,
+          priceItems: priceItems.count,
+          jobTypes: jobTypes.count,
+          uploadBatches: uploadBatches.count,
+          bvItems: bvItems.count,
+          rabItems: rabItems.count,
+        },
+      };
+    });
+
+    res.json({
+      message: "Kategori berhasil dihapus permanen.",
+      data: detached.deleted,
+      referencesDetached: detached.referencesDetached,
+    });
   } catch (err) {
+    if (err.status === 404) {
+      return res.status(404).json({ error: err.message });
+    }
     console.error("Error Delete WorkCategory:", err);
     res.status(500).json({ error: err.message || "Terjadi kesalahan." });
   }

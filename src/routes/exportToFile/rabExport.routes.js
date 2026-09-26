@@ -388,51 +388,175 @@
 const express = require("express");
 const ExcelJS = require("exceljs");
 const prisma = require("../../lib/prisma");
-const { buildRabSheet } = require("../../services/rabExportHelper");
-const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
-const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { buildRabSheet, normalizeRabExportMode } = require("../../services/rabExportHelper");
+const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
+const RAP_EXPORT_ROLES = new Set(["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"]);
 
-router.get("/projects/:projectId/rab-items/export", verifyToken, authorizeRoles("SUPER_ADMIN"), async (req, res) => {
+function rabSheetCategoryCode(categoryCode) {
+  const code = String(categoryCode || "GENERAL").trim().toUpperCase();
+  if (["SIPIL", "CIVIL"].includes(code)) return "CV";
+  if (code === "INTERIOR") return "INT";
+  return code || "GENERAL";
+}
+
+function uniqueSheetName(usedNames, mode, categoryCode) {
+  const safeCode = rabSheetCategoryCode(categoryCode)
+    .replace(/[\\/*?:\[\]]/g, "-")
+    .slice(0, 25);
+  const baseName = `${mode} ${safeCode}`.slice(0, 31);
+  let sheetName = baseName;
+  let suffix = 2;
+  while (usedNames.has(sheetName.toLocaleLowerCase())) {
+    const suffixText = ` (${suffix++})`;
+    sheetName = `${baseName.slice(0, 31 - suffixText.length)}${suffixText}`;
+  }
+  usedNames.add(sheetName.toLocaleLowerCase());
+  return sheetName;
+}
+
+router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res) => {
   try {
     const { projectId } = req.params;
+    const { discipline, workCategoryId } = req.query;
+    const mode = normalizeRabExportMode(req.query.mode || "COMBINED");
+    if (!mode) {
+      return res.status(400).json({ error: "Mode export harus RAP, RAB, atau COMBINED." });
+    }
+    // Role-aware: PM/Perencana hanya boleh RAP (costing). RAB/COMBINED tetap SUPER_ADMIN.
+    if (!RAP_EXPORT_ROLES.has(req.user?.role)) {
+      return res.status(403).json({ error: "Akses Ditolak! Fitur export hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA." });
+    }
+    if (mode !== "RAP" && req.user?.role !== "SUPER_ADMIN") {
+      return res.status(403).json({ error: "Export RAB/Combined hanya untuk SUPER_ADMIN." });
+    }
+
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      include: { client: true },
+      include: {
+        client: true,
+        workCategories: { include: { workCategory: true } },
+      },
     });
-    if (!project)
+    if (!project) {
       return res.status(404).json({ error: "Project tidak ditemukan." });
+    }
 
-    const { discipline, workCategoryId } = req.query;
-    let categoryFilter;
+    let categories;
     if (workCategoryId) {
-      const config = await prisma.projectWorkCategory.findUnique({
-        where: { projectId_workCategoryId: { projectId, workCategoryId } },
-        include: { workCategory: true },
-      });
+      const config = (project.workCategories || []).find(
+        (entry) => entry.workCategoryId === workCategoryId,
+      );
       if (!config || !config.isActive || !config.workCategory?.isActive) {
         return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
       }
-      categoryFilter = { workCategoryId, categoryCode: config.workCategory.code };
+      categories = [config];
+    } else if (discipline) {
+      // Resolve kode kategori ke config aktif proyek agar kategori dinamis
+      // terfilter ketat via workCategoryId (bukan filter kosong).
+      const code = String(discipline).trim().toUpperCase();
+      const activeCategories = (project.workCategories || []).filter(
+        (entry) => entry.isActive && entry.workCategory?.isActive,
+      );
+      const config = activeCategories.find(
+        (entry) => String(entry.workCategory.code || "").trim().toUpperCase() === code,
+      );
+      if (config) {
+        categories = [config];
+      } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
+        categories = [{ workCategoryId: null, workCategory: { code } }];
+      } else {
+        return res.status(400).json({ error: "Kategori pekerjaan tidak ditemukan/aktif pada project." });
+      }
     } else {
-      categoryFilter = discipline || null;
+      const configured = project.workCategories || [];
+      categories = configured.filter(
+        (entry) => entry.isActive && entry.workCategory?.isActive,
+      );
+      if (categories.length === 0 && configured.length > 0) {
+        // Kategori terkonfigurasi tapi tidak ada yang aktif: jangan fallback
+        // ke sheet berlabel satu kategori dengan filter kosong.
+        return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
+      }
+      if (categories.length === 0) {
+        const legacyRows = await prisma.rabItem.findMany({
+          where: { projectId, workCategoryId: null, discipline: { not: null } },
+          distinct: ["discipline"],
+          select: { discipline: true },
+        });
+        categories = legacyRows
+          .map((row) => row.discipline)
+          .filter(Boolean)
+          .map((code) => ({ workCategoryId: null, workCategory: { code } }));
+        if (categories.length === 0 && project.discipline) {
+          categories = [{
+            workCategoryId: null,
+            workCategory: { code: project.discipline },
+          }];
+        }
+      }
     }
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("RAB");
-    await buildRabSheet(ws, projectId, project, categoryFilter);
 
+    const wb = new ExcelJS.Workbook();
+    const usedSheetNames = new Set();
+
+    const generalConfig = { workCategoryId: null, workCategory: { code: "GENERAL" } };
+    const renderCategorySheet = async (config, modeOverride = null) => {
+      const categoryCode = config.workCategory?.code || "GENERAL";
+      const sheetMode = modeOverride || mode;
+      const sheetName = uniqueSheetName(
+        usedSheetNames,
+        sheetMode === "COMBINED" ? "RAP-RAB" : sheetMode,
+        categoryCode,
+      );
+      const ws = wb.addWorksheet(sheetName);
+      const categoryFilter = config.workCategoryId
+        ? { workCategoryId: config.workCategoryId, categoryCode }
+        : categoryCode;
+      await buildRabSheet(ws, projectId, project, categoryFilter, {
+        mode: sheetMode,
+        categoryTitle: categoryCode,
+      });
+    };
+
+    const renderGeneralSheet = async (generalMode) => renderCategorySheet(generalConfig, generalMode);
+
+    const explicitCategory = Boolean(workCategoryId || discipline);
+
+    if (mode === "COMBINED") {
+      // Tombol "Semua Kategori": GENERAL dulu, lalu pasangan RAP/RAB per kategori.
+      // Pilihan kategori eksplisit tetap hanya menghasilkan kategori itu.
+      if (!explicitCategory && req.user?.role === "SUPER_ADMIN") {
+        await renderGeneralSheet("RAP");
+        await renderGeneralSheet("RAB");
+      }
+      for (const config of categories) {
+        if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
+        await renderCategorySheet(config, "RAP");
+        await renderCategorySheet(config, "RAB");
+      }
+    } else {
+      // RAP tersedia bagi SUPER_ADMIN, PROJECT_MANAGER, dan PERENCANA.
+      // GENERAL hanya memuat workCategoryId=null + discipline=null.
+      if (!explicitCategory) await renderGeneralSheet(mode);
+      for (const config of categories) {
+        if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
+        await renderCategorySheet(config);
+      }
+    }
+
+    const filenameMode = mode === "COMBINED" ? "RAP_RAB" : mode;
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="RAB_${project.name.replace(/\s+/g, "_")}.xlsx"`,
+      `attachment; filename="${filenameMode}_${project.name.replace(/\s+/g, "_")}.xlsx"`,
     );
     await wb.xlsx.write(res);
     res.end();
-    console.log("rab", project);
   } catch (err) {
     console.error("Error Export RAB:", err);
     res.status(500).json({ error: err.message || "Gagal export." });

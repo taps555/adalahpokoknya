@@ -380,6 +380,25 @@ function normalizeProjectWorkCategoryConfigs(configs, categories) {
   return normalized;
 }
 
+function normalizeRequiredProjectWorkCategoryConfigs(configs, categories) {
+  const normalized = normalizeProjectWorkCategoryConfigs(configs, categories);
+  const categoryById = new Map((categories || []).map((category) => [category.id, category]));
+  const activeCodes = new Set(
+    normalized
+      .filter((config) => config.isActive)
+      .map((config) => String(categoryById.get(config.workCategoryId)?.code || "").toUpperCase()),
+  );
+
+  for (const requiredCode of ["SIPIL", "INTERIOR"]) {
+    if (!activeCodes.has(requiredCode)) {
+      const label = requiredCode === "SIPIL" ? "Sipil" : "Interior";
+      throw new TypeError(`Kategori ${label} wajib ada di setiap project.`);
+    }
+  }
+
+  return normalized;
+}
+
 module.exports = {
   normalizeBvNumber,
   calcBreakdownSubtotal,
@@ -393,5 +412,6 @@ module.exports = {
   disciplineForRab,
   normalizeWorkCategoryCode,
   normalizeProjectWorkCategoryConfigs,
+  normalizeRequiredProjectWorkCategoryConfigs,
   buildWorkCategoryItemWhere,
 };

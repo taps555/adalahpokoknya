@@ -1,5 +1,7 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
 const prisma = require("../lib/prisma");
 const { buildWorkCategoryItemWhere } = require("./bvCalculationService");
 
@@ -22,11 +24,11 @@ const ROMAN = [
 ];
 
 function fmt(cell) {
-  cell.numFmt = "#,##0";
+  cell.numFmt = "#,##0;(#,##0);-";
 }
 
 function fmtVol(cell) {
-  cell.numFmt = "#,##0.00";
+  cell.numFmt = "#,##0.00;(#,##0.00);-";
 }
 
 function autoFitColumn(ws, colLetter, minWidth = 1, maxWidth = 60) {
@@ -37,6 +39,14 @@ function autoFitColumn(ws, colLetter, minWidth = 1, maxWidth = 60) {
     if (len > maxLen) maxLen = len;
   });
   col.width = Math.min(maxLen + 2, maxWidth);
+}
+
+function normalizeRabExportMode(mode) {
+  const value = String(mode || "COMBINED").trim().toUpperCase();
+  if (["RAP", "COSTING"].includes(value)) return "RAP";
+  if (["RAB", "SELLING"].includes(value)) return "RAB";
+  if (["COMBINED", "BOTH", "GABUNGAN", "RAP_RAB"].includes(value)) return "COMBINED";
+  return null;
 }
 
 function colRange(startCol, endCol) {
@@ -50,24 +60,267 @@ function colRange(startCol, endCol) {
   return cols;
 }
 
-async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
-  const itemWhere = typeof categoryFilter === "string"
-    ? buildWorkCategoryItemWhere({ categoryCode: categoryFilter })
-    : buildWorkCategoryItemWhere(categoryFilter || {});
+function cloneCell(source, target) {
+  target.value = source.value;
+  target.style = JSON.parse(JSON.stringify(source.style || {}));
+  target.numFmt = source.numFmt;
+}
+
+function safeUnmerge(ws, range) {
+  try {
+    ws.unMergeCells(range);
+  } catch (_) {
+    // The range may not be merged by an older workbook path.
+  }
+}
+
+function addDivesLogo(ws) {
+  const logoPath = path.resolve(__dirname, "../../public/assets/dives.png");
+  if (!fs.existsSync(logoPath)) return;
+  const imageId = ws.workbook.addImage({ filename: logoPath, extension: "png" });
+  ws.addImage(imageId, {
+    tl: { col: 1.15, row: 2.15 },
+    ext: { width: 145, height: 70 },
+  });
+}
+
+function finalizeRabSheet(ws, mode, categoryTitle = "") {
+  // Clear legacy merges before shifting rows; ExcelJS otherwise retains stale merge ranges.
+  Object.keys(ws._merges || {}).forEach((range) => safeUnmerge(ws, range));
+  // The reference BQ workbook starts its visual block on row 3.
+  ws.insertRow(2, []);
+  ["B2:C9", "B3:C10", "D2:J3", "D3:J4"].forEach((range) => safeUnmerge(ws, range));
+
+  const combinedTitleRange = "D3:J4";
+  const singleTitleRange = "D3:H4";
+
+  // Legacy helper uses K only to paint an outside border; remove the empty column.
+  ws.spliceColumns(11, 1);
+
+  if (mode !== "COMBINED") {
+    if (mode === "RAB") {
+      for (let row = 11; row <= ws.rowCount; row++) {
+        cloneCell(ws.getCell(`I${row}`), ws.getCell(`G${row}`));
+        cloneCell(ws.getCell(`J${row}`), ws.getCell(`H${row}`));
+      }
+    }
+    ws.spliceColumns(9, 2);
+  }
+
+  // Rebuild only the canonical BQ merges after all row/column shifts.
+  ws.mergeCells(mode === "COMBINED" ? combinedTitleRange : singleTitleRange);
+  ws.mergeCells("C11:C12");
+  ws.mergeCells("G11:H11");
+  if (mode === "COMBINED") ws.mergeCells("I11:J11");
+
+  ws.getCell("D3").value = "RENCANA ANGGARAN BIAYA";
+  ws.getCell("G11").value = mode === "COMBINED" ? "RAP" : mode;
+  if (mode === "COMBINED") ws.getCell("I11").value = "RAB";
+
+  // Match the canonical BQ dimensions. Interior uses the narrower item column.
+  const isInterior = String(categoryTitle).trim().toUpperCase() === "INTERIOR";
+  const widths = {
+    A: 2.5703125,
+    B: 5.5703125,
+    C: isInterior ? 50.5703125 : 55.5703125,
+    D: 13,
+    E: 8.5703125,
+    F: 13,
+    G: 15.5703125,
+    H: 13,
+    I: 13,
+    J: 13,
+  };
+  Object.entries(widths).forEach(([column, width]) => {
+    if (mode === "COMBINED" || column < "I") ws.getColumn(column).width = width;
+  });
+  ws.properties.defaultRowHeight = 15;
+
+  ws.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.font = { ...cell.font, name: "Arial", size: cell.font?.size || 10 };
+    });
+    if (row.values.some((value) => String(value || "").startsWith("GRAND TOTAL"))) {
+      row.height = 30;
+    }
+  });
+
+  const titleCell = ws.getCell("D3");
+  titleCell.font = { ...titleCell.font, name: "Arial Narrow", size: 15, bold: true };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  titleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFD0CECE" },
+  };
+
+  addDivesLogo(ws);
+  const lastCol = mode === "COMBINED" ? "J" : "H";
+  ws.pageSetup = {
+    orientation: "landscape",
+    paperSize: 9,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    horizontalCentered: true,
+    printArea: `B3:${lastCol}${ws.rowCount}`,
+    printTitlesRow: "11:12",
+    margins: {
+      left: 0.4330708661,
+      right: 0.1968503937,
+      top: 0.7480314961,
+      bottom: 0.7480314961,
+      header: 0,
+      footer: 0,
+    },
+  };
+  ws.views = [{ state: "frozen", ySplit: 12 }];
+  ws.headerFooter.oddHeader = "";
+  ws.headerFooter.oddFooter = "";
+}
+
+function buildRabCategoryItemWhere(categoryFilter = null) {
+  const filter = typeof categoryFilter === "string"
+    ? { categoryCode: categoryFilter }
+    : (categoryFilter || {});
+  const categoryCode = String(filter.categoryCode || "").trim().toUpperCase();
+
+  // GENERAL berarti item yang benar-benar belum masuk kategori/disiplin apa pun,
+  // bukan filter kosong yang mengambil seluruh isi proyek.
+  if (!filter.workCategoryId && categoryCode === "GENERAL") {
+    return { workCategoryId: null, discipline: null };
+  }
+
+  return buildWorkCategoryItemWhere(filter);
+}
+
+function categoryActivityName(categoryCode, projectName = "") {
+  const code = String(categoryCode || "GENERAL").trim().toUpperCase();
+  if (["SIPIL", "CIVIL", "CV"].includes(code)) return "Pekerjaan Civil";
+  if (["INTERIOR", "INT"].includes(code)) return "Pekerjaan Interior dan Furniture";
+  if (code === "GENERAL") return "Pekerjaan General";
+  return `Pekerjaan ${code || projectName || "General"}`;
+}
+
+function flattenRabItems(group) {
+  const items = [...(group.items || [])];
+  for (const child of group.children || []) {
+    items.push(...flattenRabItems(child));
+  }
+  return items;
+}
+
+function buildRabParentItemIds(group) {
+  const items = flattenRabItems(group);
+  const rabItemIds = new Set(items.map((item) => item.id).filter(Boolean));
+  const rabItemIdByBvItemId = new Map(
+    items
+      .filter((item) => item.id && item.bvItem?.id)
+      .map((item) => [item.bvItem.id, item.id]),
+  );
+  const parentIds = new Set();
+
+  for (const item of items) {
+    if (item.parentId && rabItemIds.has(item.parentId)) {
+      parentIds.add(item.parentId);
+    }
+    const parentIdFromBv = rabItemIdByBvItemId.get(item.bvItem?.parentBvItemId);
+    if (parentIdFromBv) parentIds.add(parentIdFromBv);
+  }
+
+  return parentIds;
+}
+
+function arrangeRabItems(items = []) {
+  const ordered = [...items].sort(
+    (a, b) => Number(a.order || 0) - Number(b.order || 0),
+  );
+  const byId = new Map(ordered.map((item) => [item.id, item]));
+  const rabIdByBvId = new Map(
+    ordered
+      .filter((item) => item.id && item.bvItem?.id)
+      .map((item) => [item.bvItem.id, item.id]),
+  );
+  const childrenByParent = new Map();
+  const roots = [];
+
+  for (const item of ordered) {
+    const parentId = item.parentId || rabIdByBvId.get(item.bvItem?.parentBvItemId);
+    if (parentId && byId.has(parentId) && parentId !== item.id) {
+      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, []);
+      childrenByParent.get(parentId).push(item);
+    } else {
+      roots.push(item);
+    }
+  }
+
+  const rows = [];
+  const visited = new Set();
+  const visit = (item, depth) => {
+    if (visited.has(item.id)) return;
+    visited.add(item.id);
+    const children = childrenByParent.get(item.id) || [];
+    rows.push({ item, depth, children });
+    children.forEach((child) => visit(child, depth + 1));
+  };
+  roots.forEach((item) => visit(item, 0));
+  ordered.forEach((item) => visit(item, 0));
+  return rows;
+}
+
+function deriveRabItemNumber(item, children, fallbackNumber) {
+  const ownCode = String(item?.name || "").match(/^\s*([A-Z]{1,6}\d+[A-Z0-9]*)\s*-/i)?.[1];
+  if (ownCode) return ownCode.toUpperCase();
+
+  for (const child of children || []) {
+    const childCode = String(child?.name || "").match(
+      /^\s*([A-Z]{1,6}\d+[A-Z0-9]*)-[A-Z0-9]+(?:\s|$)/i,
+    )?.[1];
+    if (childCode) return childCode.toUpperCase();
+  }
+  return String(fallbackNumber);
+}
+
+function sumRabLeafTotals(group, parentIds = buildRabParentItemIds(group)) {
+  let rap = 0;
+  let rab = 0;
+
+  for (const item of flattenRabItems(group)) {
+    if (item.isHeaderOnly || parentIds.has(item.id)) continue;
+    rap += Number(item.rapTotalPrice);
+    rab += Number(item.rabTotalPrice);
+  }
+
+  return { rap, rab };
+}
+
+async function buildRabSheet(
+  ws,
+  projectId,
+  project,
+  categoryFilter = null,
+  options = {},
+) {
+  const mode = normalizeRabExportMode(options.mode || "COMBINED") || "COMBINED";
+  const itemWhere = buildRabCategoryItemWhere(categoryFilter);
 
   const rawGroups = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
       items: {
         where: itemWhere,
-        include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+        include: {
+          bvItem: { select: { id: true, parentBvItemId: true, keterangan: true } },
+        },
         orderBy: { order: "asc" },
       },
       children: {
         include: {
           items: {
             where: itemWhere,
-            include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+            include: {
+              bvItem: { select: { id: true, parentBvItemId: true, keterangan: true } },
+            },
             orderBy: { order: "asc" },
           },
         },
@@ -118,10 +371,13 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
   };
 
   const info = [
-    ["Nama Kegiatan", project.name || "-"],
-    ["Nama Pekerjaan", project?.client.name],
-    ["Lokasi Pekerjaan", project.location],
-    ["Tahun Anggaran", String(project.hspkPeriod)],
+    [
+      "Nama Kegiatan",
+      project.activityName || categoryActivityName(options.categoryTitle, project.name),
+    ],
+    ["Nama Pekerjaan", project.name || "-"],
+    ["Lokasi Pekerjaan", project.location || "-"],
+    ["Tahun Anggaran", String(project.hspkPeriod || "-")],
   ];
 
   let r = 5;
@@ -244,12 +500,23 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
     grandRab = 0;
 
   function writeItem(item, num, hasChildren) {
-    const isChild = !!item.bvItem?.parentBvItemId;
+    const isChild = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+    const isParent = Boolean(hasChildren || item.isHeaderOnly);
+    const displayName = /^\s*-\s*/.test(item.name || "")
+      ? String(item.name).trim()
+      : `${isChild ? "- " : ""}${item.name || ""}`;
     ws.getCell(`B${r}`).value = num;
     ws.getCell(`B${r}`).alignment = { horizontal: "center" };
-    ws.getCell(`C${r}`).value = (isChild ? "- " : "") + item.name;
+    ws.getCell(`C${r}`).value = displayName;
+    ws.getCell(`D${r}`).value = isParent ? "" : (item.bvItem?.keterangan || "");
 
-    if (item.isByOwner) {
+    if (isParent) {
+      ["E", "F", "G", "H", "I", "J"].forEach((col) => {
+        ws.getCell(`${col}${r}`).value = "";
+        ws.getCell(`${col}${r}`).font = { bold: false };
+        ws.getCell(`${col}${r}`).alignment = { horizontal: "center" };
+      });
+    } else if (item.isByOwner) {
       colRange("B", "J").forEach((col) => {
         ws.getCell(`${col}${r}`).fill = {
           type: "pattern",
@@ -264,12 +531,6 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
       ws.getCell(`E${r}`).value = item.paymentUnit;
       ws.getCell(`F${r}`).value = Number(item.volume);
       fmtVol(ws.getCell(`F${r}`));
-    } else if (hasChildren) {
-      ["E", "F", "G", "H", "I", "J"].forEach((col) => {
-        ws.getCell(`${col}${r}`).value = "";
-        ws.getCell(`${col}${r}`).font = { bold: false };
-        ws.getCell(`${col}${r}`).alignment = { horizontal: "center" };
-      });
     } else {
       ws.getCell(`E${r}`).value = item.paymentUnit;
       ws.getCell(`F${r}`).value = Number(item.volume);
@@ -283,46 +544,28 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
     r++;
   }
 
-  function sumRecursive(group) {
-    let rap = 0,
-      rab = 0;
-    for (const it of group.items || []) {
-      rap += Number(it.rapTotalPrice);
-      rab += Number(it.rabTotalPrice);
-    }
-    for (const child of group.children || []) {
-      const s = sumRecursive(child);
-      rap += s.rap;
-      rab += s.rab;
-    }
-    return { rap, rab };
-  }
-
   groups.forEach((group, idx) => {
     ws.getCell(`B${r}`).value = ROMAN[idx] || String(idx + 1);
     ws.getCell(`C${r}`).value = group.name.toUpperCase();
     ws.getRow(r).font = { bold: true };
     r++;
 
-    // kumpulkan semua bvItem.id yang jadi parent (punya anak) di group ini
-    const allItemsInGroup = [
-      ...group.items,
-      ...(group.children || []).flatMap((sub) => sub.items),
-    ];
-    const parentIds = new Set(
-      allItemsInGroup.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
-    );
+    // Gunakan relasi RabItem.parentId dan fallback relasi BV untuk mengenali parent.
+    const parentIds = buildRabParentItemIds(group);
 
     let n = 1;
-    for (let i = 0; i < group.items.length; i++) {
-      const item = group.items[i];
-      const isChild = !!item.bvItem?.parentBvItemId;
-      const hasChildren = parentIds.has(item.bvItem?.id);
-      writeItem(item, isChild ? "" : String(n++), hasChildren);
-
-      const nextItem = group.items[i + 1];
-      const nextIsChild = nextItem ? !!nextItem.bvItem?.parentBvItemId : false;
-      if (isChild && !nextIsChild) r++;
+    for (const row of arrangeRabItems(group.items || [])) {
+      const { item, depth, children } = row;
+      const isChildRow = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+      const isHeader = item.isHeaderOnly || parentIds.has(item.id);
+      const number = isChildRow
+        ? ""
+        : isHeader
+          ? deriveRabItemNumber(item, children, n++)
+          : depth === 0
+            ? String(n++)
+            : "";
+      writeItem(item, number, isHeader);
     }
 
     for (const sub of group.children || []) {
@@ -331,24 +574,25 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
       ws.getRow(r).font = { bold: true };
       r++;
 
-      for (let i = 0; i < sub.items.length; i++) {
-        const item = sub.items[i];
-        const isChild = !!item.bvItem?.parentBvItemId;
-        const hasChildren = parentIds.has(item.bvItem?.id);
-        writeItem(item, isChild ? "" : String(n++), hasChildren);
-
-        const nextItem = sub.items[i + 1];
-        const nextIsChild = nextItem
-          ? !!nextItem.bvItem?.parentBvItemId
-          : false;
-        if (isChild && !nextIsChild) r++;
+      for (const row of arrangeRabItems(sub.items || [])) {
+        const { item, depth, children } = row;
+        const isChildRow = Boolean(item.parentId || item.bvItem?.parentBvItemId);
+        const isHeader = item.isHeaderOnly || parentIds.has(item.id);
+        const number = isChildRow
+          ? ""
+          : isHeader
+            ? deriveRabItemNumber(item, children, n++)
+            : depth === 0
+              ? String(n++)
+              : "";
+        writeItem(item, number, isHeader);
       }
     }
 
     r++;
 
-    //SUB TOTAL
-    const { rap, rab } = sumRecursive(group);
+    //SUB TOTAL (leaf-only; header/parent tidak dihitung dua kali)
+    const { rap, rab } = sumRabLeafTotals(group, parentIds);
     grandRap += rap;
     grandRab += rab;
 
@@ -374,9 +618,9 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
   for (let row = hr + 2; row <= r; row++) {
     ["B", "C", "D", "E", "F", "G", "H", "I", "J"].forEach((col) => {
       ws.getCell(`${col}${row}`).border = {
-        // Baris pertama tetap thin di atas, baris berikutnya mengikuti dotted dari bottom sel di atasnya
-        top: row === hr + 2 ? { style: "thin" } : { style: "dotted" },
-        bottom: { style: "dotted" },
+        // BQ memakai grid tabel tipis yang konsisten pada seluruh baris isi.
+        top: { style: "thin" },
+        bottom: { style: "thin" },
         left: { style: "thin" },
         right: { style: "thin" },
       };
@@ -451,11 +695,17 @@ async function buildRabSheet(ws, projectId, project, categoryFilter = null) {
       fgColor: { argb: "FFCC66" },
     };
   });
-  ws.eachRow({ includeEmpty: true }, (row) => {
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.font = { ...cell.font, name: "Arial Narrow" };
-    });
-  });
+  finalizeRabSheet(ws, mode, options.categoryTitle);
+  return { mode, grandRap, grandRab, groupCount: groups.length };
 }
 
-module.exports = { buildRabSheet };
+module.exports = {
+  buildRabSheet,
+  normalizeRabExportMode,
+  buildRabParentItemIds,
+  sumRabLeafTotals,
+  arrangeRabItems,
+  deriveRabItemNumber,
+  buildRabCategoryItemWhere,
+  categoryActivityName,
+};
