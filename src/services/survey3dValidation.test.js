@@ -96,6 +96,30 @@ test('rejects unsupported status, invalid resources, and partial rows', () => {
   );
 });
 
+test('ignores untouched UI resource rows while still rejecting partially filled rows', () => {
+  assert.deepEqual(
+    normalizeSurvey3dPayload({
+      status: 'IN_PROGRESS',
+      notes: 'Catatan tetap boleh disimpan',
+      resources: [{ type: 'GOOGLE_DRIVE', title: ' ', url: ' ' }],
+    }),
+    {
+      status: 'IN_PROGRESS',
+      gdriveUrl: null,
+      notes: 'Catatan tetap boleh disimpan',
+      resources: [],
+    },
+  );
+
+  assert.throws(
+    () => normalizeSurvey3dPayload({
+      status: 'FINAL',
+      resources: [{ type: 'GOOGLE_DRIVE', title: '', url: 'https://drive.google.com/file/d/model/view' }],
+    }),
+    /judul/i,
+  );
+});
+
 test('allows an empty resource list and rejects more than 20 resources', () => {
   assert.deepEqual(
     normalizeSurvey3dPayload({ status: 'NOT_STARTED', notes: ' ', resources: [] }),

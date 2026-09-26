@@ -29,7 +29,10 @@ function normalizeResource(resource, order) {
   const title = String(resource?.title || '').trim();
   const url = String(resource?.url || '').trim();
 
-  if (!type && !title && !url) return null;
+  // The UI sends the default type even when a newly added row is untouched.
+  // Treat rows with neither a title nor URL as blank; partially filled rows
+  // still fail validation so typos are not silently discarded.
+  if (!title && !url) return null;
   if (!RESOURCE_TYPES.has(type)) {
     throw new Error(`jenis data pendukung ke-${order + 1} tidak valid`);
   }
