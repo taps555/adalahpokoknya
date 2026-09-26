@@ -179,6 +179,48 @@ function finalizeRabSheet(ws, mode, categoryTitle = "") {
   ws.headerFooter.oddFooter = "";
 }
 
+function flattenRabItems(group) {
+  const items = [...(group.items || [])];
+  for (const child of group.children || []) {
+    items.push(...flattenRabItems(child));
+  }
+  return items;
+}
+
+function buildRabParentItemIds(group) {
+  const items = flattenRabItems(group);
+  const rabItemIds = new Set(items.map((item) => item.id).filter(Boolean));
+  const rabItemIdByBvItemId = new Map(
+    items
+      .filter((item) => item.id && item.bvItem?.id)
+      .map((item) => [item.bvItem.id, item.id]),
+  );
+  const parentIds = new Set();
+
+  for (const item of items) {
+    if (item.parentId && rabItemIds.has(item.parentId)) {
+      parentIds.add(item.parentId);
+    }
+    const parentIdFromBv = rabItemIdByBvItemId.get(item.bvItem?.parentBvItemId);
+    if (parentIdFromBv) parentIds.add(parentIdFromBv);
+  }
+
+  return parentIds;
+}
+
+function sumRabLeafTotals(group, parentIds = buildRabParentItemIds(group)) {
+  let rap = 0;
+  let rab = 0;
+
+  for (const item of flattenRabItems(group)) {
+    if (item.isHeaderOnly || parentIds.has(item.id)) continue;
+    rap += Number(item.rapTotalPrice);
+    rab += Number(item.rabTotalPrice);
+  }
+
+  return { rap, rab };
+}
+
 async function buildRabSheet(
   ws,
   projectId,
@@ -419,41 +461,20 @@ async function buildRabSheet(
     r++;
   }
 
-  function sumRecursive(group) {
-    let rap = 0,
-      rab = 0;
-    for (const it of group.items || []) {
-      rap += Number(it.rapTotalPrice);
-      rab += Number(it.rabTotalPrice);
-    }
-    for (const child of group.children || []) {
-      const s = sumRecursive(child);
-      rap += s.rap;
-      rab += s.rab;
-    }
-    return { rap, rab };
-  }
-
   groups.forEach((group, idx) => {
     ws.getCell(`B${r}`).value = ROMAN[idx] || String(idx + 1);
     ws.getCell(`C${r}`).value = group.name.toUpperCase();
     ws.getRow(r).font = { bold: true };
     r++;
 
-    // kumpulkan semua bvItem.id yang jadi parent (punya anak) di group ini
-    const allItemsInGroup = [
-      ...group.items,
-      ...(group.children || []).flatMap((sub) => sub.items),
-    ];
-    const parentIds = new Set(
-      allItemsInGroup.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
-    );
+    // Gunakan relasi RabItem.parentId dan fallback relasi BV untuk mengenali parent.
+    const parentIds = buildRabParentItemIds(group);
 
     let n = 1;
     for (let i = 0; i < group.items.length; i++) {
       const item = group.items[i];
       const isChild = !!item.bvItem?.parentBvItemId;
-      const hasChildren = parentIds.has(item.bvItem?.id);
+      const hasChildren = item.isHeaderOnly || parentIds.has(item.id);
       writeItem(item, isChild ? "" : String(n++), hasChildren);
 
       const nextItem = group.items[i + 1];
@@ -470,7 +491,7 @@ async function buildRabSheet(
       for (let i = 0; i < sub.items.length; i++) {
         const item = sub.items[i];
         const isChild = !!item.bvItem?.parentBvItemId;
-        const hasChildren = parentIds.has(item.bvItem?.id);
+        const hasChildren = item.isHeaderOnly || parentIds.has(item.id);
         writeItem(item, isChild ? "" : String(n++), hasChildren);
 
         const nextItem = sub.items[i + 1];
@@ -483,8 +504,8 @@ async function buildRabSheet(
 
     r++;
 
-    //SUB TOTAL
-    const { rap, rab } = sumRecursive(group);
+    //SUB TOTAL (leaf-only; header/parent tidak dihitung dua kali)
+    const { rap, rab } = sumRabLeafTotals(group, parentIds);
     grandRap += rap;
     grandRab += rab;
 
@@ -591,4 +612,9 @@ async function buildRabSheet(
   return { mode, grandRap, grandRab, groupCount: groups.length };
 }
 
-module.exports = { buildRabSheet, normalizeRabExportMode };
+module.exports = {
+  buildRabSheet,
+  normalizeRabExportMode,
+  buildRabParentItemIds,
+  sumRabLeafTotals,
+};

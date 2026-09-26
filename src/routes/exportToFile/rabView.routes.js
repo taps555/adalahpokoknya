@@ -6,7 +6,11 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
 const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
-const { normalizeRabExportMode } = require("../../services/rabExportHelper");
+const {
+  normalizeRabExportMode,
+  buildRabParentItemIds,
+  sumRabLeafTotals,
+} = require("../../services/rabExportHelper");
 
 const router = express.Router();
 
@@ -51,21 +55,6 @@ const ROMAN = [
   "XV",
 ];
 
-function sumRecursive(group) {
-  let rap = 0,
-    rab = 0;
-  for (const it of group.items || []) {
-    rap += Number(it.rapTotalPrice);
-    rab += Number(it.rabTotalPrice);
-  }
-  for (const child of group.children || []) {
-    const s = sumRecursive(child);
-    rap += s.rap;
-    rab += s.rab;
-  }
-  return { rap, rab };
-}
-
 function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false) {
   const unitKey = mode === "RAB" ? "rabUnitPrice" : "rapUnitPrice";
   const totalKey = mode === "RAB" ? "rabTotalPrice" : "rapTotalPrice";
@@ -75,14 +64,31 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
   groups.forEach((group, idx) => {
     rowsHtml += `<tr class="group-row"><td>${ROMAN[idx] || idx + 1}</td><td colspan="5">${escapeHtml(String(group.name || "").toUpperCase())}</td></tr>`;
     let n = 1;
+    const parentIds = buildRabParentItemIds(group);
     const writeItem = (item, indent) => {
-      rowsHtml += `<tr${item.isByOwner ? ' class="owner-row"' : ""}>
+      const isParent = item.isHeaderOnly || parentIds.has(item.id);
+      const ownerClass = item.isByOwner && !isParent ? ' class="owner-row"' : "";
+      const unit = isParent ? "" : escapeHtml(item.paymentUnit);
+      const volume = isParent
+        ? ""
+        : Number(item.volume || 0).toLocaleString("id-ID", { maximumFractionDigits: 2 });
+      const unitPrice = isParent
+        ? ""
+        : item.isByOwner
+          ? "By Owner"
+          : fmtRp(item[unitKey]);
+      const totalPrice = isParent
+        ? ""
+        : item.isByOwner
+          ? "By Owner"
+          : fmtRp(item[totalKey]);
+      rowsHtml += `<tr${ownerClass}>
         <td>${n++}</td>
         <td class="left">${indent ? "&nbsp;&nbsp;- " : ""}${escapeHtml(item.name)}</td>
-        <td>${escapeHtml(item.paymentUnit)}</td>
-        <td class="num">${Number(item.volume || 0).toLocaleString("id-ID", { maximumFractionDigits: 2 })}</td>
-        <td class="num">${item.isByOwner ? "By Owner" : fmtRp(item[unitKey])}</td>
-        <td class="num">${item.isByOwner ? "By Owner" : fmtRp(item[totalKey])}</td>
+        <td>${unit}</td>
+        <td class="num">${volume}</td>
+        <td class="num">${unitPrice}</td>
+        <td class="num">${totalPrice}</td>
       </tr>`;
     };
     const writeGroup = (current, depth) => {
@@ -93,7 +99,7 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
       }
     };
     writeGroup(group, 0);
-    const totals = sumRecursive(group);
+    const totals = sumRabLeafTotals(group, parentIds);
     const subtotal = mode === "RAB" ? totals.rab : totals.rap;
     grandTotal += subtotal;
     rowsHtml += `<tr class="subtotal-row"><td colspan="5">Sub Total ${mode}</td><td class="num">${fmtRp(subtotal)}</td></tr>`;
@@ -226,7 +232,12 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
 
     const allGroups = await prisma.rabGroup.findMany({
       where: { projectId },
-      include: { items: { where: itemWhere } },
+      include: {
+        items: {
+          where: itemWhere,
+          include: { bvItem: { select: { id: true, parentBvItemId: true } } },
+        },
+      },
       orderBy: { order: "asc" },
     });
     const byId = new Map(allGroups.map((group) => [group.id, { ...group, children: [] }]));
