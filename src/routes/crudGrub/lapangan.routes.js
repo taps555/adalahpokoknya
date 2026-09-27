@@ -6,7 +6,8 @@ const path = require("path");
 const fs = require("fs");
 const prisma = require("../../lib/prisma"); // sesuaikan path relatif sama struktur folder lo
 const { verifyToken } = require("../../middleware/auth");
-const { getKeteranganVolumeHarga, getKeteranganForHabisPakai } = require("../../lib/keteranganVolumeHarga.js");
+const { getKeteranganVolumeHarga, getKeteranganForHabisPakai } = require("../../lib/keteranganVolumeHarga");
+const { buildNoPembayaran } = require("../../lib/paymentNumber");
 
 const router = express.Router();
 
@@ -490,10 +491,13 @@ router.put(
                   keterangan: `Auto TEMPO - semua barang diterima untuk PO ${po.poNumber || po.id}`,
                 },
               });
-              const urutan = String(created.seq).padStart(3, "0");
+              const noPembayaran = await buildNoPembayaran({
+                pembayaranId: created.id,
+                tanggal: created.tanggal,
+              });
               await prisma.pembayaranSupplier.update({
                 where: { id: created.id },
-                data: { noPembayaran: `PBY/${String(nowDate.getMonth() + 1).padStart(2, "0")}/${nowDate.getFullYear()}/${urutan}` },
+                data: { noPembayaran },
               });
             }
           }
@@ -827,8 +831,6 @@ router.post("/surat-jalan/bulk", maybeUpload, async (req, res) => {
 
       // Buat entri PembayaranSupplier untuk TEMPO
       const nowDate = new Date();
-      const bulan = String(nowDate.getMonth() + 1).padStart(2, "0");
-      const tahun = nowDate.getFullYear();
 
       const created = await prisma.pembayaranSupplier.create({
         data: {
@@ -842,8 +844,10 @@ router.post("/surat-jalan/bulk", maybeUpload, async (req, res) => {
         },
       });
 
-      const urutan = String(created.seq).padStart(3, "0");
-      const noPembayaran = `PBY/${bulan}/${tahun}/${urutan}`;
+      const noPembayaran = await buildNoPembayaran({
+        pembayaranId: created.id,
+        tanggal: created.tanggal,
+      });
       await prisma.pembayaranSupplier.update({
         where: { id: created.id },
         data: { noPembayaran },
@@ -960,17 +964,48 @@ router.get("/riwayat-habis-pakai", async (req, res) => {
       }),
     ]);
 
-    // Enrich status permintaan habis pakai berdasarkan PO habis pakai terkait
-    const permintaan = permintaanRaw.map((p) => {
+    // Enrich status + keterangan volume/harga permintaan habis pakai.
+    // Supaya di layar Riwayat Habis Pakai kolom Ket. Volume/Ket. Harga
+    // tidak tampil '-' ketika data referensinya tersedia.
+    const permintaan = [];
+    for (const p of permintaanRaw) {
       const po = p.poHabisPakai;
-      if (!po) return p;
       let status = p.status;
-      if (po.status === "BELUM_APPROVE") status = "PO_DIBUAT";
-      else if (po.status === "MENUNGGU_ATASAN") status = "FINANCE_APPROVED";
-      else if (po.status === "APPROVED") status = "ATASAN_APPROVED";
-      else if (po.status === "REJECTED") status = "REJECTED";
-      return { ...p, status };
-    });
+      if (po) {
+        if (po.status === "BELUM_APPROVE") status = "PO_DIBUAT";
+        else if (po.status === "MENUNGGU_ATASAN") status = "FINANCE_APPROVED";
+        else if (po.status === "APPROVED") status = "ATASAN_APPROVED";
+        else if (po.status === "REJECTED") status = "REJECTED";
+      }
+
+      const {
+        rapQty,
+        rapPrice,
+        rapSource,
+        akumulasiQty,
+        akumulasiReceived,
+        keteranganVolume,
+        keteranganHarga,
+      } = await getKeteranganForHabisPakai({
+        itemName: p.itemName,
+        unit: p.unit,
+        mrItemId: p.mrItemId,
+        indukPoId: p.poId,
+        projectId: p.projectId || projectId,
+      });
+
+      permintaan.push({
+        ...p,
+        status,
+        rapQty,
+        rapPrice,
+        rapSource,
+        akumulasiQty,
+        akumulasiReceived,
+        keteranganVolume,
+        keteranganHarga,
+      });
+    }
 
     // Kelebihan: barang datang melebihi jumlah yang dipesan di PO.
     // Bukan dibuatkan permintaan otomatis — cuma ditandai supaya

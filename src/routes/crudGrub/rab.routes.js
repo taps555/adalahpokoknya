@@ -828,27 +828,97 @@ router.post(
       }
     });
 
+    const normalizeSyncKey = (value) =>
+      String(value || "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const makeSyncBaseKey = (item) => {
+      const price = Number(item.pricePerUnit || 0);
+      return [
+        normalizeSyncKey(item.itemName),
+        normalizeSyncKey(item.unit),
+        normalizeSyncKey(item.discipline),
+        normalizeSyncKey(item.groupName),
+        normalizeSyncKey(item.jobName),
+        normalizeSyncKey(item.scheduleRange),
+        price.toFixed(6),
+      ].join("||");
+    };
+
     await prisma.$transaction(async (tx) => {
-      // Bersihkan data lama jika ada
-      await tx.materialRequest.deleteMany({
-        where: { projectId: projectId },
+      const headers = await tx.materialRequest.findMany({
+        where: { projectId },
+        include: { items: { orderBy: { id: "asc" } } },
+        orderBy: { createdAt: "desc" },
       });
 
-      // Buat header baru
-      const mr = await tx.materialRequest.create({
-        data: { projectId: projectId },
-      });
-
-      // Simpan rincian barang
-      const insertData = requestItemsData.map((item) => ({
-        ...item,
-        headerId: mr.id,
-      }));
-      if (insertData.length > 0) {
-        await tx.materialRequestItem.createMany({ data: insertData });
+      let activeHeader = headers[0] || null;
+      if (!activeHeader) {
+        activeHeader = await tx.materialRequest.create({
+          data: { projectId },
+          include: { items: true },
+        });
       }
 
-      // Kunci proyek
+      const existingItems = Array.isArray(activeHeader.items)
+        ? activeHeader.items
+        : [];
+
+      const existingCounts = new Map();
+      const existingByKey = new Map();
+      for (const row of existingItems) {
+        const base = makeSyncBaseKey(row);
+        const seq = (existingCounts.get(base) || 0) + 1;
+        existingCounts.set(base, seq);
+        const syncKey = `${base}__${seq}`;
+        if (!existingByKey.has(syncKey)) {
+          existingByKey.set(syncKey, row);
+        }
+      }
+
+      const generatedCounts = new Map();
+      for (const row of requestItemsData) {
+        const base = makeSyncBaseKey(row);
+        const seq = (generatedCounts.get(base) || 0) + 1;
+        generatedCounts.set(base, seq);
+        const syncKey = `${base}__${seq}`;
+
+        const payload = {
+          itemName: row.itemName,
+          unit: row.unit,
+          discipline: row.discipline,
+          groupName: row.groupName,
+          jobName: row.jobName,
+          volumePekerjaan: row.volumePekerjaan,
+          estimatedVolume: row.estimatedVolume,
+          pricePerUnit: row.pricePerUnit,
+          totalPrice: row.totalPrice,
+          scheduleRange: row.scheduleRange,
+          catatanPerencana: row.catatanPerencana,
+        };
+
+        const existing = existingByKey.get(syncKey);
+        if (existing) {
+          await tx.materialRequestItem.update({
+            where: { id: existing.id },
+            data: payload,
+          });
+          existingByKey.delete(syncKey);
+        } else {
+          await tx.materialRequestItem.create({
+            data: {
+              ...payload,
+              headerId: activeHeader.id,
+            },
+          });
+        }
+      }
+
+      // Tidak menghapus item lama yang tidak ada di sinkron terbaru.
+      // Ini sengaja untuk mencegah reset histori PO saat kirim-ulang finance.
+
       await tx.project.update({
         where: { id: projectId },
         data: { rabStatus: "LOCKED" },
@@ -957,10 +1027,8 @@ router.post(
       }
 
       await prisma.$transaction(async (tx) => {
-        await tx.materialRequest.deleteMany({
-          where: { projectId: projectId },
-        });
-
+        // Jangan hapus Material Request agar histori PO/procurement tidak reset.
+        // Cukup buka lock supaya RAB bisa direvisi lalu sinkron ulang parsial.
         await tx.project.update({
           where: { id: projectId },
           data: { rabStatus: "DRAFT" },
@@ -968,7 +1036,7 @@ router.post(
       });
 
       res.json({
-        message: "Batal Kirim Berhasil! RAB kembali terbuka (DRAFT).",
+        message: "Batal Kirim Berhasil! RAB kembali terbuka (DRAFT) tanpa mereset data procurement.",
       });
     } catch (error) {
       console.error("Cancel Finance Error:", error);

@@ -2,11 +2,25 @@ const prisma = require('./prisma');
 
 const fmtNum = (n) => {
   const num = Number(n || 0);
-  return isNaN(num) ? '0' : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
+  return Number.isNaN(num)
+    ? '0'
+    : num.toLocaleString('id-ID', { maximumFractionDigits: 4 });
 };
-const fmtRp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
+const fmtRp = (n) =>
+  'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
 
 const normalize = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+const itemMatchConditions = (name) => {
+  const n = String(name || '').trim();
+  if (!n) return [];
+  const norm = normalize(n);
+  return [
+    { description: { equals: n, mode: 'insensitive' } },
+    { description: { contains: n, mode: 'insensitive' } },
+    ...(norm ? [{ description: { contains: norm, mode: 'insensitive' } }] : []),
+  ];
+};
 
 /**
  * Cari RAP qty & harga untuk sebuah item PO.
@@ -50,10 +64,105 @@ async function getRapForItem({ materialRequestId, description, indukPoId }) {
   return { rapQty, rapPrice, rapSource };
 }
 
+async function getAggregatesForItem({ itemName, projectId }) {
+  const conditions = itemMatchConditions(itemName);
+  if (!conditions.length) {
+    return { akumulasiPoQty: 0, akumulasiReceived: 0, akumulasiPoHargaRata: 0 };
+  }
+
+  const where = {
+    OR: conditions,
+    purchaseOrder: projectId ? { projectId } : undefined,
+  };
+
+  const poItems = await prisma.purchaseOrderItem.findMany({
+    where,
+    select: { qty: true, receivedVolume: true, unitPrice: true },
+  });
+
+  const akumulasiPoQty = poItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
+  const akumulasiReceived = poItems.reduce(
+    (sum, it) => sum + Number(it.receivedVolume || 0),
+    0,
+  );
+
+  const weighted = poItems.reduce(
+    (acc, it) => {
+      const qty = Number(it.qty || 0);
+      const price = Number(it.unitPrice || 0);
+      return {
+        totalQty: acc.totalQty + qty,
+        totalVal: acc.totalVal + qty * price,
+      };
+    },
+    { totalQty: 0, totalVal: 0 },
+  );
+
+  const akumulasiPoHargaRata =
+    weighted.totalQty > 0 ? weighted.totalVal / weighted.totalQty : 0;
+
+  return { akumulasiPoQty, akumulasiReceived, akumulasiPoHargaRata };
+}
+
+const buildKetVolume = ({ itemName, unit, rapQty, akumulasiPoQty, akumulasiReceived }) => {
+  const u = unit ? ` ${unit}` : '';
+  const rapPart = `RAP ${fmtNum(rapQty)}${u}`;
+  const poPart = `PO ${fmtNum(akumulasiPoQty)}${u}`;
+  const recvPart = `Diterima ${fmtNum(akumulasiReceived)}${u}`;
+
+  if (rapQty > 0) {
+    const diffPo = akumulasiPoQty - rapQty;
+    const diffRecv = akumulasiReceived - rapQty;
+
+    const statusPo =
+      diffPo > 0
+        ? `PO Over +${fmtNum(diffPo)}${u}`
+        : diffPo < 0
+          ? `PO Under ${fmtNum(Math.abs(diffPo))}${u}`
+          : 'PO Sesuai';
+
+    const statusRecv =
+      diffRecv > 0
+        ? `Terima Over +${fmtNum(diffRecv)}${u}`
+        : diffRecv < 0
+          ? `Terima Under ${fmtNum(Math.abs(diffRecv))}${u}`
+          : 'Terima Sesuai';
+
+    return `${itemName}: ${rapPart} | ${poPart} | ${recvPart} | ${statusPo} | ${statusRecv}`;
+  }
+
+  return `${itemName}: ${poPart} | ${recvPart}`;
+};
+
+const buildKetHarga = ({ itemName, rapPrice, poPrice, poAvgPrice }) => {
+  if (rapPrice > 0) {
+    const diffNow = poPrice - rapPrice;
+    const diffAvg = poAvgPrice - rapPrice;
+
+    const statusNow =
+      diffNow > 0
+        ? `PO Over +${fmtRp(diffNow)}`
+        : diffNow < 0
+          ? `PO Under ${fmtRp(Math.abs(diffNow))}`
+          : 'PO Sesuai';
+
+    const statusAvg =
+      diffAvg > 0
+        ? `Rata2 PO Over +${fmtRp(diffAvg)}`
+        : diffAvg < 0
+          ? `Rata2 PO Under ${fmtRp(Math.abs(diffAvg))}`
+          : 'Rata2 PO Sesuai';
+
+    return `${itemName}: RAP ${fmtRp(rapPrice)} | PO ${fmtRp(poPrice)} | Rata2 PO ${fmtRp(poAvgPrice)} | ${statusNow} | ${statusAvg}`;
+  }
+
+  return `${itemName}: PO ${fmtRp(poPrice)} | Rata2 PO ${fmtRp(poAvgPrice)}`;
+};
+
 /**
  * Hitung keterangan over/under volume & harga untuk sebuah PO.
- * - Ket Volume: akumulasi qty PO (semua PO untuk itemName sama dalam project) vs RAP qty.
- * - Ket Harga: harga satuan item PO vs harga satuan RAP.
+ * - Ket Volume: RAP vs akumulasi PO vs akumulasi barang diterima.
+ * - Ket Harga: RAP vs harga item PO saat ini + rata-rata harga PO.
  */
 async function getKeteranganVolumeHarga(po) {
   if (!po?.items?.length) return { ketVolume: '-', ketHarga: '-' };
@@ -72,7 +181,6 @@ async function getKeteranganVolumeHarga(po) {
     const unit = item.unit || '';
     const projectId = po.projectId;
     const poPrice = Number(item.unitPrice || 0);
-    const poQty = Number(item.qty || 0);
 
     const { rapQty, rapPrice } = await getRapForItem({
       materialRequestId: item.materialRequestId,
@@ -80,44 +188,30 @@ async function getKeteranganVolumeHarga(po) {
       indukPoId,
     });
 
-    // Akumulasi qty dari semua PO untuk item ini dalam project
-    let akumulasiQty = poQty;
-    if (itemName) {
-      const allItems = await prisma.purchaseOrderItem.findMany({
-        where: {
-          description: { contains: itemName.trim(), mode: "insensitive" },
-          purchaseOrder: projectId ? { projectId } : undefined,
-        },
-        select: { qty: true, poId: true },
+    const { akumulasiPoQty, akumulasiReceived, akumulasiPoHargaRata } =
+      await getAggregatesForItem({
+        itemName,
+        projectId,
       });
-      akumulasiQty = allItems.reduce((s, it) => s + Number(it.qty || 0), 0);
-      const alreadyCounted = allItems.some((it) => it.poId === po.id);
-      if (!alreadyCounted) akumulasiQty += poQty;
-    }
 
-    // Volume
-    if (rapQty > 0) {
-      const diff = akumulasiQty - rapQty;
-      if (diff > 0) ketVolParts.push(`${itemName}: Over ${fmtNum(diff)} ${unit} (RAP ${fmtNum(rapQty)})`);
-      else if (diff < 0) ketVolParts.push(`${itemName}: Under ${fmtNum(Math.abs(diff))} ${unit} (RAP ${fmtNum(rapQty)})`);
-      else ketVolParts.push(`${itemName}: Sesuai RAP ${fmtNum(rapQty)} ${unit}`);
-    } else if (akumulasiQty > 0) {
-      ketVolParts.push(`${itemName}: Akumulasi ${fmtNum(akumulasiQty)} ${unit}`);
-    } else {
-      ketVolParts.push(`${itemName}: -`);
-    }
+    ketVolParts.push(
+      buildKetVolume({
+        itemName,
+        unit,
+        rapQty,
+        akumulasiPoQty,
+        akumulasiReceived,
+      }),
+    );
 
-    // Harga
-    if (rapPrice > 0) {
-      const diff = poPrice - rapPrice;
-      if (diff > 0) ketHargaParts.push(`${itemName}: Over ${fmtRp(diff)} (RAP ${fmtRp(rapPrice)})`);
-      else if (diff < 0) ketHargaParts.push(`${itemName}: Under ${fmtRp(Math.abs(diff))} (RAP ${fmtRp(rapPrice)})`);
-      else ketHargaParts.push(`${itemName}: Sesuai RAP ${fmtRp(rapPrice)}`);
-    } else if (poPrice > 0) {
-      ketHargaParts.push(`${itemName}: PO ${fmtRp(poPrice)}`);
-    } else {
-      ketHargaParts.push(`${itemName}: -`);
-    }
+    ketHargaParts.push(
+      buildKetHarga({
+        itemName,
+        rapPrice,
+        poPrice,
+        poAvgPrice: akumulasiPoHargaRata || poPrice,
+      }),
+    );
   }
 
   return {
@@ -127,8 +221,9 @@ async function getKeteranganVolumeHarga(po) {
 }
 
 /**
- * Helper untuk riwayat/permintaan habis pakai: menghasilkan keterangan singkat
- * berdasarkan RAP qty/harga dan akumulasi qty PO + permintaan.
+ * Helper untuk riwayat/permintaan habis pakai:
+ * - Ket volume: RAP vs akumulasi PO vs akumulasi diterima + status over/under.
+ * - Ket harga: RAP vs harga rata-rata PO.
  */
 async function getKeteranganForHabisPakai({
   itemName,
@@ -143,53 +238,39 @@ async function getKeteranganForHabisPakai({
     indukPoId,
   });
 
-  const itemNameTrim = (itemName || '').trim();
+  const { akumulasiPoQty, akumulasiReceived, akumulasiPoHargaRata } =
+    await getAggregatesForItem({
+      itemName,
+      projectId,
+    });
 
-  // Akumulasi PO
-  const poItemWhere = {
-    description: { contains: itemNameTrim, mode: "insensitive" },
-  };
-  if (projectId) poItemWhere.purchaseOrder = { projectId };
-  const poItems = await prisma.purchaseOrderItem.findMany({
-    where: poItemWhere,
-    select: { qty: true, receivedVolume: true, unitPrice: true },
-  });
-  const akumulasiQtyPo = poItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
+  const keteranganVolume = buildKetVolume({
+    itemName,
+    unit,
+    rapQty,
+    akumulasiPoQty,
+    akumulasiReceived,
+  }).replace(`${itemName}: `, '');
 
-  // Jumlahkan permintaan habis pakai yang belum jadi PO
-  const permintaanWhere = {
-    itemName: { contains: itemNameTrim, mode: "insensitive" },
-    status: { not: "REJECTED" },
-  };
-  if (projectId) permintaanWhere.projectId = projectId;
-  const permintaanItems = await prisma.permintaanHabisPakai.findMany({
-    where: permintaanWhere,
-    select: { qty: true },
-  });
-  const akumulasiQtyPermintaan = permintaanItems.reduce((sum, it) => sum + Number(it.qty || 0), 0);
-  const akumulasiQty = akumulasiQtyPo + akumulasiQtyPermintaan;
-
-  // Volume
-  let keteranganVolume;
-  if (rapQty > 0) {
-    const diff = akumulasiQty - rapQty;
-    const u = unit ? ` ${unit}` : '';
-    if (diff > 0) keteranganVolume = `Over ${fmtNum(diff)}${u} (RAP ${fmtNum(rapQty)})`;
-    else if (diff < 0) keteranganVolume = `Under ${fmtNum(Math.abs(diff))}${u} (RAP ${fmtNum(rapQty)})`;
-    else keteranganVolume = `Sesuai RAP ${fmtNum(rapQty)}${u}`;
-  } else if (akumulasiQty > 0) {
-    keteranganVolume = `Akumulasi ${fmtNum(akumulasiQty)} ${unit}`;
-  } else {
-    keteranganVolume = '-';
-  }
-
-  // Permintaan belum punya harga PO, jadi Ket Harga selalu '-' atau info RAP saja
   let keteranganHarga = '-';
-  if (rapPrice > 0) {
-    keteranganHarga = `RAP ${fmtRp(rapPrice)}`;
+  if (rapPrice > 0 || akumulasiPoHargaRata > 0) {
+    keteranganHarga = buildKetHarga({
+      itemName,
+      rapPrice,
+      poPrice: akumulasiPoHargaRata,
+      poAvgPrice: akumulasiPoHargaRata,
+    }).replace(`${itemName}: `, '');
   }
 
-  return { rapQty, rapPrice, rapSource, akumulasiQty, keteranganVolume, keteranganHarga };
+  return {
+    rapQty,
+    rapPrice,
+    rapSource,
+    akumulasiQty: akumulasiPoQty,
+    akumulasiReceived,
+    keteranganVolume,
+    keteranganHarga,
+  };
 }
 
 module.exports = {

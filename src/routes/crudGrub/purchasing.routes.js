@@ -4,6 +4,7 @@ const express = require("express");
 const router = express.Router();
 const prisma = require("../../lib/prisma");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { buildNoPembayaran } = require("../../lib/paymentNumber");
 
 // =====================================================================
 // 1. RETUR PEMBELIAN
@@ -736,8 +737,6 @@ router.put(
             where: { poId: poForPayment.id },
           });
           if (!sudahAda) {
-            const seq = await prisma.pembayaranSupplier.count({});
-            const noPembayaran = `BYR-${String(seq + 1).padStart(5, "0")}`;
             const totalTagihan = Number(poForPayment.grandTotal || poForPayment.subTotal || 0);
 
             const cara = String(poForPayment.caraPembayaran || "").toLowerCase();
@@ -749,9 +748,8 @@ router.put(
               metodeDefault = "TEMPO";
             }
 
-            await prisma.pembayaranSupplier.create({
+            const createdPembayaran = await prisma.pembayaranSupplier.create({
               data: {
-                noPembayaran,
                 supplierId: poForPayment.supplierId,
                 poId: poForPayment.id,
                 tanggal: new Date(),
@@ -763,6 +761,16 @@ router.put(
                 keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
                 status: "PENDING",
               },
+            });
+
+            const noPembayaran = await buildNoPembayaran({
+              pembayaranId: createdPembayaran.id,
+              tanggal: createdPembayaran.tanggal,
+            });
+
+            await prisma.pembayaranSupplier.update({
+              where: { id: createdPembayaran.id },
+              data: { noPembayaran },
             });
           }
         }
@@ -892,7 +900,8 @@ router.get("/pembayaran-supplier", async (req, res) => {
       include: {
         supplier: { select: { name: true, id: true, type: true } },
         pengajuan: { select: { noPengajuan: true, id: true } },
-        rekeningBank: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
@@ -920,7 +929,8 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       include: {
         supplier: true,
         pengajuan: true,
-        rekeningBank: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
         purchaseOrder: { include: { supplier: true, project: true, items: { include: { materialRequest: true } } } },
       },
     });
@@ -947,10 +957,10 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       tanggal,
       bankAccount,
       rekeningBankId,
+      tipeRekeningId,
       keterangan,
       buktiBayarUrl,
-      akunKasBank = req.body.akunKasBank || "",
-      tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
+      tipeAkunKasBank,
       status,
     } = req.body;
 
@@ -990,6 +1000,9 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
     const totalTerbayar = jumlahBayarInput;
     const sisaBayar = Math.max(totalTagihan - totalTerbayar, 0);
 
+    const resolvedTipeAkunKasBank =
+      tipeAkunKasBank || (rekeningBankId ? "BANK" : "KAS");
+
     let autoStatus = "PENDING";
     if (totalTagihan > 0 && totalTerbayar >= totalTagihan) autoStatus = "PAID";
     else if (totalTerbayar > 0) autoStatus = "PARTIAL";
@@ -1006,8 +1019,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         jumlah: jumlahBayarInput,
         metodeBayar,
         rekeningBankId: rekeningBankId || null,
-        tipeAkunKasBank,
-        akunKasBank: akunKasBank || null,
+        tipeAkunKasBank: resolvedTipeAkunKasBank,
+        tipeRekeningId: tipeRekeningId || null,
         tipeEntry:
           metodeBayar === "TEMPO"
             ? (sisaBayar <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
@@ -1029,6 +1042,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         metodeBayar: metodeBayar || "TRANSFER",
         bankAccount,
         rekeningBankId: rekeningBankId || null,
+        tipeAkunKasBank: resolvedTipeAkunKasBank,
+        tipeRekeningId: tipeRekeningId || null,
         keterangan,
         paymentHistory,
         buktiBayarUrl,
@@ -1037,19 +1052,18 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       },
     });
 
-    // Generate noPembayaran: PBY/bulan/tahun/seq
-    const now = tanggalForm;
-    const bulan = String(now.getMonth() + 1).padStart(2, "0");
-    const tahun = now.getFullYear();
-    const urutan = String(created.seq).padStart(3, "0");
-    const noPembayaran = `PBY/${bulan}/${tahun}/${urutan}`;
+    const noPembayaran = await buildNoPembayaran({
+      pembayaranId: created.id,
+      tanggal: created.tanggal,
+    });
 
     const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: created.id },
       data: { noPembayaran },
       include: {
         supplier: { select: { id: true, name: true } },
-        rekeningBank: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
@@ -1067,9 +1081,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
           ? await prisma.masterRekeningBank.findUnique({ where: { id: rekeningBankId } })
           : null;
 
-        const namaAkun = akunKasBank?.trim()
-          || (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
-          || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
+        const namaAkun = (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
+          || (resolvedTipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
 
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(pembayaran.purchaseOrder || po);
 
@@ -1080,7 +1093,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
 
         await createTransaksiBukuBesar({
           tanggal: tanggalBayarInput || tanggalForm,
-          tipeAkun: tipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
+          tipeAkun: resolvedTipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
           namaAkun,
           jenis: "KELUAR",
           nominal: jumlahBayarInput,
@@ -1089,6 +1102,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
           keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
           keteranganVolume: ketVol,
           keteranganHarga: ketHrg,
+          tipeRekeningId: tipeRekeningId || rekening?.tipeRekeningId || null,
           poId: pembayaran.poId,
           pengajuanId: pembayaran.pengajuanId,
           pembayaranId: pembayaran.id,
@@ -1131,10 +1145,10 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       tanggalBayar,
       bankAccount,
       rekeningBankId,
+      tipeRekeningId,
       keterangan,
       buktiBayarUrl,
-      akunKasBank = req.body.akunKasBank || "",
-      tipeAkunKasBank = req.body.tipeAkunKasBank || "KAS",
+      tipeAkunKasBank,
       status,
       tambahPembayaran = Boolean(req.body.tambahPembayaran),
       totalTagihan: totalTagihanInput,
@@ -1144,7 +1158,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
-        rekeningBank: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
@@ -1218,6 +1233,9 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
 
     const nominalJurnal = Math.max(totalTerbayarBaru - existingTerbayar, 0);
 
+    const resolvedTipeAkunKasBank =
+      tipeAkunKasBank || existing.tipeAkunKasBank || (rekeningBankId || existing.rekeningBankId ? "BANK" : "KAS");
+
     const paymentHistory = Array.isArray(existing.paymentHistory)
       ? [...existing.paymentHistory]
       : [];
@@ -1229,8 +1247,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         jumlah: nominalJurnal,
         metodeBayar: metodeFinal,
         rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
-        tipeAkunKasBank,
-        akunKasBank: akunKasBank || null,
+        tipeAkunKasBank: resolvedTipeAkunKasBank,
+        tipeRekeningId: tipeRekeningId || existing.tipeRekeningId || null,
         tipeEntry:
           metodeFinal === "TEMPO"
             ? (sisaBayarBaru <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
@@ -1255,6 +1273,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         tanggalBayar: nominalJurnal > 0 ? tanggalBayarFinal : existing.tanggalBayar,
         bankAccount,
         rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
+        tipeAkunKasBank: resolvedTipeAkunKasBank,
+        tipeRekeningId: tipeRekeningId || existing.tipeRekeningId || null,
         keterangan,
         paymentHistory,
         buktiBayarUrl,
@@ -1262,7 +1282,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       },
       include: {
         supplier: { select: { id: true, name: true } },
-        rekeningBank: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
         purchaseOrder: {
           include: {
             items: { include: { materialRequest: true } },
@@ -1279,9 +1300,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         const rekening = rekeningBankId
           ? await prisma.masterRekeningBank.findUnique({ where: { id: rekeningBankId } })
           : existing.rekeningBank;
-        const namaAkun = akunKasBank?.trim()
-          || (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
-          || (tipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
+        const namaAkun = (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
+          || (resolvedTipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
 
         const po = pembayaran.purchaseOrder || existing.purchaseOrder;
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
@@ -1293,7 +1313,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
 
         await createTransaksiBukuBesar({
           tanggal: tanggalBayarFinal || pembayaran.tanggal || new Date(),
-          tipeAkun: tipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
+          tipeAkun: resolvedTipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
           namaAkun,
           jenis: "KELUAR",
           nominal: nominalJurnal,
@@ -1302,6 +1322,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
           keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
           keteranganVolume: ketVol,
           keteranganHarga: ketHrg,
+          tipeRekeningId: tipeRekeningId || rekening?.tipeRekeningId || existing.tipeRekeningId || null,
           poId: po?.id || pembayaran.poId || existing.poId,
           pengajuanId: pembayaran.pengajuanId || existing.pengajuanId,
           pembayaranId: pembayaran.id,

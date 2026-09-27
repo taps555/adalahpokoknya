@@ -24,6 +24,8 @@ router.get("/transaksi", verifyToken, async (req, res) => {
       sampai,
       search,
       projectId,
+      tipeRekeningId,
+      rekeningBankId,
       cursor,
       limit = "100",
     } = req.query;
@@ -31,6 +33,8 @@ router.get("/transaksi", verifyToken, async (req, res) => {
     const where = {};
     if (tipeAkun) where.tipeAkun = tipeAkun;
     if (namaAkun) where.namaAkun = { contains: namaAkun, mode: "insensitive" };
+    if (rekeningBankId) where.rekeningBankId = rekeningBankId;
+    if (tipeRekeningId) where.tipeRekeningId = tipeRekeningId;
     if (dari || sampai) {
       where.tanggal = {};
       if (dari) where.tanggal.gte = new Date(dari);
@@ -51,7 +55,8 @@ router.get("/transaksi", verifyToken, async (req, res) => {
       createdBy: { select: { id: true, name: true } },
       project: { select: { id: true, name: true } },
       akunBukuBesar: { select: { id: true, kodeAkun: true, namaAkun: true, tipeAkun: true } },
-      rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true } },
+      rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true, tipeRekeningId: true, tipeRekening: { select: { id: true, namaTipe: true } } } },
+      tipeRekening: { select: { id: true, namaTipe: true } },
       purchaseOrder: {
         select: {
           id: true,
@@ -76,11 +81,10 @@ router.get("/transaksi", verifyToken, async (req, res) => {
       },
     };
 
-    // Project filter dilakukan di memory agar aman untuk relasi optional
     if (projectId) {
       const allRows = await prisma.bukuBesarTransaksi.findMany({
         where,
-        orderBy: [{ tanggal: "asc" }, { createdAt: "asc" }],
+        orderBy: [{ tanggal: "desc" }, { createdAt: "desc" }],
         include,
       });
 
@@ -118,10 +122,10 @@ router.get("/transaksi", verifyToken, async (req, res) => {
     const cursorCondition = cursorRow
       ? {
           OR: [
-            { tanggal: { gt: cursorRow.tanggal } },
+            { tanggal: { lt: cursorRow.tanggal } },
             {
               tanggal: cursorRow.tanggal,
-              createdAt: { gt: cursorRow.createdAt },
+              createdAt: { lt: cursorRow.createdAt },
             },
           ],
         }
@@ -132,7 +136,7 @@ router.get("/transaksi", verifyToken, async (req, res) => {
     const [rows, total] = await Promise.all([
       prisma.bukuBesarTransaksi.findMany({
         where: whereWithCursor,
-        orderBy: [{ tanggal: "asc" }, { createdAt: "asc" }],
+        orderBy: [{ tanggal: "desc" }, { createdAt: "desc" }],
         include,
         take: take + 1,
       }),
@@ -155,22 +159,23 @@ router.get("/transaksi", verifyToken, async (req, res) => {
  */
 router.get("/akun/master", verifyToken, async (req, res) => {
   try {
-    const { tipeAkun, search, isActive } = req.query;
-    const where = {};
-    if (tipeAkun) where.tipeAkun = tipeAkun;
-    if (isActive === "1" || isActive === "true") where.isActive = true;
-    if (isActive === "0" || isActive === "false") where.isActive = false;
-    if (search) {
-      where.OR = [
-        { namaAkun: { contains: search, mode: "insensitive" } },
-        { kodeAkun: { contains: search, mode: "insensitive" } },
-      ];
-    }
-    const rows = await prisma.akunBukuBesar.findMany({
-      where,
-      orderBy: [{ tipeAkun: "asc" }, { namaAkun: "asc" }],
+    const rows = await prisma.masterRekeningBank.findMany({
+      where: { isActive: true },
+      include: { tipeRekening: { select: { id: true, namaTipe: true } } },
+      orderBy: [{ namaRekening: "asc" }],
     });
-    res.json({ data: rows });
+
+    const mapped = rows.map((r) => ({
+      id: r.id,
+      namaAkun: `${r.namaRekening}${r.nomorRekening ? ` - ${r.nomorRekening}` : ""}`,
+      tipeAkun: "BANK",
+      keterangan: r.namaBank || null,
+      isActive: r.isActive,
+      tipeRekeningId: r.tipeRekeningId || null,
+      tipeRekening: r.tipeRekening || null,
+    }));
+
+    res.json({ data: mapped });
   } catch (e) {
     console.error("GET /gl-bank/akun/master error:", e);
     res.status(500).json({ error: e.message });
@@ -184,9 +189,10 @@ router.get("/akun/master", verifyToken, async (req, res) => {
  */
 router.get("/rekening-bank", verifyToken, async (req, res) => {
   try {
-    const { search, activeOnly } = req.query;
+    const { search, activeOnly, tipeRekeningId } = req.query;
     const where = {};
     if (activeOnly === "1" || activeOnly === "true") where.isActive = true;
+    if (tipeRekeningId) where.tipeRekeningId = tipeRekeningId;
     if (search) {
       where.OR = [
         { namaRekening: { contains: search, mode: "insensitive" } },
@@ -196,6 +202,9 @@ router.get("/rekening-bank", verifyToken, async (req, res) => {
     }
     const rows = await prisma.masterRekeningBank.findMany({
       where,
+      include: {
+        tipeRekening: { select: { id: true, namaTipe: true } },
+      },
       orderBy: [{ isDefault: "desc" }, { namaRekening: "asc" }],
     });
     res.json({ data: rows });
@@ -209,12 +218,10 @@ router.post("/rekening-bank", verifyToken, async (req, res) => {
   try {
     const {
       namaRekening,
-      tipeRekening,
+      tipeRekeningId,
       mataUang = "IDR",
-      kodeAkunGl,
       namaBank,
       nomorRekening,
-      alamatBank,
       isDefault = false,
       isActive = true,
     } = req.body;
@@ -230,12 +237,10 @@ router.post("/rekening-bank", verifyToken, async (req, res) => {
       return tx.masterRekeningBank.create({
         data: {
           namaRekening: namaRekening.trim(),
-          tipeRekening: tipeRekening || null,
+          tipeRekeningId: tipeRekeningId || null,
           mataUang: mataUang || "IDR",
-          kodeAkunGl: kodeAkunGl || null,
           namaBank: namaBank || null,
           nomorRekening: nomorRekening.trim(),
-          alamatBank: alamatBank || null,
           isDefault: Boolean(isDefault),
           isActive: Boolean(isActive),
         },
@@ -256,12 +261,10 @@ router.put("/rekening-bank/:id", verifyToken, async (req, res) => {
   try {
     const {
       namaRekening,
-      tipeRekening,
+      tipeRekeningId,
       mataUang,
-      kodeAkunGl,
       namaBank,
       nomorRekening,
-      alamatBank,
       isDefault,
       isActive,
     } = req.body;
@@ -274,12 +277,10 @@ router.put("/rekening-bank/:id", verifyToken, async (req, res) => {
         where: { id: req.params.id },
         data: {
           namaRekening: namaRekening !== undefined ? (namaRekening || "").trim() : undefined,
-          tipeRekening: tipeRekening !== undefined ? tipeRekening || null : undefined,
+          tipeRekeningId: tipeRekeningId !== undefined ? tipeRekeningId || null : undefined,
           mataUang: mataUang !== undefined ? mataUang || "IDR" : undefined,
-          kodeAkunGl: kodeAkunGl !== undefined ? kodeAkunGl || null : undefined,
           namaBank: namaBank !== undefined ? namaBank || null : undefined,
           nomorRekening: nomorRekening !== undefined ? nomorRekening.trim() : undefined,
-          alamatBank: alamatBank !== undefined ? alamatBank || null : undefined,
           isDefault: isDefault !== undefined ? Boolean(isDefault) : undefined,
           isActive: isActive !== undefined ? Boolean(isActive) : undefined,
         },
@@ -302,6 +303,81 @@ router.delete("/rekening-bank/:id", verifyToken, async (req, res) => {
   } catch (e) {
     console.error("DELETE /gl-bank/rekening-bank/:id error:", e);
     if (e.code === "P2025") return res.status(404).json({ error: "Rekening bank tidak ditemukan." });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get("/tipe-rekening", verifyToken, async (req, res) => {
+  try {
+    const { search, isActive } = req.query;
+    const where = {};
+    if (isActive === "1" || isActive === "true") where.isActive = true;
+    if (isActive === "0" || isActive === "false") where.isActive = false;
+    if (search) where.namaTipe = { contains: search, mode: "insensitive" };
+    const rows = await prisma.masterTipeRekening.findMany({
+      where,
+      orderBy: [{ namaTipe: "asc" }],
+    });
+    res.json({ data: rows });
+  } catch (e) {
+    console.error("GET /gl-bank/tipe-rekening error:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post("/tipe-rekening", verifyToken, async (req, res) => {
+  try {
+    const { namaTipe, isActive = true } = req.body;
+    if (!namaTipe || !String(namaTipe).trim()) {
+      return res.status(400).json({ error: "Nama tipe rekening wajib diisi." });
+    }
+    const created = await prisma.masterTipeRekening.create({
+      data: {
+        namaTipe: String(namaTipe).trim(),
+        isActive: Boolean(isActive),
+      },
+    });
+    res.json(created);
+  } catch (e) {
+    console.error("POST /gl-bank/tipe-rekening error:", e);
+    if (e.code === "P2002") return res.status(400).json({ error: "Nama tipe rekening sudah ada." });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put("/tipe-rekening/:id", verifyToken, async (req, res) => {
+  try {
+    const { namaTipe, isActive } = req.body;
+    const updated = await prisma.masterTipeRekening.update({
+      where: { id: req.params.id },
+      data: {
+        namaTipe: namaTipe !== undefined ? String(namaTipe || "").trim() : undefined,
+        isActive: isActive !== undefined ? Boolean(isActive) : undefined,
+      },
+    });
+    res.json(updated);
+  } catch (e) {
+    console.error("PUT /gl-bank/tipe-rekening/:id error:", e);
+    if (e.code === "P2002") return res.status(400).json({ error: "Nama tipe rekening sudah ada." });
+    if (e.code === "P2025") return res.status(404).json({ error: "Tipe rekening tidak ditemukan." });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.delete("/tipe-rekening/:id", verifyToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const usedRekening = await prisma.masterRekeningBank.count({ where: { tipeRekeningId: id } });
+    const usedPembayaran = await prisma.pembayaranSupplier.count({ where: { tipeRekeningId: id } });
+    const usedBB = await prisma.bukuBesarTransaksi.count({ where: { tipeRekeningId: id } });
+    if (usedRekening > 0 || usedPembayaran > 0 || usedBB > 0) {
+      return res.status(400).json({ error: "Tipe rekening masih dipakai, tidak bisa dihapus." });
+    }
+    await prisma.masterTipeRekening.delete({ where: { id } });
+    res.json({ message: "Tipe rekening dihapus." });
+  } catch (e) {
+    console.error("DELETE /gl-bank/tipe-rekening/:id error:", e);
+    if (e.code === "P2025") return res.status(404).json({ error: "Tipe rekening tidak ditemukan." });
     res.status(500).json({ error: e.message });
   }
 });
@@ -491,72 +567,27 @@ router.get("/summary", verifyToken, async (req, res) => {
  * POST /api/gl-bank/akun/master
  */
 router.post("/akun/master", verifyToken, async (req, res) => {
-  try {
-    const { kodeAkun, namaAkun, tipeAkun, keterangan } = req.body;
-    if (!namaAkun || !tipeAkun) {
-      return res.status(400).json({ error: "Nama akun dan tipe akun wajib diisi." });
-    }
-    if (!["KAS", "BANK"].includes(tipeAkun)) {
-      return res.status(400).json({ error: "Tipe akun harus KAS atau BANK." });
-    }
-    const created = await prisma.akunBukuBesar.create({
-      data: {
-        kodeAkun: kodeAkun || null,
-        namaAkun: namaAkun.trim(),
-        tipeAkun,
-        keterangan: keterangan || null,
-      },
-    });
-    res.json(created);
-  } catch (e) {
-    console.error("POST /gl-bank/akun/master error:", e);
-    if (e.code === "P2002") {
-      return res.status(400).json({ error: "Nama akun sudah ada untuk tipe ini." });
-    }
-    res.status(500).json({ error: e.message });
-  }
+  return res.status(410).json({
+    error: "Master Akun Buku Besar sudah tidak digunakan. Gunakan Master Rekening Bank.",
+  });
 });
 
 /**
  * PUT /api/gl-bank/akun/master/:id
  */
 router.put("/akun/master/:id", verifyToken, async (req, res) => {
-  try {
-    const { kodeAkun, namaAkun, tipeAkun, keterangan, isActive } = req.body;
-    const data = {};
-    if (kodeAkun !== undefined) data.kodeAkun = kodeAkun || null;
-    if (namaAkun !== undefined) data.namaAkun = namaAkun.trim();
-    if (tipeAkun !== undefined) data.tipeAkun = tipeAkun;
-    if (keterangan !== undefined) data.keterangan = keterangan || null;
-    if (isActive !== undefined) data.isActive = Boolean(isActive);
-    const updated = await prisma.akunBukuBesar.update({ where: { id: req.params.id }, data });
-    res.json(updated);
-  } catch (e) {
-    console.error("PUT /gl-bank/akun/master/:id error:", e);
-    if (e.code === "P2002") {
-      return res.status(400).json({ error: "Nama akun sudah ada untuk tipe ini." });
-    }
-    if (e.code === "P2025") {
-      return res.status(404).json({ error: "Akun tidak ditemukan." });
-    }
-    res.status(500).json({ error: e.message });
-  }
+  return res.status(410).json({
+    error: "Master Akun Buku Besar sudah tidak digunakan. Gunakan Master Rekening Bank.",
+  });
 });
 
 /**
  * DELETE /api/gl-bank/akun/master/:id
  */
 router.delete("/akun/master/:id", verifyToken, async (req, res) => {
-  try {
-    await prisma.akunBukuBesar.delete({ where: { id: req.params.id } });
-    res.json({ message: "Akun dihapus." });
-  } catch (e) {
-    console.error("DELETE /gl-bank/akun/master/:id error:", e);
-    if (e.code === "P2025") {
-      return res.status(404).json({ error: "Akun tidak ditemukan." });
-    }
-    res.status(500).json({ error: e.message });
-  }
+  return res.status(410).json({
+    error: "Master Akun Buku Besar sudah tidak digunakan. Gunakan Master Rekening Bank.",
+  });
 });
 
 /**
@@ -569,24 +600,28 @@ router.get("/akun", verifyToken, async (req, res) => {
     const where = {};
     if (tipeAkun) where.tipeAkun = tipeAkun;
 
-    const [trxRows, masterRows] = await Promise.all([
-      prisma.bukuBesarTransaksi.findMany({
-        where,
-        select: { tipeAkun: true, namaAkun: true },
-        distinct: ["tipeAkun", "namaAkun"],
-        orderBy: { namaAkun: "asc" },
-      }),
-      prisma.akunBukuBesar.findMany({
-        where: tipeAkun ? { tipeAkun, isActive: true } : { isActive: true },
-        select: { tipeAkun: true, namaAkun: true },
-        orderBy: { namaAkun: "asc" },
-      }),
-    ]);
-    const merged = new Map();
-    for (const r of [...masterRows, ...trxRows]) {
-      merged.set(`${r.tipeAkun}_${r.namaAkun}`, r);
-    }
-    res.json({ data: Array.from(merged.values()) });
+      const [trxRows, rekeningRows] = await Promise.all([
+          prisma.bukuBesarTransaksi.findMany({
+            where,
+            select: { tipeAkun: true, namaAkun: true },
+            distinct: ["tipeAkun", "namaAkun"],
+            orderBy: { namaAkun: "asc" },
+          }),
+          prisma.masterRekeningBank.findMany({
+            where: { isActive: true },
+            select: { namaRekening: true, nomorRekening: true },
+            orderBy: { namaRekening: "asc" },
+          }),
+        ]);
+        const merged = new Map();
+        for (const r of trxRows) {
+          merged.set(`${r.tipeAkun}_${r.namaAkun}`, r);
+        }
+        for (const r of rekeningRows) {
+          const namaAkun = [r.namaRekening, r.nomorRekening].filter(Boolean).join(" - ");
+          merged.set(`BANK_${namaAkun}`, { tipeAkun: "BANK", namaAkun });
+        }
+        res.json({ data: Array.from(merged.values()) });
   } catch (e) {
     console.error("GET /gl-bank/akun error:", e);
     res.status(500).json({ error: e.message });
@@ -603,8 +638,14 @@ router.get("/saldo", verifyToken, async (req, res) => {
     const where = {};
     if (tipeAkun) where.tipeAkun = tipeAkun;
 
+    const rekeningRows = await prisma.masterRekeningBank.findMany({
+      where: { isActive: true },
+      include: { tipeRekening: { select: { id: true, namaTipe: true } } },
+      orderBy: [{ namaRekening: "asc" }],
+    });
+
     const latest = await prisma.bukuBesarTransaksi.groupBy({
-      by: ["tipeAkun", "namaAkun"],
+      by: ["tipeAkun", "namaAkun", "rekeningBankId"],
       _max: { createdAt: true },
       where,
     });
@@ -615,20 +656,45 @@ router.get("/saldo", verifyToken, async (req, res) => {
         where: {
           tipeAkun: g.tipeAkun,
           namaAkun: g.namaAkun,
+          rekeningBankId: g.rekeningBankId,
           createdAt: g._max.createdAt,
         },
         orderBy: { id: "desc" },
       });
       if (row) {
-        saldoMap[`${g.tipeAkun}_${g.namaAkun}`] = {
+        const key = g.rekeningBankId || `${g.tipeAkun}_${g.namaAkun}`;
+        saldoMap[key] = {
+          key,
           tipeAkun: g.tipeAkun,
           namaAkun: g.namaAkun,
+          rekeningBankId: g.rekeningBankId || null,
           saldo: row.saldoBerjalan,
           updatedAt: row.createdAt,
         };
       }
     }
-    res.json({ saldo: Object.values(saldoMap) });
+
+    const masterSaldo = rekeningRows.map((r) => {
+      const namaAkun = [r.namaRekening, r.nomorRekening].filter(Boolean).join(" - ");
+      const existing = saldoMap[r.id];
+      return {
+        key: r.id,
+        tipeAkun: "BANK",
+        namaAkun,
+        rekeningBankId: r.id,
+        rekeningBank: {
+          id: r.id,
+          namaRekening: r.namaRekening,
+          namaBank: r.namaBank,
+          nomorRekening: r.nomorRekening,
+          tipeRekening: r.tipeRekening || null,
+        },
+        saldo: existing ? existing.saldo : 0,
+        updatedAt: existing ? existing.updatedAt : null,
+      };
+    });
+
+    res.json({ saldo: masterSaldo });
   } catch (e) {
     console.error("GET /gl-bank/saldo error:", e);
     res.status(500).json({ error: e.message });
@@ -650,8 +716,8 @@ async function createTransaksiBukuBesar({
   keterangan,
   keteranganVolume,
   keteranganHarga,
+  tipeRekeningId,
   projectId,
-  akunBukuBesarId,
   rekeningBankId,
   sumberTransaksi,
   poId,
@@ -679,8 +745,9 @@ async function createTransaksiBukuBesar({
       keteranganVolume: keteranganVolume || null,
       keteranganHarga: keteranganHarga || null,
       projectId: projectId || null,
-      akunBukuBesarId: akunBukuBesarId || null,
+      akunBukuBesarId: null,
       rekeningBankId: rekeningBankId || null,
+      tipeRekeningId: tipeRekeningId || null,
       sumberTransaksi: sumberTransaksi || "SISTEM",
       poId: poId || null,
       pengajuanId: pengajuanId || null,
@@ -716,7 +783,7 @@ async function recalcSaldo(tipeAkun, namaAkun) {
 
 /**
  * POST /api/gl-bank/transaksi
- * Body: { tanggal, tipeAkun, namaAkun?, jenis, nominal, noReferensi?, pihak?, keterangan?, projectId?, akunBukuBesarId?, rekeningBankId?, sumberTransaksi? }
+ * Body: { tanggal, tipeAkun, namaAkun?, jenis, nominal, noReferensi?, pihak?, keterangan?, projectId?, rekeningBankId?, tipeRekeningId?, sumberTransaksi? }
  */
 router.post("/transaksi", verifyToken, async (req, res) => {
   try {
@@ -732,8 +799,8 @@ router.post("/transaksi", verifyToken, async (req, res) => {
       keteranganVolume,
       keteranganHarga,
       projectId,
-      akunBukuBesarId,
       rekeningBankId,
+      tipeRekeningId,
       sumberTransaksi,
       poId,
       pengajuanId,
@@ -752,18 +819,6 @@ router.post("/transaksi", verifyToken, async (req, res) => {
     const n = Number(nominal);
     if (Number.isNaN(n) || n < 0) {
       return res.status(400).json({ error: "nominal harus angka >= 0." });
-    }
-
-    // Validasi akun buku besar bila dikirim
-    let akunMaster = null;
-    if (akunBukuBesarId) {
-      akunMaster = await prisma.akunBukuBesar.findUnique({ where: { id: akunBukuBesarId } });
-      if (!akunMaster || !akunMaster.isActive) {
-        return res.status(400).json({ error: "Akun buku besar tidak valid / tidak aktif." });
-      }
-      if (akunMaster.tipeAkun !== tipeAkun) {
-        return res.status(400).json({ error: "Tipe akun transaksi harus sama dengan tipe akun master yang dipilih." });
-      }
     }
 
     // Validasi rekening bank untuk tipe BANK
@@ -785,9 +840,17 @@ router.post("/transaksi", verifyToken, async (req, res) => {
       if (!project) return res.status(400).json({ error: "Project tidak ditemukan." });
     }
 
+    let tipeRekening = null;
+    if (tipeRekeningId) {
+      tipeRekening = await prisma.masterTipeRekening.findUnique({ where: { id: tipeRekeningId } });
+      if (!tipeRekening || !tipeRekening.isActive) {
+        return res.status(400).json({ error: "Tipe rekening tidak valid / tidak aktif." });
+      }
+    }
+
     const finalNamaAkun = tipeAkun === "BANK"
       ? [rekeningBank?.namaRekening, rekeningBank?.nomorRekening].filter(Boolean).join(" - ")
-      : String(akunMaster?.namaAkun || namaAkun || "Kas").trim();
+      : String(namaAkun || "Kas").trim();
 
     const newRow = await prisma.bukuBesarTransaksi.create({
       data: {
@@ -802,8 +865,9 @@ router.post("/transaksi", verifyToken, async (req, res) => {
         keteranganVolume: keteranganVolume || null,
         keteranganHarga: keteranganHarga || null,
         projectId: projectId || null,
-        akunBukuBesarId: akunBukuBesarId || null,
+        akunBukuBesarId: null,
         rekeningBankId: rekeningBankId || null,
+        tipeRekeningId: tipeRekeningId || null,
         sumberTransaksi: sumberTransaksi || "MANUAL",
         poId: poId || null,
         pengajuanId: pengajuanId || null,
@@ -820,7 +884,8 @@ router.post("/transaksi", verifyToken, async (req, res) => {
         createdBy: { select: { id: true, name: true } },
         project: { select: { id: true, name: true } },
         akunBukuBesar: { select: { id: true, kodeAkun: true, namaAkun: true, tipeAkun: true } },
-        rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true } },
+        rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true, tipeRekeningId: true, tipeRekening: { select: { id: true, namaTipe: true } } } },
+        tipeRekening: { select: { id: true, namaTipe: true } },
       },
     });
     res.json(finalRow);
@@ -851,8 +916,8 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
       keteranganVolume,
       keteranganHarga,
       projectId,
-      akunBukuBesarId,
       rekeningBankId,
+      tipeRekeningId,
       sumberTransaksi,
       poId,
       pengajuanId,
@@ -873,19 +938,7 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "nominal harus angka >= 0." });
     }
 
-    const finalAkunId = akunBukuBesarId !== undefined ? (akunBukuBesarId || null) : existing.akunBukuBesarId;
     const finalRekeningId = rekeningBankId !== undefined ? (rekeningBankId || null) : existing.rekeningBankId;
-
-    let akunMaster = null;
-    if (finalAkunId) {
-      akunMaster = await prisma.akunBukuBesar.findUnique({ where: { id: finalAkunId } });
-      if (!akunMaster || !akunMaster.isActive) {
-        return res.status(400).json({ error: "Akun buku besar tidak valid / tidak aktif." });
-      }
-      if (akunMaster.tipeAkun !== newTipe) {
-        return res.status(400).json({ error: "Tipe akun transaksi harus sama dengan tipe akun master yang dipilih." });
-      }
-    }
 
     let rekeningBank = null;
     if (newTipe === "BANK") {
@@ -904,9 +957,17 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
       if (!project) return res.status(400).json({ error: "Project tidak ditemukan." });
     }
 
+    const finalTipeRekeningId = tipeRekeningId !== undefined ? (tipeRekeningId || null) : existing.tipeRekeningId;
+    if (finalTipeRekeningId) {
+      const tipeRekening = await prisma.masterTipeRekening.findUnique({ where: { id: finalTipeRekeningId } });
+      if (!tipeRekening || !tipeRekening.isActive) {
+        return res.status(400).json({ error: "Tipe rekening tidak valid / tidak aktif." });
+      }
+    }
+
     const finalNamaAkun = newTipe === "BANK"
       ? [rekeningBank?.namaRekening, rekeningBank?.nomorRekening].filter(Boolean).join(" - ")
-      : (akunMaster?.namaAkun || namaAkun || existing.namaAkun).trim();
+      : String(namaAkun || existing.namaAkun || "Kas").trim();
 
     await prisma.bukuBesarTransaksi.update({
       where: { id },
@@ -922,8 +983,9 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
         keteranganVolume: keteranganVolume !== undefined ? (keteranganVolume || null) : existing.keteranganVolume,
         keteranganHarga: keteranganHarga !== undefined ? (keteranganHarga || null) : existing.keteranganHarga,
         projectId: projectId !== undefined ? (projectId || null) : existing.projectId,
-        akunBukuBesarId: akunBukuBesarId !== undefined ? (akunBukuBesarId || null) : existing.akunBukuBesarId,
+        akunBukuBesarId: null,
         rekeningBankId: rekeningBankId !== undefined ? (rekeningBankId || null) : existing.rekeningBankId,
+        tipeRekeningId: tipeRekeningId !== undefined ? (tipeRekeningId || null) : existing.tipeRekeningId,
         sumberTransaksi: sumberTransaksi !== undefined ? (sumberTransaksi || null) : existing.sumberTransaksi,
         poId: poId !== undefined ? (poId || null) : existing.poId,
         pengajuanId: pengajuanId !== undefined ? (pengajuanId || null) : existing.pengajuanId,
@@ -943,7 +1005,8 @@ router.put("/transaksi/:id", verifyToken, async (req, res) => {
         createdBy: { select: { id: true, name: true } },
         project: { select: { id: true, name: true } },
         akunBukuBesar: { select: { id: true, kodeAkun: true, namaAkun: true, tipeAkun: true } },
-        rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true } },
+        rekeningBank: { select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true, tipeRekeningId: true, tipeRekening: { select: { id: true, namaTipe: true } } } },
+        tipeRekening: { select: { id: true, namaTipe: true } },
       },
     });
     res.json(finalRow);

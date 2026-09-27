@@ -1166,9 +1166,12 @@ model PembayaranSupplier {
   totalTerbayar Float                @default(0)
   sisaBayar     Float                @default(0)
   metodeBayar   MetodeBayar          @default(TRANSFER)
+  tipeAkunKasBank TipeAkunBukuBesar  @default(KAS)
   bankAccount   String?
   rekeningBankId String?
   rekeningBank   MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id])
+  tipeRekeningId String?
+  tipeRekening   MasterTipeRekening? @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
   keterangan    String?              @db.Text
   paymentHistory Json?
   buktiBayarUrl String?
@@ -1184,6 +1187,7 @@ model PembayaranSupplier {
   @@index([supplierId])
   @@index([pengajuanId])
   @@index([rekeningBankId])
+  @@index([tipeRekeningId])
 }
 
 // 4. INVOICE PENAGIHAN
@@ -1268,15 +1272,28 @@ model AkunBukuBesar {
   @@index([tipeAkun])
 }
 
+model MasterTipeRekening {
+  id         String   @id @default(cuid())
+  namaTipe   String   @unique
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  rekeningBanks       MasterRekeningBank[]
+  pembayaranSuppliers PembayaranSupplier[]
+  bukuBesarTransaksi  BukuBesarTransaksi[]
+
+  @@index([isActive])
+}
+
 model MasterRekeningBank {
   id            String   @id @default(cuid())
   namaRekening  String
-  tipeRekening  String?
   mataUang      String   @default("IDR")
-  kodeAkunGl    String?
+  tipeRekeningId String?
+  tipeRekening   MasterTipeRekening? @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
   namaBank      String?
   nomorRekening String   @unique
-  alamatBank    String?
   isDefault     Boolean  @default(false)
   isActive      Boolean  @default(true)
   createdAt     DateTime @default(now())
@@ -1287,6 +1304,7 @@ model MasterRekeningBank {
 
   @@index([isActive])
   @@index([isDefault])
+  @@index([tipeRekeningId])
 }
 
 // ==========================================
@@ -1323,6 +1341,8 @@ model BukuBesarTransaksi {
   akunBukuBesar    AkunBukuBesar?          @relation(fields: [akunBukuBesarId], references: [id], onDelete: SetNull)
   rekeningBankId   String?
   rekeningBank     MasterRekeningBank?     @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
+  tipeRekeningId   String?
+  tipeRekening     MasterTipeRekening?     @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
   sumberTransaksi  String?                 @default("MANUAL") // MANUAL | PEMBAYARAN_SUPPLIER | SISTEM
 
   // Relasi opsional ke PO / pembayaran / invoice
@@ -1347,5 +1367,6 @@ model BukuBesarTransaksi {
   @@index([projectId])
   @@index([akunBukuBesarId])
   @@index([rekeningBankId])
+  @@index([tipeRekeningId])
 }
 

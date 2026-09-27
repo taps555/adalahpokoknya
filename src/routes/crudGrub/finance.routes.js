@@ -3,6 +3,7 @@ const router = express.Router();
 const prisma = require("../../lib/prisma"); // Sesuaikan path menuju file prisma Anda
 const { verifyToken, authorizeRoles } = require("../../middleware/auth"); // Sesuaikan path middleware auth Anda
 const { getKeteranganVolumeHarga } = require("../../lib/keteranganVolumeHarga.js");
+const { buildNoPembayaran } = require("../../lib/paymentNumber");
 
 /**
  * Hitung ulang status penerimaan satu MaterialRequestItem dari total receivedVolume
@@ -913,11 +914,8 @@ router.put(
       try {
         const isCash = /cash|transfer/i.test(po.caraPembayaran || "");
         if (isCash) {
-          const seq = await prisma.pembayaranSupplier.count({});
-          const noPembayaran = `BYR-${String(seq + 1).padStart(5, "0")}`;
-          pembayaran = await prisma.pembayaranSupplier.create({
+          const created = await prisma.pembayaranSupplier.create({
             data: {
-              noPembayaran,
               supplierId: po.supplierId,
               poId: po.id,
               tanggal: new Date(),
@@ -926,6 +924,16 @@ router.put(
               keterangan: `Pembayaran otomatis PO ${po.poNumber || po.id}`,
               status: "PENDING",
             },
+          });
+
+          const noPembayaran = await buildNoPembayaran({
+            pembayaranId: created.id,
+            tanggal: created.tanggal,
+          });
+
+          pembayaran = await prisma.pembayaranSupplier.update({
+            where: { id: created.id },
+            data: { noPembayaran },
           });
         }
       } catch (e) {
