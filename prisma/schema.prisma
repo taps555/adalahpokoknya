@@ -53,6 +53,13 @@ enum Survey3DStatus {
   FINAL
 }
 
+enum BvRabApprovalStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  CHANGES_REQUESTED
+}
+
 model User {
   id                  String                 @id @default(cuid())
   username            String                 @unique // atau email
@@ -235,8 +242,9 @@ model Project {
   client         Client                @relation(fields: [clientId], references: [id])
   rabItems       RabItem[]
   bvItems        BvItem[]
-  changeHistory  BvRabChangeHistory[]
-  workCategories ProjectWorkCategory[]
+  changeHistory      BvRabChangeHistory[]
+  approvalRevisions  BvRabApprovalRevision[]
+  workCategories     ProjectWorkCategory[]
 
   rabStatus        RabStatus         @default(DRAFT)
   materialRequests MaterialRequest[]
@@ -468,6 +476,29 @@ model BvBreakdown {
   subTotal Decimal @db.Decimal(14, 4)
 
   @@index([bvItemId])
+}
+
+model BvRabApprovalRevision {
+  id               String              @id @default(cuid())
+  projectId        String
+  project          Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  revision         Int
+  status           BvRabApprovalStatus @default(DRAFT)
+  version          Int                 @default(1)
+  submittedById    String?
+  submittedByName  String?
+  submittedAt      DateTime?
+  reviewedById     String?
+  reviewedByName   String?
+  reviewedAt       DateTime?
+  reviewComment    String?             @db.Text
+  baselineSnapshot Json?
+  baselineHash     String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@unique([projectId, revision])
+  @@index([projectId, status, revision])
 }
 
 model BvRabChangeHistory {

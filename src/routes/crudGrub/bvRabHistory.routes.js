@@ -3,6 +3,7 @@
 const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const { assertProjectEditable, lockApprovalProject } = require("../../services/bvRabApprovalService");
 const {
   assertUndoable,
   assertUndoActor,
@@ -59,6 +60,8 @@ router.post(
       if (!history) return res.status(404).json({ error: "Riwayat perubahan tidak ditemukan." });
 
       const result = await prisma.$transaction(async (tx) => {
+        await lockApprovalProject(tx, history.projectId);
+        await assertProjectEditable(tx, history.projectId);
         await tx.$queryRawUnsafe(
           'SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked',
           `${history.entityType}:${history.entityId}`,

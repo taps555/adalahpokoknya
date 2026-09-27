@@ -8,6 +8,7 @@ const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
 const { recordChange } = require("../../services/bvRabAuditService");
+const { assertProjectEditable } = require("../../services/bvRabApprovalService");
 
 const redactSellingResponse = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") return next();
@@ -44,6 +45,24 @@ const protectRapWrite = (req, res, next) => {
 };
 
 const router = express.Router();
+
+async function assertRabItemsEditable(items, requestedIds) {
+  const uniqueIds = [...new Set(requestedIds || [])];
+  if (items.length !== uniqueIds.length) {
+    const error = new Error("Sebagian item RAB tidak ditemukan.");
+    error.statusCode = 404;
+    throw error;
+  }
+  const projectIds = [...new Set(items.map((item) => item.projectId))];
+  if (projectIds.length !== 1) {
+    const error = new Error("Operasi massal hanya boleh untuk satu project.");
+    error.statusCode = 400;
+    throw error;
+  }
+  await assertProjectEditable(prisma, projectIds[0]);
+  return projectIds[0];
+}
+
 router.use(
   ["/projects/:projectId/rab-items", "/rab-items"],
   verifyToken,
@@ -85,9 +104,10 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
 });
 
 /** PUT /rab-items/:id — edit item RAB (volume, harga custom, dll), isolated dari master */
-router.put("/rab-items/:id", async (req, res) => {
+router.put("/rab-items/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
+    if (["bulk-price", "bulk-switch-job"].includes(id)) return next("route");
 
     const {
       rapUnitPrice,
@@ -105,6 +125,9 @@ router.put("/rab-items/:id", async (req, res) => {
     });
     if (!existing)
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    // Approval state is authoritative for every RAB edit.
+    await assertProjectEditable(prisma, existing.projectId);
 
     // ==========================================
     // 🚨 KODE SATPAM: CEK APAKAH DIA INDUK? 🚨
@@ -237,13 +260,16 @@ router.put("/rab-items/:id", async (req, res) => {
   } catch (error) {
     console.error("Error Update RabItem:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 /** DELETE /rab-items/:id */
 router.delete("/rab-items/:id", async (req, res) => {
   try {
+    const existing = await prisma.rabItem.findUnique({ where: { id: req.params.id }, select: { id: true, projectId: true } });
+    if (!existing) return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+    await assertProjectEditable(prisma, existing.projectId);
     await prisma.rabItem.delete({ where: { id: req.params.id } });
     res.json({ message: "Item RAB berhasil dihapus." });
   } catch (error) {
@@ -251,7 +277,7 @@ router.delete("/rab-items/:id", async (req, res) => {
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
     }
     console.error("Error Delete RabItem:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
@@ -274,6 +300,8 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
     });
     if (!existing)
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    await assertProjectEditable(prisma, existing.projectId);
 
     const calc = await calculateJobPrice(newJobTypeId);
     if (!calc)
@@ -385,22 +413,8 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
   } catch (error) {
     console.error("Error Switch Job:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
-  }
-});
-
-/** DELETE /rab-items/:id */
-router.delete("/rab-items/:id", async (req, res) => {
-  try {
-    await prisma.rabItem.delete({ where: { id: req.params.id } });
-    res.json({ message: "Item RAB berhasil dihapus." });
-  } catch (error) {
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
-    }
-    console.error("Error Delete RabItem:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
   }
 });
 
@@ -420,6 +434,12 @@ router.post(
           .json({ error: "Tidak ada ID yang dikirim untuk dihapus." });
       }
 
+      const existingItems = await prisma.rabItem.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, projectId: true },
+      });
+      await assertRabItemsEditable(existingItems, ids);
+
       // SAPU JAGAT DELETE: Prisma langsung menghapus semua ID yang ada di dalam array
       const deleted = await prisma.rabItem.deleteMany({
         where: {
@@ -430,8 +450,8 @@ router.post(
       res.json({ message: `Berhasil menghapus ${deleted.count} item RAB.` });
     } catch (error) {
       console.error("Error Bulk Delete RabItems:", error);
-      res.status(500).json({
-        error: "Terjadi kesalahan pada server saat menghapus massal.",
+      res.status(error.statusCode || 500).json({
+        error: error.message || "Terjadi kesalahan pada server saat menghapus massal.",
       });
     }
   },
@@ -460,6 +480,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
       where: { id: { in: ids } },
       include: { components: true, workCategory: true },
     });
+    await assertRabItemsEditable(items, ids);
 
     const results = [];
     const skipped = [];
@@ -539,7 +560,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   } catch (error) {
     console.error("Error Bulk Update RabItem:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -571,6 +592,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
         components: true,
       },
     });
+    await assertRabItemsEditable(items, ids);
 
     const results = [];
     const skipped = [];
@@ -680,7 +702,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
   } catch (error) {
     console.error("Error Bulk Switch Job:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -691,6 +713,8 @@ router.put(
     try {
       const { projectId } = req.params;
       const { name, newUnitPrice } = req.body;
+
+      await assertProjectEditable(prisma, projectId);
 
       if (!name || newUnitPrice === undefined) {
         return res

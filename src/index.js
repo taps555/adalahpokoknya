@@ -14,6 +14,7 @@ const projectsRouter = require("./routes/projects");
 const rabRoutes = require("./routes/crudGrub/rab.routes");
 const rabGrub = require("./routes/crudGrub/rabGrub.routes");
 const bvRabHistory = require("./routes/crudGrub/bvRabHistory.routes");
+const bvRabApproval = require("./routes/crudGrub/bvRabApproval.routes");
 
 const exportExcel = require("./routes/exportToFile/rabExport.routes");
 
@@ -43,6 +44,7 @@ app.use("/api/projects", projectsRouter);
 app.use("/api", rabRoutes);
 app.use("/api", rabGrub);
 app.use("/api", bvRabHistory);
+app.use("/api", bvRabApproval);
 
 //export to file excel
 app.use("/api", exportExcel);

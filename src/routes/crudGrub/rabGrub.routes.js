@@ -3,6 +3,7 @@ const express = require("express");
 const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
 const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
+const { assertProjectEditable } = require("../../services/bvRabApprovalService");
 const router = express.Router();
 
 const redactSellingResponse = (req, res, next) => {
@@ -43,6 +44,8 @@ router.post("/projects/:projectId/rab-groups", protectRapWrite, async (req, res)
     if (!project)
       return res.status(404).json({ error: "Project tidak ditemukan." });
 
+    await assertProjectEditable(prisma, projectId);
+
     if (parentId) {
       const parent = await prisma.rabGroup.findUnique({
         where: { id: parentId },
@@ -76,7 +79,7 @@ router.post("/projects/:projectId/rab-groups", protectRapWrite, async (req, res)
   } catch (error) {
     console.error("Error Create RabGroup:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -130,7 +133,7 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
     res.json(roots);
   } catch (error) {
     console.error("Error List RabGroup:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
@@ -142,6 +145,7 @@ router.put("/rab-groups/:id", protectRapWrite, async (req, res) => {
     const existing = await prisma.rabGroup.findUnique({ where: { id } });
     if (!existing)
       return res.status(404).json({ error: "Group tidak ditemukan." });
+    await assertProjectEditable(prisma, existing.projectId);
     if (parentId !== undefined && parentId !== null && parentId !== "") {
       if (parentId === id) {
         return res.status(400).json({ error: "Group tidak boleh jadi parent dirinya sendiri." });
@@ -178,7 +182,7 @@ router.put("/rab-groups/:id", protectRapWrite, async (req, res) => {
     res.json({ message: "Group berhasil diperbarui", data: updated });
   } catch (error) {
     console.error("Error Update RabGroup:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
@@ -191,6 +195,8 @@ router.delete("/rab-groups/:id", protectRapWrite, async (req, res) => {
     const group = await prisma.rabGroup.findUnique({ where: { id } });
     if (!group)
       return res.status(404).json({ error: "Group tidak ditemukan." });
+
+    await assertProjectEditable(prisma, group.projectId);
 
     async function collectGroupIds(groupId) {
       const children = await prisma.rabGroup.findMany({
@@ -235,7 +241,7 @@ router.delete("/rab-groups/:id", protectRapWrite, async (req, res) => {
       return res.status(404).json({ error: "Group tidak ditemukan." });
     }
     console.error("Error Delete RabGroup:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
@@ -273,7 +279,7 @@ router.get("/rab-groups/:id/delete-preview", async (req, res) => {
     res.json({ subGroupCount, rabCount, bvCount });
   } catch (error) {
     console.error("Error Preview Delete RabGroup:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
