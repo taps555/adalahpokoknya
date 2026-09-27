@@ -13,6 +13,7 @@ const {
   disciplineForRab,
 } = require("../../services/bvCalculationService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("../../services/ahspPricingService");
+const { recordChange } = require("../../services/bvRabAuditService");
 const ExcelJS = require("exceljs");
 const { buildBvSheet } = require("../../services/bvExportHelper");
 const { buildRabSheet } = require("../../services/rabExportHelper");
@@ -340,7 +341,10 @@ router.put(
       workCategoryId,
     } = req.body;
 
-    const existing = await prisma.bvItem.findUnique({ where: { id } });
+    const existing = await prisma.bvItem.findUnique({
+      where: { id },
+      include: { breakdowns: true },
+    });
     if (!existing)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
 
@@ -591,6 +595,16 @@ router.put(
           });
         }
       }
+
+      await recordChange(tx, {
+        entityType: "BV_ITEM",
+        entityId: id,
+        projectId: existing.projectId,
+        itemName: saved.name,
+        beforeData: existing,
+        afterData: saved,
+        req,
+      });
 
       return saved;
     });

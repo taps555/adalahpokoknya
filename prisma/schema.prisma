@@ -235,6 +235,7 @@ model Project {
   client         Client                @relation(fields: [clientId], references: [id])
   rabItems       RabItem[]
   bvItems        BvItem[]
+  changeHistory  BvRabChangeHistory[]
   workCategories ProjectWorkCategory[]
 
   rabStatus        RabStatus         @default(DRAFT)
@@ -467,6 +468,31 @@ model BvBreakdown {
   subTotal Decimal @db.Decimal(14, 4)
 
   @@index([bvItemId])
+}
+
+model BvRabChangeHistory {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  entityType  String
+  entityId    String
+  itemName    String?
+  action      String
+  status      String   @default("APPLIED")
+  beforeData  Json
+  afterData   Json
+  changes     Json
+  actorId     String?
+  actorName   String?
+  actorRole   String?
+  createdAt   DateTime @default(now())
+  undoneAt    DateTime?
+  undoneById  String?
+  undoneByName String?
+
+  @@index([projectId, createdAt])
+  @@index([entityType, entityId, createdAt])
+  @@index([projectId, entityType, entityId, status, createdAt])
 }
 
 model TimeSchedule {

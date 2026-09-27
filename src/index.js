@@ -13,6 +13,7 @@ const projectsRouter = require("./routes/projects");
 
 const rabRoutes = require("./routes/crudGrub/rab.routes");
 const rabGrub = require("./routes/crudGrub/rabGrub.routes");
+const bvRabHistory = require("./routes/crudGrub/bvRabHistory.routes");
 
 const exportExcel = require("./routes/exportToFile/rabExport.routes");
 
@@ -41,6 +42,7 @@ app.use("/api/projects", projectsRouter);
 //pembuatan rab:
 app.use("/api", rabRoutes);
 app.use("/api", rabGrub);
+app.use("/api", bvRabHistory);
 
 //export to file excel
 app.use("/api", exportExcel);
