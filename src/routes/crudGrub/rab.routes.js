@@ -18,24 +18,50 @@ const redactSellingResponse = (req, res, next) => {
 };
 const protectSelling = (req, res, next) => {
   const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
-  if (isSellingWrite && req.user?.role !== "SUPER_ADMIN") {
-    return res.status(403).json({ error: "Hanya SUPER_ADMIN yang boleh mengubah RAB Selling." });
+  // Harga jual (RAB) kini selalu dihitung dari RAP + Overhead, sehingga tidak ada
+  // satu pun peran yang boleh menulis harga jual secara manual.
+  if (isSellingWrite) {
+    return res.status(403).json({
+      error: "Harga jual RAB dihitung otomatis dari RAP + Overhead dan tidak dapat diubah manual.",
+    });
   }
   next();
 };
 
+const OVERHEAD_ONLY_ERROR = "SUPER_ADMIN hanya boleh mengubah Overhead (%).";
+const FORBIDDEN_SUPER_ADMIN_FIELDS = [
+  "rapUnitPrice",
+  "rapTotalPrice",
+  "rabUnitPrice",
+  "rabTotalPrice",
+  "components",
+  "volume",
+  "groupId",
+  "isByOwner",
+  "isStip",
+];
+
 const protectRapWrite = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") {
-    const keys = Object.keys(req.body || {});
-    const onlySellingOverride = keys.length === 1 && keys[0] === "rabUnitPrice";
-    if (!onlySellingOverride) {
-      return res.status(403).json({ error: "SUPER_ADMIN hanya boleh override RAB Satuan." });
+    const body = req.body || {};
+    const keys = Object.keys(body);
+    // SUPER_ADMIN hanya mengatur margin lewat Overhead. RAP berasal dari AHSP
+    // daerah/perencana dan tidak boleh ditimpa, begitu pula override harga jual.
+    const onlyOverhead = keys.length === 1 && keys[0] === "overheadPercent";
+    if (!onlyOverhead) {
+      const touchedForbidden = keys.filter((key) =>
+        FORBIDDEN_SUPER_ADMIN_FIELDS.includes(key),
+      );
+      const message = touchedForbidden.length
+        ? `SUPER_ADMIN tidak boleh mengubah ${touchedForbidden.join(", ")}. Hanya Overhead (%) yang dapat diubah.`
+        : OVERHEAD_ONLY_ERROR;
+      return res.status(403).json({ error: message });
     }
-    const value = Number(req.body.rabUnitPrice);
+    const value = Number(body.overheadPercent);
     if (!Number.isFinite(value) || value < 0) {
-      return res.status(400).json({ error: "RAB Satuan harus berupa angka valid (>= 0)." });
+      return res.status(400).json({ error: "Overhead (%) harus berupa angka valid (>= 0)." });
     }
-    req.body.rabUnitPrice = value;
+    req.body.overheadPercent = value;
     return next();
   }
   if (!["PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
@@ -466,6 +492,14 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   try {
     const { ids, rapUnitPrice, overheadPercent } = req.body;
 
+    // SUPER_ADMIN hanya boleh mengatur Overhead (%) — RAP tetap wewenang
+    // perencana. Cegah tembus lewat endpoint bulk ini.
+    if (req.user?.role === "SUPER_ADMIN" && rapUnitPrice !== undefined && rapUnitPrice !== null) {
+      return res.status(403).json({
+        error: "SUPER_ADMIN tidak boleh mengubah RAP Satuan. Hanya Overhead (%) yang dapat diubah.",
+      });
+    }
+
     if (!Array.isArray(ids) || ids.length === 0)
       return res
         .status(400)
@@ -709,6 +743,8 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
 
 router.put(
   "/projects/:projectId/rab-items/bulk-price-by-name",
+  verifyToken,
+  authorizeRoles("PROJECT_MANAGER", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;
