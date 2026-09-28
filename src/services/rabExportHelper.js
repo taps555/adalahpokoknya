@@ -185,6 +185,10 @@ function buildRabCategoryItemWhere(categoryFilter = null) {
     : (categoryFilter || {});
   const categoryCode = String(filter.categoryCode || "").trim().toUpperCase();
 
+  // Sheet GENERAL di export RAB adalah tampilan gabungan seluruh kategori.
+  // Gunakan marker eksplisit agar tidak bertabrakan dengan data legacy General.
+  if (filter.includeAllCategories === true) return {};
+
   if (filter.includeUnassignedWorkCategoryIds) {
     const legacyCategoryIds = [...new Set(
       (filter.includeUnassignedWorkCategoryIds || []).filter(Boolean),
@@ -466,6 +470,7 @@ async function buildRabSheet(
           fgColor: { argb: "FFD9D9D9" },
         };
         cell.border = {
+          top: { style: row === hr ? "medium" : "thin" },
           bottom: { style: row === hr + 1 ? "medium" : "thin" },
           left: { style: col === 2 ? "medium" : "thin" },
           right: { style: col === lastCol ? "medium" : "thin" },
@@ -478,15 +483,27 @@ async function buildRabSheet(
     ws.getCell(`${col}${hr}`).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFFFC0CB" },
+      fgColor: { argb: "FFD9D9D9" },
     };
     ws.getCell(`${col}${hr + 1}`).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFFFC0CB" },
+      fgColor: { argb: "FFD9D9D9" },
     };
   });
 
+  ws.getCell(`B${hr}`).border = {
+    top: { style: "medium" },
+    bottom: { style: "medium" },
+    left: { style: "medium" },
+    right: { style: "medium" },
+  };
+  ws.getCell(`C${hr}`).border = {
+    top: { style: "medium" },
+    bottom: { style: "medium" },
+    left: { style: "medium" },
+    right: { style: "thin" },
+  };
   ws.getCell(`F${hr}`).border = {
     right: { style: "medium" },
     bottom: { style: "medium" },
@@ -629,15 +646,15 @@ async function buildRabSheet(
   for (let row = hr + 2; row <= r; row++) {
     ["B", "C", "D", "E", "F", "G", "H", "I", "J"].forEach((col) => {
       ws.getCell(`${col}${row}`).border = {
-        // BQ memakai grid tabel tipis yang konsisten pada seluruh baris isi.
-        top: { style: "thin" },
-        bottom: { style: "thin" },
+        // Ikuti gaya BV: garis antarbaris dotted, grid vertikal thin.
+        top: row === hr + 2 ? { style: "thin" } : { style: "dotted" },
+        bottom: { style: "dotted" },
         left: { style: "thin" },
         right: { style: "thin" },
       };
     });
 
-    // Kunci garis samping tebal (medium) agar tidak berubah jadi thin/dotted
+    // Kunci garis luar dan pemisah blok harga agar konsisten seperti BV.
     ws.getCell(`B${row}`).border = {
       ...ws.getCell(`B${row}`).border,
       left: { style: "medium" },
@@ -672,7 +689,7 @@ async function buildRabSheet(
     ws.getCell(`${col}${r}`).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFFFC0CB" },
+      fgColor: { argb: "FFD9D9D9" },
     };
     ws.getCell(`${col}${r}`).border = {
       top: { style: "medium" },
