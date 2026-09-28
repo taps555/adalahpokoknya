@@ -59,7 +59,7 @@ const ROMAN = [
   "XV",
 ];
 
-function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false) {
+function renderBudgetHtml(project, groups, mode, categoryCode) {
   const unitKey = mode === "RAB" ? "rabUnitPrice" : "rapUnitPrice";
   const totalKey = mode === "RAB" ? "rabTotalPrice" : "rapTotalPrice";
   const unitPriceHeading = "HARGA SATUAN";
@@ -132,18 +132,7 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
     rowsHtml += `<tr class="subtotal-row"><td colspan="6">Sub Total ${mode}</td><td class="num">${fmtRp(subtotal)}</td></tr>`;
   });
 
-  const documentTitle = isInvoice ? "INVOICE" : "RENCANA ANGGARAN BIAYA";
-  const clientLine = isInvoice
-    ? `<p><strong>Kepada:</strong> ${escapeHtml(project.client?.name || "Client")}</p>`
-    : "";
-  const approval = isInvoice
-    ? `<h2 class="approval-title">PERSETUJUAN DAN TANDA TANGAN</h2>
-       <section class="signature-grid">
-         <div class="signature-box"><strong>Diajukan oleh</strong><span class="signature-line">DIVES</span></div>
-         <div class="signature-box"><strong>Diperiksa oleh</strong><span class="signature-line">Project Manager</span></div>
-         <div class="signature-box"><strong>Disetujui oleh</strong><span class="signature-line">${escapeHtml(project.client?.name || "Client")}</span></div>
-       </section>`
-    : "";
+  const documentTitle = "RENCANA ANGGARAN BIAYA";
 
   return `<!DOCTYPE html>
 <html lang="id"><head><meta charset="UTF-8"><title>${documentTitle} — ${escapeHtml(project.name)}</title>
@@ -180,10 +169,6 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
   .subtotal-row { background: #f0f0f0; font-style: italic; font-weight: bold; }
   .grand-row { background: #ffcc66; font-weight: bold; }
   .owner-row { background: #ffe985; }
-  .approval-title { margin: 26px 0 0; font-size: 13px; letter-spacing: .05em; }
-  .signature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; margin-top: 32px; text-align: center; page-break-inside: avoid; }
-  .signature-box { min-height: 108px; display: flex; flex-direction: column; justify-content: space-between; }
-  .signature-line { border-top: 1px solid #172033; padding-top: 5px; }
   @media print { body { padding: 0; } .screen-actions { display: none; } .sheet { max-width: none; } tr { page-break-inside: avoid; } }
 </style></head><body>
 <div class="screen-actions"><button class="print-button" onclick="window.print()">Print / Save as PDF</button></div>
@@ -197,13 +182,12 @@ function renderBudgetHtml(project, groups, mode, categoryCode, isInvoice = false
       <tr><td>Tahun Anggaran</td><td>:</td><td>${escapeHtml(project.hspkPeriod)}</td></tr>
     </table></div>
   </div>
-  ${clientLine}<p class="category">Kategori: ${escapeHtml(categoryCode)}</p>
+  <p class="category">Kategori: ${escapeHtml(categoryCode)}</p>
   <table class="rab"><thead>
     <tr><th rowspan="2">NO</th><th rowspan="2">ITEM PEKERJAAN</th><th rowspan="2">SPESIFIKASI RINGKAS</th><th rowspan="2">SAT.</th><th rowspan="2">VOL.</th><th colspan="2">${mode}</th></tr>
     <tr><th>${unitPriceHeading}</th><th>${totalHeading}</th></tr>
   </thead>
-  <tbody>${rowsHtml}<tr class="grand-row"><td colspan="6">${isInvoice ? "TOTAL INVOICE" : `GRAND TOTAL ${mode}`}</td><td class="num">${fmtRp(grandTotal)}</td></tr></tbody></table>
-  ${approval}
+  <tbody>${rowsHtml}<tr class="grand-row"><td colspan="6">GRAND TOTAL ${mode}</td><td class="num">${fmtRp(grandTotal)}</td></tr></tbody></table>
 </main></body></html>`;
 }
 
@@ -211,15 +195,17 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
   try {
     const { projectId } = req.params;
     const { workCategoryId, discipline } = req.query;
-    const isInvoice = String(req.query.format || "").toLowerCase() === "invoice";
-    const mode = isInvoice ? "RAB" : normalizeRabExportMode(req.query.mode || "RAP");
+    if (String(req.query.format || "").toLowerCase() === "invoice") {
+      return res.status(404).send("Dokumen invoice client tidak tersedia.");
+    }
+    const mode = normalizeRabExportMode(req.query.mode || "RAP");
     if (!mode || mode === "COMBINED") {
       return res.status(400).send("Mode view harus RAP atau RAB.");
     }
     if (!RAP_VIEW_ROLES.has(req.user?.role)) {
       return res.status(403).send("Akses RAP hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA.");
     }
-    if ((mode === "RAB" || isInvoice) && req.user?.role !== "SUPER_ADMIN") {
+    if (mode === "RAB" && req.user?.role !== "SUPER_ADMIN") {
       return res.status(403).send("Akses RAB Selling hanya untuk SUPER_ADMIN.");
     }
 
@@ -299,7 +285,7 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
       }
     }
 
-    const html = renderBudgetHtml(project, groups, mode, categoryTitle, isInvoice);
+    const html = renderBudgetHtml(project, groups, mode, categoryTitle);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader(
       "Content-Security-Policy",
