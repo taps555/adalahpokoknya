@@ -185,6 +185,17 @@ function buildRabCategoryItemWhere(categoryFilter = null) {
     : (categoryFilter || {});
   const categoryCode = String(filter.categoryCode || "").trim().toUpperCase();
 
+  if (filter.includeUnassignedWorkCategoryIds) {
+    const legacyCategoryIds = [...new Set(
+      (filter.includeUnassignedWorkCategoryIds || []).filter(Boolean),
+    )];
+    const predicates = [
+      { workCategoryId: null, discipline: null },
+      ...legacyCategoryIds.map((workCategoryId) => ({ workCategoryId })),
+    ];
+    return predicates.length === 1 ? predicates[0] : { OR: predicates };
+  }
+
   // GENERAL berarti item yang benar-benar belum masuk kategori/disiplin apa pun,
   // bukan filter kosong yang mengambil seluruh isi proyek.
   if (!filter.workCategoryId && categoryCode === "GENERAL") {

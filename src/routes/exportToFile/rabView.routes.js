@@ -232,8 +232,8 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
     });
     if (!project) return res.status(404).send("Project tidak ditemukan.");
 
-    let itemWhere = buildRabCategoryItemWhere({ categoryCode: "GENERAL" });
-    let categoryTitle = "GENERAL";
+    let itemWhere = {};
+    let categoryTitle = "SEMUA KATEGORI";
     if (workCategoryId) {
       const config = await prisma.projectWorkCategory.findUnique({
         where: { projectId_workCategoryId: { projectId, workCategoryId } },
@@ -249,23 +249,28 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
       });
     } else if (discipline) {
       const code = String(discipline).trim().toUpperCase();
-      const activeCategories = (project.workCategories || []).filter(
-        (entry) => entry.isActive && entry.workCategory?.isActive,
-      );
-      const config = activeCategories.find(
-        (entry) => String(entry.workCategory.code || "").trim().toUpperCase() === code,
-      );
-      if (config) {
-        categoryTitle = config.workCategory.code;
-        itemWhere = buildRabCategoryItemWhere({
-          workCategoryId: config.workCategoryId,
-          categoryCode: config.workCategory.code,
-        });
-      } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
-        categoryTitle = code;
-        itemWhere = buildRabCategoryItemWhere({ categoryCode: code });
+      if (["SEMUA", "GENERAL", "ALL"].includes(code)) {
+        itemWhere = {};
+        categoryTitle = "SEMUA KATEGORI";
       } else {
-        return res.status(400).send("Kategori pekerjaan tidak ditemukan/aktif pada project.");
+        const activeCategories = (project.workCategories || []).filter(
+          (entry) => entry.isActive && entry.workCategory?.isActive,
+        );
+        const config = activeCategories.find(
+          (entry) => String(entry.workCategory.code || "").trim().toUpperCase() === code,
+        );
+        if (config) {
+          categoryTitle = config.workCategory.code;
+          itemWhere = buildRabCategoryItemWhere({
+            workCategoryId: config.workCategoryId,
+            categoryCode: config.workCategory.code,
+          });
+        } else if ((project.workCategories || []).length === 0 && ["SIPIL", "INTERIOR"].includes(code)) {
+          categoryTitle = code;
+          itemWhere = buildRabCategoryItemWhere({ categoryCode: code });
+        } else {
+          return res.status(400).send("Kategori pekerjaan tidak ditemukan/aktif pada project.");
+        }
       }
     }
 
