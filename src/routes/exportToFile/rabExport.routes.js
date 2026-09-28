@@ -511,65 +511,47 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res
       );
       const ws = wb.addWorksheet(sheetName);
       const categoryFilter = config.categoryFilter
-        || (config.workCategoryId
-          ? { workCategoryId: config.workCategoryId, categoryCode }
-          : categoryCode);
+        || (config.includeAllCategories
+          ? { includeAllCategories: true }
+          : config.workCategoryId
+            ? { workCategoryId: config.workCategoryId, categoryCode }
+            : categoryCode);
       await buildRabSheet(ws, projectId, project, categoryFilter, {
         mode: sheetMode,
-        categoryTitle: categoryCode,
+        categoryTitle: config.categoryTitle || categoryCode,
+      });
+    };
+
+    // Sheet GENERAL/RAP-RAB umum = gabungan semua item semua kategori.
+    const renderCombinedGeneralSheet = async (modeOverride = null) => {
+      const sheetMode = modeOverride || mode;
+      const sheetName = uniqueSheetName(
+        usedSheetNames,
+        sheetMode === "COMBINED" ? "RAP-RAB" : sheetMode,
+        "GENERAL",
+      );
+      const ws = wb.addWorksheet(sheetName);
+      await buildRabSheet(ws, projectId, project, { includeAllCategories: true }, {
+        mode: sheetMode,
+        categoryTitle: "GENERAL",
       });
     };
 
     const explicitCategory = Boolean(workCategoryId || discipline);
 
-    // Item legacy tanpa kategori hanya dapat sheet sendiri bila datanya ada,
-    // supaya file export tidak berisi sheet kosong.
-    const legacyGeneralCategoryIds = (project.workCategories || [])
-      .filter((entry) => String(entry.workCategory?.code || "").trim().toUpperCase() === "GENERAL")
-      .map((entry) => entry.workCategoryId)
-      .filter(Boolean);
-    const legacyItemWhere = legacyGeneralCategoryIds.length > 0
-      ? {
-          OR: [
-            { workCategoryId: null, discipline: null },
-            { workCategoryId: { in: legacyGeneralCategoryIds } },
-          ],
-        }
-      : { workCategoryId: null, discipline: null };
-    const legacyUnassignedCount = explicitCategory
-      ? 0
-      : await prisma.rabItem.count({ where: { projectId, ...legacyItemWhere } });
-    const renderLegacySheetIfNeeded = async (modeOverride = null) => {
-      if (legacyUnassignedCount === 0) return;
-      await renderCategorySheet(
-        {
-          workCategoryId: null,
-          workCategory: { code: "LAINNYA" },
-          sheetLabel: "LAINNYA",
-          categoryFilter: {
-            includeUnassignedWorkCategoryIds: legacyGeneralCategoryIds,
-          },
-        },
-        modeOverride,
-      );
-    };
-
     if (mode === "COMBINED") {
-      // Tombol "Semua Kategori": sheet LAINNYA (item lama tanpa kategori) bila
-      // ada, lalu pasangan RAP/RAB per kategori aktif. Pilihan kategori
-      // eksplisit tetap hanya menghasilkan kategori itu.
-      if (!explicitCategory && req.user?.role === "SUPER_ADMIN") {
-        await renderLegacySheetIfNeeded("RAP");
-        await renderLegacySheetIfNeeded("RAB");
-      }
+      // Export semua kategori diawali satu sheet GENERAL gabungan (RAP + RAB),
+      // lalu sheet per kategori agar pengguna tetap bisa melihat rincian.
+      if (!explicitCategory) await renderCombinedGeneralSheet("COMBINED");
       for (const config of categories) {
         if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
         await renderCategorySheet(config, "RAP");
         await renderCategorySheet(config, "RAB");
       }
     } else {
-      // RAP tersedia bagi SUPER_ADMIN, PROJECT_MANAGER, dan PERENCANA.
-      if (!explicitCategory) await renderLegacySheetIfNeeded(mode);
+      // Export RAP/RAB semua kategori diawali sheet GENERAL gabungan, lalu
+      // sheet per kategori aktif. Pilihan kategori eksplisit tetap satu sheet.
+      if (!explicitCategory) await renderCombinedGeneralSheet(mode);
       for (const config of categories) {
         if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
         await renderCategorySheet(config);
