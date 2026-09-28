@@ -1,5 +1,9 @@
 "use strict";
 
+// Uji perilaku approval tetap dijalankan dengan fitur diaktifkan secara eksplisit.
+// Di aplikasi, fitur ini dimatikan default (lihat BV_RAB_APPROVAL_ENABLED).
+process.env.BV_RAB_APPROVAL_ENABLED = "true";
+
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
@@ -29,7 +33,7 @@ test("permits only the approval workflow transitions and creates monotonically i
   assert.throws(() => transitionApproval({ status: "DRAFT", revision: 1 }, "APPROVE"), /status/i);
 });
 
-test("allows edits only in DRAFT or CHANGES_REQUESTED and returns 409 for locked states", async () => {
+test("allows edits unless the approval is locked, which returns 409", async () => {
   for (const status of [null, "DRAFT", "CHANGES_REQUESTED"]) {
     const db = { bvRabApprovalRevision: { findFirst: async () => status ? { status } : null } };
     await assert.doesNotReject(() => assertProjectEditable(db, "project-1"));
