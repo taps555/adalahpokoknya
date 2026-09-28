@@ -13,6 +13,8 @@ const {
   disciplineForRab,
 } = require("../../services/bvCalculationService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("../../services/ahspPricingService");
+const { recordChange } = require("../../services/bvRabAuditService");
+const { assertProjectEditable } = require("../../services/bvRabApprovalService");
 const ExcelJS = require("exceljs");
 const { buildBvSheet } = require("../../services/bvExportHelper");
 const { buildRabSheet } = require("../../services/rabExportHelper");
@@ -103,6 +105,41 @@ async function findLinkedBvItems(itemIds) {
   });
 }
 
+async function guardBvApproval(req, res, next) {
+  try {
+    let projectId = req.params?.projectId;
+    if (!projectId && req.params?.id) {
+      const item = await prisma.bvItem.findUnique({ where: { id: req.params.id }, select: { projectId: true } });
+      if (item) projectId = item.projectId;
+    }
+    if (!projectId && Array.isArray(req.body?.itemIds) && req.body.itemIds.length > 0) {
+      const uniqueIds = [...new Set(req.body.itemIds)];
+      const items = await prisma.bvItem.findMany({ where: { id: { in: uniqueIds } }, select: { projectId: true } });
+      if (items.length !== uniqueIds.length) {
+        const missing = new Error("Sebagian item BV tidak ditemukan.");
+        missing.statusCode = 404;
+        throw missing;
+      }
+      const distinct = [...new Set(items.map((item) => item.projectId))];
+      if (distinct.length !== 1) {
+        const multi = new Error("Operasi massal hanya boleh untuk satu project.");
+        multi.statusCode = 400;
+        throw multi;
+      }
+      projectId = distinct[0];
+    }
+    if (!projectId) {
+      const error = new Error("Project untuk perubahan BV tidak ditemukan.");
+      error.statusCode = 404;
+      throw error;
+    }
+    await assertProjectEditable(prisma, projectId);
+    next();
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
+  }
+}
+
 const redactLinkedSelling = (value) => {
   if (Array.isArray(value)) return value.map(redactLinkedSelling);
   if (!value || typeof value !== "object") return value;
@@ -159,11 +196,14 @@ router.post(
     }
 
     const project = await prisma.project.findUnique({
-      where: { id: projectId },
-      include: { workCategories: { include: { workCategory: true } } },
-    });
-    if (!project)
-      return res.status(404).json({ error: "Project tidak ditemukan." });
+          where: { id: projectId },
+          include: { workCategories: { include: { workCategory: true } } },
+        });
+        if (!project)
+          return res.status(404).json({ error: "Project tidak ditemukan." });
+
+        // Kunci create saat BV/RAB sedang direview atau sudah disetujui
+        await assertProjectEditable(prisma, projectId);
 
     if (groupId) {
       const group = await prisma.rabGroup.findUnique({
@@ -277,7 +317,7 @@ router.post(
       return res.status(400).json({ error: error.message });
     }
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -340,9 +380,15 @@ router.put(
       workCategoryId,
     } = req.body;
 
-    const existing = await prisma.bvItem.findUnique({ where: { id } });
+    const existing = await prisma.bvItem.findUnique({
+      where: { id },
+      include: { breakdowns: true },
+    });
     if (!existing)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
+
+    // Approval state is authoritative for every BV edit.
+    await assertProjectEditable(prisma, existing.projectId);
 
     const finalIsHeaderOnly =
       isHeaderOnly !== undefined
@@ -592,6 +638,16 @@ router.put(
         }
       }
 
+      await recordChange(tx, {
+        entityType: "BV_ITEM",
+        entityId: id,
+        projectId: existing.projectId,
+        itemName: saved.name,
+        beforeData: existing,
+        afterData: saved,
+        req,
+      });
+
       return saved;
     });
 
@@ -603,7 +659,7 @@ router.put(
       return res.status(400).json({ error: error.message });
     }
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -613,6 +669,7 @@ router.delete(
   "/bv-items/:id",
   verifyToken,
   authorizeRoles(...BV_MUTATION_ROLES),
+  guardBvApproval,
   async (req, res) => {
   try {
     const item = await prisma.bvItem.findUnique({
@@ -646,6 +703,7 @@ router.delete(
   "/bv-items-bulk",
   verifyToken,
   authorizeRoles(...BV_MUTATION_ROLES),
+  guardBvApproval,
   async (req, res) => {
   try {
     // Menangkap array ID dari frontend
@@ -834,7 +892,7 @@ async function rapikanAnak(tx, indukBvId) {
 }
 
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
-router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     // Tambahkan includeChildren dari req.body
@@ -1080,7 +1138,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
       return res.status(400).json({ error: error.message });
     }
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -1088,7 +1146,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
 // ==========================================
 // BULK ACTION: LINK TO RAB MASSAL
 // ==========================================
-router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { itemIds } = req.body;
 
@@ -1241,7 +1299,7 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
   }
 });
 
-router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { itemIds } = req.body;
 
@@ -1367,7 +1425,7 @@ router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "P
   }
 });
 
-router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     const bvItem = await prisma.bvItem.findUnique({
@@ -1481,12 +1539,12 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
       return res.status(400).json({ error: error.message });
     }
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
-router.post("/bv-items/:id/unlink", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.post("/bv-items/:id/unlink", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
 

@@ -7,6 +7,8 @@ const { calculateJobPrice } = require("../../services/calculateService");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
+const { recordChange } = require("../../services/bvRabAuditService");
+const { assertProjectEditable } = require("../../services/bvRabApprovalService");
 
 const redactSellingResponse = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") return next();
@@ -16,24 +18,50 @@ const redactSellingResponse = (req, res, next) => {
 };
 const protectSelling = (req, res, next) => {
   const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
-  if (isSellingWrite && req.user?.role !== "SUPER_ADMIN") {
-    return res.status(403).json({ error: "Hanya SUPER_ADMIN yang boleh mengubah RAB Selling." });
+  // Harga jual (RAB) kini selalu dihitung dari RAP + Overhead, sehingga tidak ada
+  // satu pun peran yang boleh menulis harga jual secara manual.
+  if (isSellingWrite) {
+    return res.status(403).json({
+      error: "Harga jual RAB dihitung otomatis dari RAP + Overhead dan tidak dapat diubah manual.",
+    });
   }
   next();
 };
 
+const OVERHEAD_ONLY_ERROR = "SUPER_ADMIN hanya boleh mengubah Overhead (%).";
+const FORBIDDEN_SUPER_ADMIN_FIELDS = [
+  "rapUnitPrice",
+  "rapTotalPrice",
+  "rabUnitPrice",
+  "rabTotalPrice",
+  "components",
+  "volume",
+  "groupId",
+  "isByOwner",
+  "isStip",
+];
+
 const protectRapWrite = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") {
-    const keys = Object.keys(req.body || {});
-    const onlySellingOverride = keys.length === 1 && keys[0] === "rabUnitPrice";
-    if (!onlySellingOverride) {
-      return res.status(403).json({ error: "SUPER_ADMIN hanya boleh override RAB Satuan." });
+    const body = req.body || {};
+    const keys = Object.keys(body);
+    // SUPER_ADMIN hanya mengatur margin lewat Overhead. RAP berasal dari AHSP
+    // daerah/perencana dan tidak boleh ditimpa, begitu pula override harga jual.
+    const onlyOverhead = keys.length === 1 && keys[0] === "overheadPercent";
+    if (!onlyOverhead) {
+      const touchedForbidden = keys.filter((key) =>
+        FORBIDDEN_SUPER_ADMIN_FIELDS.includes(key),
+      );
+      const message = touchedForbidden.length
+        ? `SUPER_ADMIN tidak boleh mengubah ${touchedForbidden.join(", ")}. Hanya Overhead (%) yang dapat diubah.`
+        : OVERHEAD_ONLY_ERROR;
+      return res.status(403).json({ error: message });
     }
-    const value = Number(req.body.rabUnitPrice);
+    const value = Number(body.overheadPercent);
     if (!Number.isFinite(value) || value < 0) {
-      return res.status(400).json({ error: "RAB Satuan harus berupa angka valid (>= 0)." });
+      return res.status(400).json({ error: "Overhead (%) harus berupa angka valid (>= 0)." });
     }
-    req.body.rabUnitPrice = value;
+    req.body.overheadPercent = value;
     return next();
   }
   if (!["PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
@@ -43,6 +71,24 @@ const protectRapWrite = (req, res, next) => {
 };
 
 const router = express.Router();
+
+async function assertRabItemsEditable(items, requestedIds) {
+  const uniqueIds = [...new Set(requestedIds || [])];
+  if (items.length !== uniqueIds.length) {
+    const error = new Error("Sebagian item RAB tidak ditemukan.");
+    error.statusCode = 404;
+    throw error;
+  }
+  const projectIds = [...new Set(items.map((item) => item.projectId))];
+  if (projectIds.length !== 1) {
+    const error = new Error("Operasi massal hanya boleh untuk satu project.");
+    error.statusCode = 400;
+    throw error;
+  }
+  await assertProjectEditable(prisma, projectIds[0]);
+  return projectIds[0];
+}
+
 router.use(
   ["/projects/:projectId/rab-items", "/rab-items"],
   verifyToken,
@@ -84,9 +130,10 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
 });
 
 /** PUT /rab-items/:id — edit item RAB (volume, harga custom, dll), isolated dari master */
-router.put("/rab-items/:id", async (req, res) => {
+router.put("/rab-items/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
+    if (["bulk-price", "bulk-switch-job"].includes(id)) return next("route");
 
     const {
       rapUnitPrice,
@@ -98,9 +145,15 @@ router.put("/rab-items/:id", async (req, res) => {
       isStip,
     } = req.body;
 
-    const existing = await prisma.rabItem.findUnique({ where: { id } });
+    const existing = await prisma.rabItem.findUnique({
+      where: { id },
+      include: { components: true },
+    });
     if (!existing)
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    // Approval state is authoritative for every RAB edit.
+    await assertProjectEditable(prisma, existing.projectId);
 
     // ==========================================
     // 🚨 KODE SATPAM: CEK APAKAH DIA INDUK? 🚨
@@ -111,25 +164,33 @@ router.put("/rab-items/:id", async (req, res) => {
     if (isInduk) {
       // JIKA INDUK: Paksa harga dan volume jadi null (Karena dia cuma Judul)
       // Abaikan komponen atau harga yang mungkin dikirim dari Frontend
-      const updatedInduk = await prisma.rabItem.update({
-        where: { id },
-        data: {
-          volume: 0,
-          rapUnitPrice: 0,
-          rapTotalPrice: 0,
-          rabUnitPrice: 0,
-          rabTotalPrice: 0, // Totalnya dikosongkan (nanti dihitung SUM di Frontend saat render)
-
-          // Tetap izinkan update hal-hal administratif (misal pindah Grup)
-          ...(groupId !== undefined ? { groupId: groupId || null } : {}),
-          ...(isByOwner !== undefined ? { isByOwner } : {}),
-          ...(isStip !== undefined ? { isStip } : {}),
-        },
-        include: { components: true, workCategory: true },
+      const updatedInduk = await prisma.$transaction(async (tx) => {
+        const updated = await tx.rabItem.update({
+          where: { id },
+          data: {
+            volume: 0,
+            rapUnitPrice: 0,
+            rapTotalPrice: 0,
+            rabUnitPrice: 0,
+            rabTotalPrice: 0,
+            ...(groupId !== undefined ? { groupId: groupId || null } : {}),
+            ...(isByOwner !== undefined ? { isByOwner } : {}),
+            ...(isStip !== undefined ? { isStip } : {}),
+          },
+          include: { components: true, workCategory: true },
+        });
+        await tx.rabItemComponent.deleteMany({ where: { rabItemId: id } });
+        await recordChange(tx, {
+          entityType: "RAB_ITEM",
+          entityId: id,
+          projectId: existing.projectId,
+          itemName: updated.name,
+          beforeData: existing,
+          afterData: { ...updated, components: [] },
+          req,
+        });
+        return updated;
       });
-
-      // Hapus jika ada komponen bahan nyangkut di si Induk
-      await prisma.rabItemComponent.deleteMany({ where: { rabItemId: id } });
 
       return res.json({
         message: "Item berhasil diperbarui (Disimpan sebagai Judul/Induk).",
@@ -193,33 +254,48 @@ router.put("/rab-items/:id", async (req, res) => {
     const rabTotal = rabSatuan * vol;
 
     // 3. SIMPAN KE DATABASE
-    const updated = await prisma.rabItem.update({
-      where: { id },
-      data: {
-        rapUnitPrice: rapSatuan,
-        rapTotalPrice: rapTotal,
-        overheadPercent: overhead,
-        rabUnitPrice: rabSatuan,
-        rabTotalPrice: rabTotal,
-        ...(componentUpdate ? { components: componentUpdate } : {}),
-        ...(groupId !== undefined ? { groupId: groupId || null } : {}),
-        ...(isByOwner !== undefined ? { isByOwner } : {}),
-        ...(isStip !== undefined ? { isStip } : {}),
-      },
-      include: { components: true, workCategory: true },
+    const updated = await prisma.$transaction(async (tx) => {
+      const saved = await tx.rabItem.update({
+        where: { id },
+        data: {
+          rapUnitPrice: rapSatuan,
+          rapTotalPrice: rapTotal,
+          overheadPercent: overhead,
+          rabUnitPrice: rabSatuan,
+          rabTotalPrice: rabTotal,
+          ...(componentUpdate ? { components: componentUpdate } : {}),
+          ...(groupId !== undefined ? { groupId: groupId || null } : {}),
+          ...(isByOwner !== undefined ? { isByOwner } : {}),
+          ...(isStip !== undefined ? { isStip } : {}),
+        },
+        include: { components: true, workCategory: true },
+      });
+      await recordChange(tx, {
+        entityType: "RAB_ITEM",
+        entityId: id,
+        projectId: existing.projectId,
+        itemName: saved.name,
+        beforeData: existing,
+        afterData: saved,
+        req,
+      });
+      return saved;
     });
 
     res.json({ message: "Item RAB berhasil diperbarui", data: updated });
   } catch (error) {
     console.error("Error Update RabItem:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 /** DELETE /rab-items/:id */
 router.delete("/rab-items/:id", async (req, res) => {
   try {
+    const existing = await prisma.rabItem.findUnique({ where: { id: req.params.id }, select: { id: true, projectId: true } });
+    if (!existing) return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+    await assertProjectEditable(prisma, existing.projectId);
     await prisma.rabItem.delete({ where: { id: req.params.id } });
     res.json({ message: "Item RAB berhasil dihapus." });
   } catch (error) {
@@ -227,7 +303,7 @@ router.delete("/rab-items/:id", async (req, res) => {
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
     }
     console.error("Error Delete RabItem:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
+    res.status(error.statusCode || 500).json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
@@ -244,9 +320,14 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
         .status(400)
         .json({ error: 'Field "newJobTypeId" wajib diisi.' });
 
-    const existing = await prisma.rabItem.findUnique({ where: { id } });
+    const existing = await prisma.rabItem.findUnique({
+      where: { id },
+      include: { components: true },
+    });
     if (!existing)
       return res.status(404).json({ error: "Item RAB tidak ditemukan." });
+
+    await assertProjectEditable(prisma, existing.projectId);
 
     const calc = await calculateJobPrice(newJobTypeId);
     if (!calc)
@@ -319,29 +400,36 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
     // ==========================================
     // SIMPAN KE DATABASE
     // ==========================================
-    const updated = await prisma.rabItem.update({
-      where: { id },
-      data: {
-        // Nama dan paymentUnit sengaja tidak diubah agar teks BV aman
-        category: calc.jobType.category,
-        reference: calc.jobType.reference,
-        discipline: calc.jobType.discipline,
-        workCategoryId: workCategoryId || calc.jobType.workCategoryId || rabItem.workCategoryId,
-        grade: calc.jobType.grade,
-
-        overheadPercent: overhead,
-        rapUnitPrice: rapSatuan,
-        rapTotalPrice: rapTotal,
-        rabUnitPrice: rabSatuan,
-        rabTotalPrice: rabTotal,
-
-        sourceJobTypeId: calc.jobType.id,
-        components: {
-          deleteMany: {},
-          create: newComponents,
+    const updated = await prisma.$transaction(async (tx) => {
+      const saved = await tx.rabItem.update({
+        where: { id },
+        data: {
+          category: calc.jobType.category,
+          reference: calc.jobType.reference,
+          discipline: calc.jobType.discipline,
+          workCategoryId: workCategoryId || calc.jobType.workCategoryId || rabItem.workCategoryId,
+          grade: calc.jobType.grade,
+          overheadPercent: overhead,
+          rapUnitPrice: rapSatuan,
+          rapTotalPrice: rapTotal,
+          rabUnitPrice: rabSatuan,
+          rabTotalPrice: rabTotal,
+          sourceJobTypeId: calc.jobType.id,
+          components: { deleteMany: {}, create: newComponents },
         },
-      },
-      include: { components: true, workCategory: true },
+        include: { components: true, workCategory: true },
+      });
+      await recordChange(tx, {
+        entityType: "RAB_ITEM",
+        entityId: id,
+        projectId: existing.projectId,
+        itemName: saved.name,
+        action: "SWITCH_JOB",
+        beforeData: existing,
+        afterData: saved,
+        req,
+      });
+      return saved;
     });
 
     res.json({
@@ -351,22 +439,8 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
   } catch (error) {
     console.error("Error Switch Job:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
-  }
-});
-
-/** DELETE /rab-items/:id */
-router.delete("/rab-items/:id", async (req, res) => {
-  try {
-    await prisma.rabItem.delete({ where: { id: req.params.id } });
-    res.json({ message: "Item RAB berhasil dihapus." });
-  } catch (error) {
-    if (error.code === "P2025") {
-      return res.status(404).json({ error: "Item RAB tidak ditemukan." });
-    }
-    console.error("Error Delete RabItem:", error);
-    res.status(500).json({ error: "Terjadi kesalahan pada server." });
   }
 });
 
@@ -386,6 +460,12 @@ router.post(
           .json({ error: "Tidak ada ID yang dikirim untuk dihapus." });
       }
 
+      const existingItems = await prisma.rabItem.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, projectId: true },
+      });
+      await assertRabItemsEditable(existingItems, ids);
+
       // SAPU JAGAT DELETE: Prisma langsung menghapus semua ID yang ada di dalam array
       const deleted = await prisma.rabItem.deleteMany({
         where: {
@@ -396,8 +476,8 @@ router.post(
       res.json({ message: `Berhasil menghapus ${deleted.count} item RAB.` });
     } catch (error) {
       console.error("Error Bulk Delete RabItems:", error);
-      res.status(500).json({
-        error: "Terjadi kesalahan pada server saat menghapus massal.",
+      res.status(error.statusCode || 500).json({
+        error: error.message || "Terjadi kesalahan pada server saat menghapus massal.",
       });
     }
   },
@@ -411,6 +491,14 @@ router.post(
 router.put("/rab-items/bulk-price", async (req, res) => {
   try {
     const { ids, rapUnitPrice, overheadPercent } = req.body;
+
+    // SUPER_ADMIN hanya boleh mengatur Overhead (%) — RAP tetap wewenang
+    // perencana. Cegah tembus lewat endpoint bulk ini.
+    if (req.user?.role === "SUPER_ADMIN" && rapUnitPrice !== undefined && rapUnitPrice !== null) {
+      return res.status(403).json({
+        error: "SUPER_ADMIN tidak boleh mengubah RAP Satuan. Hanya Overhead (%) yang dapat diubah.",
+      });
+    }
 
     if (!Array.isArray(ids) || ids.length === 0)
       return res
@@ -426,6 +514,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
       where: { id: { in: ids } },
       include: { components: true, workCategory: true },
     });
+    await assertRabItemsEditable(items, ids);
 
     const results = [];
     const skipped = [];
@@ -463,16 +552,30 @@ router.put("/rab-items/bulk-price", async (req, res) => {
       // hapus rincian biar gak nyangkut/gak sinkron
       const shouldClearComponents = hadComponents && rapUnitPrice !== undefined;
 
-      const updated = await prisma.rabItem.update({
-        where: { id: existing.id },
-        data: {
-          rapUnitPrice: rapSatuan,
-          rapTotalPrice: rapTotal,
-          overheadPercent: overhead,
-          rabUnitPrice: rabSatuan,
-          rabTotalPrice: rabTotal,
-          ...(shouldClearComponents ? { components: { deleteMany: {} } } : {}),
-        },
+      const updated = await prisma.$transaction(async (tx) => {
+        const saved = await tx.rabItem.update({
+          where: { id: existing.id },
+          data: {
+            rapUnitPrice: rapSatuan,
+            rapTotalPrice: rapTotal,
+            overheadPercent: overhead,
+            rabUnitPrice: rabSatuan,
+            rabTotalPrice: rabTotal,
+            ...(shouldClearComponents ? { components: { deleteMany: {} } } : {}),
+          },
+          include: { components: true },
+        });
+        await recordChange(tx, {
+          entityType: "RAB_ITEM",
+          entityId: existing.id,
+          projectId: existing.projectId,
+          itemName: saved.name,
+          action: "BULK_UPDATE",
+          beforeData: existing,
+          afterData: saved,
+          req,
+        });
+        return saved;
       });
 
       if (shouldClearComponents) clearedComponents.push(existing.id);
@@ -491,7 +594,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   } catch (error) {
     console.error("Error Bulk Update RabItem:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
@@ -518,8 +621,12 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
 
     const items = await prisma.rabItem.findMany({
       where: { id: { in: ids } },
-      include: { project: { include: { workCategories: { include: { workCategory: true } } } } },
+      include: {
+        project: { include: { workCategories: { include: { workCategory: true } } } },
+        components: true,
+      },
     });
+    await assertRabItemsEditable(items, ids);
 
     const results = [];
     const skipped = [];
@@ -583,27 +690,39 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
       const rapTotal = rapSatuan * vol;
       const rabTotal = rabSatuan * vol;
 
-      const updated = await prisma.rabItem.update({
-        where: { id: existing.id },
-        data: {
-          category: calc.jobType.category,
-          reference: calc.jobType.reference,
-          discipline: calc.jobType.discipline,
-          workCategoryId: workCategoryId || calc.jobType.workCategoryId || existing.workCategoryId,
-          grade: calc.jobType.grade,
-
-          overheadPercent: overhead,
-          rapUnitPrice: rapSatuan,
-          rapTotalPrice: rapTotal,
-          rabUnitPrice: rabSatuan,
-          rabTotalPrice: rabTotal,
-
-          sourceJobTypeId: calc.jobType.id,
-          components: {
-            deleteMany: {},
-            create: newComponents,
+      const updated = await prisma.$transaction(async (tx) => {
+        const saved = await tx.rabItem.update({
+          where: { id: existing.id },
+          data: {
+            category: calc.jobType.category,
+            reference: calc.jobType.reference,
+            discipline: calc.jobType.discipline,
+            workCategoryId: workCategoryId || calc.jobType.workCategoryId || existing.workCategoryId,
+            grade: calc.jobType.grade,
+            overheadPercent: overhead,
+            rapUnitPrice: rapSatuan,
+            rapTotalPrice: rapTotal,
+            rabUnitPrice: rabSatuan,
+            rabTotalPrice: rabTotal,
+            sourceJobTypeId: calc.jobType.id,
+            components: {
+              deleteMany: {},
+              create: newComponents,
+            },
           },
-        },
+          include: { components: true },
+        });
+        await recordChange(tx, {
+          entityType: "RAB_ITEM",
+          entityId: existing.id,
+          projectId: existing.projectId,
+          itemName: saved.name,
+          action: "SWITCH_JOB",
+          beforeData: existing,
+          afterData: saved,
+          req,
+        });
+        return saved;
       });
 
       results.push(updated);
@@ -617,17 +736,21 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
   } catch (error) {
     console.error("Error Bulk Switch Job:", error);
     res
-      .status(500)
+      .status(error.statusCode || 500)
       .json({ error: error.message || "Terjadi kesalahan pada server." });
   }
 });
 
 router.put(
   "/projects/:projectId/rab-items/bulk-price-by-name",
+  verifyToken,
+  authorizeRoles("PROJECT_MANAGER", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;
       const { name, newUnitPrice } = req.body;
+
+      await assertProjectEditable(prisma, projectId);
 
       if (!name || newUnitPrice === undefined) {
         return res
@@ -638,36 +761,46 @@ router.put(
       // 1. Cari semua item di proyek ini yang namanya SAMA PERSIS
       const items = await prisma.rabItem.findMany({
         where: {
-          projectId: projectId,
-          name: name,
+          projectId,
+          name,
         },
+        include: { components: true },
       });
 
-      // 2. Siapkan hitungan matematika untuk masing-masing baris
-      // (Karena volume tiap ruangan kan beda-beda)
-      const updatePromises = items.map((item) => {
-        const rapSatuan = Number(newUnitPrice);
-        const overhead = Number(item.overheadPercent || 0);
-        const rabSatuan = rapSatuan + rapSatuan * (overhead / 100);
-        const vol = Number(item.volume || 0);
-
-        // Siapkan antrian update untuk Prisma
-        return prisma.rabItem.update({
-          where: { id: item.id },
-          data: {
-            rapUnitPrice: rapSatuan,
-            rapTotalPrice: rapSatuan * vol,
-            rabUnitPrice: rabSatuan,
-            rabTotalPrice: rabSatuan * vol,
-          },
-        });
+      const updatedItems = await prisma.$transaction(async (tx) => {
+        const savedItems = [];
+        for (const item of items) {
+          const rapSatuan = Number(newUnitPrice);
+          const overhead = Number(item.overheadPercent || 0);
+          const rabSatuan = rapSatuan + rapSatuan * (overhead / 100);
+          const vol = Number(item.volume || 0);
+          const saved = await tx.rabItem.update({
+            where: { id: item.id },
+            data: {
+              rapUnitPrice: rapSatuan,
+              rapTotalPrice: rapSatuan * vol,
+              rabUnitPrice: rabSatuan,
+              rabTotalPrice: rabSatuan * vol,
+            },
+            include: { components: true },
+          });
+          await recordChange(tx, {
+            entityType: "RAB_ITEM",
+            entityId: item.id,
+            projectId,
+            itemName: saved.name,
+            action: "BULK_UPDATE",
+            beforeData: item,
+            afterData: saved,
+            req,
+          });
+          savedItems.push(saved);
+        }
+        return savedItems;
       });
-
-      // 3. Eksekusi semua antrian sekaligus (Sangat ringan untuk server!)
-      await prisma.$transaction(updatePromises);
 
       res.json({
-        message: `Berhasil update harga untuk ${items.length} item "${name}"`,
+        message: `Berhasil update harga untuk ${updatedItems.length} item "${name}"`,
       });
     } catch (error) {
       console.error("Error Bulk Update by Name:", error);
