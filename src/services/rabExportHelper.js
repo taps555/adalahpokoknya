@@ -151,7 +151,7 @@ function finalizeRabSheet(ws, mode, categoryTitle = "") {
   titleCell.fill = {
     type: "pattern",
     pattern: "solid",
-    fgColor: { argb: "FFD0CECE" },
+    fgColor: { argb: "FFD9D9D9" },
   };
 
   addDivesLogo(ws);
@@ -522,6 +522,19 @@ async function buildRabSheet(
     left: { style: "thin" },
     bottom: { style: "medium" },
   };
+
+  // Re-assert the outer header frame after merge propagation so every edge
+  // remains identical to the BV table header.
+  ["B", "C", "D", "E", "F", "G", "H", "I", "J"].forEach((col) => {
+    ws.getCell(`${col}${hr}`).border = {
+      ...ws.getCell(`${col}${hr}`).border,
+      top: { style: "medium" },
+    };
+    ws.getCell(`${col}${hr + 1}`).border = {
+      ...ws.getCell(`${col}${hr + 1}`).border,
+      bottom: { style: "medium" },
+    };
+  });
 
   r = hr + 2;
   let grandRap = 0,

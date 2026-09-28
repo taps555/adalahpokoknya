@@ -118,7 +118,7 @@ router.get("/projects/:projectId/export-all-tabs", verifyToken, authorizeRoles("
     
     // General
     const wsRabGen = wb.addWorksheet("RAB General");
-    await buildRabSheet(wsRabGen, projectId, project, "GENERAL");
+    await buildRabSheet(wsRabGen, projectId, project, { includeAllCategories: true });
     const wsBvGen = wb.addWorksheet("BV General");
     await buildBvSheet(wsBvGen, projectId, project, "GENERAL");
 
