@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { normalizeAuditSnapshot, buildFieldChanges } = require("./bvRabAuditService");
 
 const LOCKED_APPROVAL_STATUSES = new Set(["PENDING_REVIEW", "APPROVED"]);
+const BV_RAB_APPROVAL_ENABLED = process.env.BV_RAB_APPROVAL_ENABLED === "true";
 const SELLING_FIELDS = new Set(["rabUnitPrice", "rabTotalPrice"]);
 const ACTION_TRANSITIONS = Object.freeze({
   SUBMIT: { from: new Set(["DRAFT", "CHANGES_REQUESTED"]), to: "PENDING_REVIEW" },
@@ -148,6 +149,8 @@ async function getLatestApprovedApproval(db, projectId) {
 
 async function assertProjectEditable(db, projectId) {
   if (!projectId) throw new Error("Project untuk perubahan BV/RAB tidak ditemukan.");
+  if (!BV_RAB_APPROVAL_ENABLED) return null;
+
   const approval = await getCurrentApproval(db, projectId);
   if (approval && LOCKED_APPROVAL_STATUSES.has(approval.status)) {
     const error = new Error(
