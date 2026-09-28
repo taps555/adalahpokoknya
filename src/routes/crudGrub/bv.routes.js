@@ -246,6 +246,24 @@ router.post(
     if (finalWorkCategoryId && !projectCategory) {
       return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada project." });
     }
+    // Item BV root baru wajib memilih kategori pekerjaan nyata. General bukan
+    // kategori pekerjaan yang bisa dipilih, hanya tampilan gabungan di UI.
+    if (!parent) {
+      const projectHasCategories = (project.workCategories || []).length > 0;
+      if (projectHasCategories && !finalWorkCategoryId) {
+        return res.status(400).json({ error: "Pilih kategori pekerjaan terlebih dahulu." });
+      }
+      if (!projectHasCategories && !finalWorkCategoryId
+        && !["SIPIL", "INTERIOR"].includes(finalDisciplineLabel)) {
+        return res.status(400).json({ error: "Pilih kategori pekerjaan terlebih dahulu." });
+      }
+      const chosenCode = String(projectCategory?.workCategory?.code || "").trim().toUpperCase();
+      if (finalWorkCategoryId && chosenCode === "GENERAL") {
+        return res.status(400).json({
+          error: "Kategori General tidak dapat dipilih. Pilih kategori pekerjaan lain.",
+        });
+      }
+    }
     let finalName = name;
     let finalUnit = paymentUnit;
 
@@ -1980,7 +1998,7 @@ async function buildBvSheetFiltered(
   wb,
   projectId,
   project,
-  { sheetName, workCategoryId = null, categoryCode = "GENERAL" },
+  { sheetName, workCategoryId = null, categoryCode = "GENERAL", isLegacyOnly = false, legacyCategoryIds = [] },
 ) {
   const ws = wb.addWorksheet(sheetName);
   // Patch: sementara ambil semua data, nanti filter di helper
@@ -2021,22 +2039,30 @@ async function buildBvSheetFiltered(
   });
 
   // Filter utama memakai FK kategori. disciplineLabel dipertahankan untuk data legacy.
-  const filterBvItemsRecursive = (items) => {
-    if (!workCategoryId && categoryCode === "GENERAL") return items || [];
+    const filterBvItemsRecursive = (items) => {
+      const recurse = (list) => (list || []).flatMap((item) => {
+        const children = recurse(item.children || []);
+        if (isLegacyOnly) {
+          const itemLabel = String(item.disciplineLabel || "GENERAL").toUpperCase();
+          const matchesLegacy = (!item.workCategoryId && itemLabel === "GENERAL")
+            || legacyCategoryIds.includes(item.workCategoryId);
+          if (!matchesLegacy && children.length === 0) return [];
+          return [{ ...item, children }];
+        }
+        if (!workCategoryId && categoryCode === "GENERAL") return [item, ...(item.children || [])];
 
-    return (items || []).flatMap((item) => {
-      const children = filterBvItemsRecursive(item.children || []);
-      const itemLabel = String(item.disciplineLabel || "GENERAL").toUpperCase();
-      const matches = workCategoryId
-        ? item.workCategoryId === workCategoryId
-          || (!item.workCategoryId
-            && ["SIPIL", "INTERIOR"].includes(categoryCode)
-            && itemLabel === categoryCode)
-        : !item.workCategoryId && itemLabel === categoryCode;
-      if (!matches && children.length === 0) return [];
-      return [{ ...item, children }];
-    });
-  };
+        const itemLabel2 = String(item.disciplineLabel || "GENERAL").toUpperCase();
+        const matches = workCategoryId
+          ? item.workCategoryId === workCategoryId
+            || (!item.workCategoryId
+              && ["SIPIL", "INTERIOR"].includes(categoryCode)
+              && itemLabel2 === categoryCode)
+          : !item.workCategoryId && itemLabel2 === categoryCode;
+        if (!matches && children.length === 0) return [];
+        return [{ ...item, children }];
+      });
+      return recurse(items);
+    };
 
   const filteredGroups = groups.map((group) => {
     const filteredBv = filterBvItemsRecursive(group.bvItems || []);
@@ -2307,6 +2333,7 @@ router.get(
       .slice(0, 28);
     const configuredCategories = (project.workCategories || [])
       .filter((entry) => entry.workCategory?.isActive !== false)
+      .filter((entry) => String(entry.workCategory?.code || "").trim().toUpperCase() !== "GENERAL")
       .map((entry) => ({
         sheetName: `BV ${safeSheetName(entry.workCategory.code)}`,
         workCategoryId: entry.workCategoryId,
@@ -2320,12 +2347,26 @@ router.get(
           { sheetName: "BV INT", workCategoryId: null, categoryCode: "INTERIOR", categoryName: "Interior" },
         ];
     const categorySheets = configuredCategories.length > 0 ? configuredCategories : legacyCategories;
-    const generalSheet = {
-      sheetName: "BV GENERAL",
-      workCategoryId: null,
-      categoryCode: "GENERAL",
-      categoryName: "Semua",
-    };
+
+    // Data lama General tetap harus diekspor, bukan hilang. Sheet "LAINNYA"
+    // dibuat hanya bila ada BvItem root legacy: FK null + disciplineLabel
+    // GENERAL, atau FK menunjuk kategori master ber-kode GENERAL.
+    const legacyRootCategoryIds = (project.workCategories || [])
+      .filter((entry) => String(entry.workCategory?.code || "").trim().toUpperCase() === "GENERAL")
+      .map((entry) => entry.workCategoryId)
+      .filter(Boolean);
+    const legacyItemCount = await prisma.bvItem.count({
+      where: {
+        projectId,
+        parentBvItemId: null,
+        OR: [
+          ...(legacyRootCategoryIds.length > 0
+            ? [{ workCategoryId: { in: legacyRootCategoryIds } }]
+            : []),
+          { workCategoryId: null, disciplineLabel: "GENERAL" },
+        ],
+      },
+    });
 
     let selectedSheets;
     if (requestedWorkCategoryId) {
@@ -2336,10 +2377,23 @@ router.get(
         return res.status(400).json({ error: "Kategori pekerjaan tidak aktif pada proyek ini." });
       }
       selectedSheets = [selectedCategory];
-    } else if (requestedScope === "ALL") {
-      selectedSheets = [generalSheet, ...categorySheets];
-    } else if (requestedScope === "GENERAL") {
-      selectedSheets = [generalSheet];
+    } else if (["ALL", "SEMUA", "GENERAL"].includes(requestedScope)) {
+      // Scope gabungan: satu sheet per kategori aktif, plus sheet "LAINNYA"
+      // (hanya jika ada item legacy) sebagai wadah data lama.
+      selectedSheets = categorySheets;
+      if (legacyItemCount > 0) {
+        selectedSheets = [
+          {
+            sheetName: "BV LAINNYA",
+            workCategoryId: null,
+            categoryCode: "GENERAL",
+            categoryName: "Data lama",
+            isLegacyOnly: true,
+            legacyCategoryIds: legacyRootCategoryIds,
+          },
+          ...selectedSheets,
+        ];
+      }
     } else {
       const normalizedScope = requestedScope === "CIVIL" ? "SIPIL" : requestedScope;
       const selectedCategory = categorySheets.find(

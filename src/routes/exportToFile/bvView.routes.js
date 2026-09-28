@@ -595,11 +595,16 @@ router.get(
         const requestedDiscipline = String(req.query.discipline || "GENERAL")
           .trim()
           .toUpperCase();
-        if (!["GENERAL", "INTERIOR", "SIPIL", "CIVIL"].includes(requestedDiscipline)) {
+        const isAllCategoryView = ["GENERAL", "SEMUA", "ALL"].includes(requestedDiscipline);
+        if (!isAllCategoryView && !["INTERIOR", "SIPIL", "CIVIL"].includes(requestedDiscipline)) {
           return res.status(400).send("Kategori View BV tidak valid.");
         }
-        legacyDiscipline = normalizeViewDiscipline(requestedDiscipline);
-        categoryTitle = legacyDiscipline === "SIPIL" ? "CIVIL / SIPIL" : legacyDiscipline;
+        legacyDiscipline = isAllCategoryView
+          ? "GENERAL"
+          : normalizeViewDiscipline(requestedDiscipline);
+        categoryTitle = isAllCategoryView
+          ? "SEMUA KATEGORI"
+          : legacyDiscipline === "SIPIL" ? "CIVIL / SIPIL" : legacyDiscipline;
       }
 
       const filteredGroups = filterGroupsByCategory(groups, { workCategoryId, legacyDiscipline });

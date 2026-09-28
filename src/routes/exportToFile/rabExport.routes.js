@@ -501,35 +501,66 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res
     const wb = new ExcelJS.Workbook();
     const usedSheetNames = new Set();
 
-    const generalConfig = { workCategoryId: null, workCategory: { code: "GENERAL" } };
     const renderCategorySheet = async (config, modeOverride = null) => {
       const categoryCode = config.workCategory?.code || "GENERAL";
       const sheetMode = modeOverride || mode;
       const sheetName = uniqueSheetName(
         usedSheetNames,
         sheetMode === "COMBINED" ? "RAP-RAB" : sheetMode,
-        categoryCode,
+        config.sheetLabel || categoryCode,
       );
       const ws = wb.addWorksheet(sheetName);
-      const categoryFilter = config.workCategoryId
-        ? { workCategoryId: config.workCategoryId, categoryCode }
-        : categoryCode;
+      const categoryFilter = config.categoryFilter
+        || (config.workCategoryId
+          ? { workCategoryId: config.workCategoryId, categoryCode }
+          : categoryCode);
       await buildRabSheet(ws, projectId, project, categoryFilter, {
         mode: sheetMode,
         categoryTitle: categoryCode,
       });
     };
 
-    const renderGeneralSheet = async (generalMode) => renderCategorySheet(generalConfig, generalMode);
-
     const explicitCategory = Boolean(workCategoryId || discipline);
 
+    // Item legacy tanpa kategori hanya dapat sheet sendiri bila datanya ada,
+    // supaya file export tidak berisi sheet kosong.
+    const legacyGeneralCategoryIds = (project.workCategories || [])
+      .filter((entry) => String(entry.workCategory?.code || "").trim().toUpperCase() === "GENERAL")
+      .map((entry) => entry.workCategoryId)
+      .filter(Boolean);
+    const legacyItemWhere = legacyGeneralCategoryIds.length > 0
+      ? {
+          OR: [
+            { workCategoryId: null, discipline: null },
+            { workCategoryId: { in: legacyGeneralCategoryIds } },
+          ],
+        }
+      : { workCategoryId: null, discipline: null };
+    const legacyUnassignedCount = explicitCategory
+      ? 0
+      : await prisma.rabItem.count({ where: { projectId, ...legacyItemWhere } });
+    const renderLegacySheetIfNeeded = async (modeOverride = null) => {
+      if (legacyUnassignedCount === 0) return;
+      await renderCategorySheet(
+        {
+          workCategoryId: null,
+          workCategory: { code: "LAINNYA" },
+          sheetLabel: "LAINNYA",
+          categoryFilter: {
+            includeUnassignedWorkCategoryIds: legacyGeneralCategoryIds,
+          },
+        },
+        modeOverride,
+      );
+    };
+
     if (mode === "COMBINED") {
-      // Tombol "Semua Kategori": GENERAL dulu, lalu pasangan RAP/RAB per kategori.
-      // Pilihan kategori eksplisit tetap hanya menghasilkan kategori itu.
+      // Tombol "Semua Kategori": sheet LAINNYA (item lama tanpa kategori) bila
+      // ada, lalu pasangan RAP/RAB per kategori aktif. Pilihan kategori
+      // eksplisit tetap hanya menghasilkan kategori itu.
       if (!explicitCategory && req.user?.role === "SUPER_ADMIN") {
-        await renderGeneralSheet("RAP");
-        await renderGeneralSheet("RAB");
+        await renderLegacySheetIfNeeded("RAP");
+        await renderLegacySheetIfNeeded("RAB");
       }
       for (const config of categories) {
         if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
@@ -538,12 +569,17 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res
       }
     } else {
       // RAP tersedia bagi SUPER_ADMIN, PROJECT_MANAGER, dan PERENCANA.
-      // GENERAL hanya memuat workCategoryId=null + discipline=null.
-      if (!explicitCategory) await renderGeneralSheet(mode);
+      if (!explicitCategory) await renderLegacySheetIfNeeded(mode);
       for (const config of categories) {
         if (!explicitCategory && String(config.workCategory?.code || "").toUpperCase() === "GENERAL") continue;
         await renderCategorySheet(config);
       }
+    }
+
+    // Jaga file tetap valid: workbook tanpa sheet akan korup saat diunduh.
+    if (wb.worksheets.length === 0) {
+      const ws = wb.addWorksheet("Data kosong");
+      ws.getCell("A1").value = "Belum ada data RAB yang dapat diekspor untuk proyek ini.";
     }
 
     const filenameMode = mode === "COMBINED" ? "RAP_RAB" : mode;
