@@ -7,6 +7,11 @@ const { verifyToken, authorizeRoles } = require("../middleware/auth");
 const {
   normalizeRequiredProjectWorkCategoryConfigs,
 } = require("../services/bvCalculationService");
+const {
+  deleteProjectWithSurveys,
+} = require("../services/projectDeletionService");
+const path = require("path");
+const fs = require("fs");
 
 const PROJECT_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
 
@@ -509,15 +514,19 @@ router.delete(
       if (!existing)
         return res.status(404).json({ error: "Project tidak ditemukan" });
 
-      // lepas pairing dulu, biar pasangan gak nyantol id yang dihapus
-      if (existing.pairedProjectId) {
-        await prisma.project.update({
-          where: { id: existing.pairedProjectId },
-          data: { pairedProjectId: null },
+      // Hapus Survey beserta area/foto/dimensinya dalam transaksi agar relasi
+      // RESTRICT tidak memblokir penghapusan project dan tidak meninggalkan
+      // file foto survey pada disk. BV/RAB/TimeSchedule tetap memakai cascade.
+      const { surveyPhotoUrls } = await deleteProjectWithSurveys(prisma, existing);
+      for (const url of surveyPhotoUrls) {
+        if (typeof url !== "string" || !url.startsWith("/uploads/surveys/")) continue;
+        fs.unlink(path.join("./public", url), (unlinkError) => {
+          if (unlinkError && unlinkError.code !== "ENOENT") {
+            console.error("Gagal hapus file foto survey:", url, unlinkError.message);
+          }
         });
       }
 
-      await prisma.project.delete({ where: { id } });
       res.status(204).send();
     } catch (err) {
       next(err);
