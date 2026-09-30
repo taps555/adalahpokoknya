@@ -4,6 +4,37 @@ const prisma = require("../../lib/prisma");
 const { buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const router = express.Router();
 
+/** GET /global-schedule — get all projects with start and end dates */
+router.get("/global-schedule", async (req, res) => {
+  try {
+    const projects = await prisma.project.findMany({
+      orderBy: { createdAt: "desc" },
+      include: { client: true }
+    });
+
+    const projectSchedules = await Promise.all(projects.map(async (p) => {
+      const agg = await prisma.timeSchedule.aggregate({
+        where: { rabItem: { projectId: p.id } },
+        _min: { startDate: true },
+        _max: { endDate: true },
+      });
+      return {
+        id: p.id,
+        name: p.name,
+        clientName: p.client?.name || "-",
+        projectStartDate: p.startDate,
+        scheduleStartDate: agg._min.startDate,
+        scheduleEndDate: agg._max.endDate,
+      };
+    }));
+
+    res.json(projectSchedules);
+  } catch (error) {
+    console.error("Error Get Global Schedule:", error);
+    res.status(500).json({ error: error.message || "Terjadi kesalahan server." });
+  }
+});
+
 /** PUT /projects/:projectId/start-date — set tanggal mulai proyek */
 router.put("/projects/:projectId/start-date", async (req, res) => {
   try {

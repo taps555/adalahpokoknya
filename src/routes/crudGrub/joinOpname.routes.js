@@ -83,6 +83,10 @@ router.put(
       if (existingSumExcludingToday + finalProgress > 100) {
         return res.status(400).json({ error: `Total akumulasi progress tidak boleh melebihi 100%. (Progress sebelum hari ini: ${existingSumExcludingToday}%)` });
       }
+      
+      if (existingSumExcludingToday + finalProgress < 0) {
+        return res.status(400).json({ error: `Total akumulasi progress tidak boleh kurang dari 0%. (Progress sebelum hari ini: ${existingSumExcludingToday}%)` });
+      }
 
       const existingProgress = existingProgressForToday;
 
