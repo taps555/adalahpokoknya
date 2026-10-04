@@ -38,6 +38,187 @@ router.get("/suppliers/:id", async (req, res) => {
 });
 
 /**
+ * ==========================
+ * MASTER JASA
+ * ==========================
+ */
+router.get("/jasa", async (req, res) => {
+  try {
+    const onlyActive = String(req.query.onlyActive || "").toLowerCase() === "true";
+    const q = String(req.query.q || "").trim();
+    const jasas = await prisma.jasa.findMany({
+      where: {
+        ...(onlyActive ? { isActive: true } : {}),
+        ...(q ? { nama: { contains: q, mode: "insensitive" } } : {}),
+      },
+      orderBy: { nama: "asc" },
+    });
+    res.json(jasas);
+  } catch (error) {
+    console.error("Get Jasa Error:", error);
+    res.status(500).json({ error: "Gagal mengambil data jasa" });
+  }
+});
+
+router.get("/jasa/:id", async (req, res) => {
+  try {
+    const jasa = await prisma.jasa.findUnique({ where: { id: req.params.id } });
+    if (!jasa) return res.status(404).json({ error: "Jasa tidak ditemukan" });
+    res.json(jasa);
+  } catch (error) {
+    console.error("Get Jasa Detail Error:", error);
+    res.status(500).json({ error: "Gagal mengambil detail jasa" });
+  }
+});
+
+router.post("/jasa", verifyToken, async (req, res) => {
+  try {
+    const {
+      nama,
+      nilaiKontrak = null,
+      bank = null,
+      noRekening = null,
+      atasNama = null,
+      kontakPerson = null,
+      isActive = true,
+    } = req.body || {};
+
+    if (!nama || !String(nama).trim()) {
+      return res.status(400).json({ error: "Nama jasa wajib diisi" });
+    }
+
+    const created = await prisma.jasa.create({
+      data: {
+        nama: String(nama).trim(),
+        nilaiKontrak: nilaiKontrak === null || nilaiKontrak === "" ? null : Number(nilaiKontrak),
+        bank,
+        noRekening,
+        atasNama,
+        kontakPerson,
+        isActive: Boolean(isActive),
+      },
+    });
+
+    const code = String(created.seq).padStart(5, "0");
+    const jasa = await prisma.jasa.update({
+      where: { id: created.id },
+      data: { code },
+    });
+
+    res.json(jasa);
+  } catch (error) {
+    console.error("Create Jasa Error:", error);
+    res.status(500).json({ error: "Gagal menambah jasa" });
+  }
+});
+
+router.put("/jasa/:id", verifyToken, async (req, res) => {
+  try {
+    const {
+      nama,
+      nilaiKontrak,
+      bank,
+      noRekening,
+      atasNama,
+      kontakPerson,
+      isActive,
+    } = req.body || {};
+
+    const jasa = await prisma.jasa.update({
+      where: { id: req.params.id },
+      data: {
+        ...(nama !== undefined ? { nama: String(nama || "").trim() } : {}),
+        ...(nilaiKontrak !== undefined
+          ? { nilaiKontrak: nilaiKontrak === null || nilaiKontrak === "" ? null : Number(nilaiKontrak) }
+          : {}),
+        ...(bank !== undefined ? { bank } : {}),
+        ...(noRekening !== undefined ? { noRekening } : {}),
+        ...(atasNama !== undefined ? { atasNama } : {}),
+        ...(kontakPerson !== undefined ? { kontakPerson } : {}),
+        ...(isActive !== undefined ? { isActive: Boolean(isActive) } : {}),
+      },
+    });
+
+    res.json(jasa);
+  } catch (error) {
+    console.error("Update Jasa Error:", error);
+    if (error.code === "P2025") return res.status(404).json({ error: "Jasa tidak ditemukan" });
+    res.status(500).json({ error: "Gagal update jasa" });
+  }
+});
+
+router.delete("/jasa/:id", verifyToken, async (req, res) => {
+  try {
+    await prisma.jasa.delete({ where: { id: req.params.id } });
+    res.json({ message: "Jasa berhasil dihapus" });
+  } catch (error) {
+    console.error("Delete Jasa Error:", error);
+    if (error.code === "P2025") return res.status(404).json({ error: "Jasa tidak ditemukan" });
+    if (error.code === "P2003") {
+      return res.status(409).json({ error: "Jasa tidak bisa dihapus, masih dipakai di PO/pembayaran" });
+    }
+    res.status(500).json({ error: "Gagal menghapus jasa" });
+  }
+});
+
+/**
+ * GET /api/jasa/:jasaId/nilai-kontrak
+ * Mengambil histori nilai kontrak untuk satu jasa
+ */
+router.get("/jasa/:jasaId/nilai-kontrak", async (req, res) => {
+  try {
+    const rows = await prisma.jasaNilaiKontrak.findMany({
+      where: { jasaId: req.params.jasaId },
+      orderBy: { tanggal: "desc" },
+    });
+    res.json(rows);
+  } catch (error) {
+    console.error("Get JasaNilaiKontrak Error:", error);
+    res.status(500).json({ error: "Gagal mengambil histori nilai kontrak" });
+  }
+});
+
+/**
+ * POST /api/jasa/:jasaId/nilai-kontrak
+ * Tambah entri baru histori nilai kontrak
+ */
+router.post("/jasa/:jasaId/nilai-kontrak", verifyToken, async (req, res) => {
+  try {
+    const { nilaiKontrak, keterangan, tanggal } = req.body || {};
+    if (!nilaiKontrak || isNaN(Number(nilaiKontrak))) {
+      return res.status(400).json({ error: "nilaiKontrak wajib diisi dan harus angka" });
+    }
+    const created = await prisma.jasaNilaiKontrak.create({
+      data: {
+        jasaId: req.params.jasaId,
+        nilaiKontrak: Number(nilaiKontrak),
+        keterangan: keterangan || null,
+        tanggal: tanggal ? new Date(tanggal) : new Date(),
+      },
+    });
+    res.json(created);
+  } catch (error) {
+    console.error("Create JasaNilaiKontrak Error:", error);
+    res.status(500).json({ error: "Gagal menambah nilai kontrak" });
+  }
+});
+
+/**
+ * DELETE /api/jasa/nilai-kontrak/:id
+ * Hapus entri histori nilai kontrak
+ */
+router.delete("/jasa/nilai-kontrak/:id", verifyToken, async (req, res) => {
+  try {
+    await prisma.jasaNilaiKontrak.delete({ where: { id: req.params.id } });
+    res.json({ message: "Entri nilai kontrak dihapus" });
+  } catch (error) {
+    console.error("Delete JasaNilaiKontrak Error:", error);
+    if (error.code === "P2025") return res.status(404).json({ error: "Data tidak ditemukan" });
+    res.status(500).json({ error: "Gagal menghapus nilai kontrak" });
+  }
+});
+
+/**
  * GET /api/finance/po
  * Mengambil daftar semua Surat PO untuk ditampilkan di tabel
  */

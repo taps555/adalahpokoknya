@@ -362,6 +362,7 @@ router.post("/po", verifyToken, async (req, res) => {
   try {
     const {
       supplierId,
+      jasaId,
       projectId,
       kategori,
       kategoriPO,
@@ -383,8 +384,9 @@ router.post("/po", verifyToken, async (req, res) => {
     } = req.body;
     // poNumber dihapus dari destructure — gak diterima dari frontend lagi
 
-    if (!supplierId || !projectId) {
-      return res.status(400).json({ error: "Supplier dan Proyek wajib diisi" });
+    const isPoJasa = (kategoriPO || "MATERIAL") === "JASA";
+    if ((!supplierId && !isPoJasa) || (isPoJasa && !jasaId) || !projectId) {
+      return res.status(400).json({ error: "Data wajib kurang lengkap (project + supplier/jasa)." });
     }
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Minimal 1 item PO harus diisi" });
@@ -430,7 +432,8 @@ router.post("/po", verifyToken, async (req, res) => {
       // 1. create dulu tanpa poNumber, biar seq auto-increment kegenerate
       const created = await tx.purchaseOrder.create({
         data: {
-          supplierId,
+          supplierId: isPoJasa ? null : (!supplierId || supplierId === "null" || supplierId === "undefined" || supplierId === "" ? null : supplierId),
+          jasaId: isPoJasa ? (!jasaId || jasaId === "null" || jasaId === "undefined" || jasaId === "" ? null : jasaId) : null,
           projectId,
           kategori,
           kategoriPO: kategoriPO || "MATERIAL",
@@ -465,6 +468,7 @@ router.post("/po", verifyToken, async (req, res) => {
 
               return {
                 materialRequestId: mrId, // <-- Pakai ID yang sudah dicuci
+                rabItemId: !item.rabItemId || item.rabItemId === "null" || item.rabItemId === "undefined" || item.rabItemId === "" ? null : item.rabItemId,
                 description: item.description || "Tanpa Deskripsi",
                 description2: item.description2 || null,
                 qty: Number(item.qty || 0),
@@ -488,7 +492,9 @@ router.post("/po", verifyToken, async (req, res) => {
       const poNumber =
         created.kategoriPO === "HABIS_PAKAI"
           ? `PHB-${urutan}`
-          : `PO/GLD/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}/${urutan}`;
+          : created.kategoriPO === "JASA"
+            ? `POJ-${urutan}`
+            : `PO/GLD/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()}/${urutan}`;
 
       const po = await tx.purchaseOrder.update({
         where: { id: created.id },
@@ -538,6 +544,8 @@ router.post("/po", verifyToken, async (req, res) => {
     }
     if (error.code === "P2003") {
       // Foreign key constraint violation
+      console.error("P2003 Meta:", error.meta);
+      require('fs').writeFileSync('d:/projekbaru/backend/adalahpokoknya/p2003_log.txt', JSON.stringify({ meta: error.meta, body: req.body }, null, 2));
       return res.status(400).json({ error: "Referensi data tidak valid (foreign key). Periksa supplier, project, atau material request ID." });
     }
     res.status(500).json({ error: "Gagal membuat surat PO: " + error.message });
@@ -556,6 +564,7 @@ router.get("/po", verifyToken, async (req, res) => {
       where,
       include: {
         supplier: true,
+        jasa: true,
         project: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
         approvedBy: { select: { id: true, name: true, role: true } },
@@ -565,6 +574,9 @@ router.get("/po", verifyToken, async (req, res) => {
           include: {
             materialRequest: {
               select: { groupName: true, jobName: true, estimatedVolume: true, pricePerUnit: true },
+            },
+            rabItem: {
+              include: { dailyProgress: true },
             },
           },
         },
@@ -702,9 +714,10 @@ router.get("/po/inbox-atasan", verifyToken, async (req, res) => {
       where,
       include: {
         supplier: true,
+        jasa: true,
         project: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
-        items: { orderBy: { id: "asc" } },
+        items: { include: { rabItem: true, materialRequest: true }, orderBy: { id: "asc" } },
       },
       orderBy: { verifiedAt: "asc" },
     });
@@ -729,8 +742,9 @@ router.get("/po/inbox-finance", verifyToken, async (req, res) => {
       where,
       include: {
         supplier: true,
+        jasa: true,
         project: { select: { id: true, name: true } },
-        items: { orderBy: { id: "asc" } },
+        items: { include: { rabItem: true, materialRequest: true }, orderBy: { id: "asc" } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -751,6 +765,7 @@ router.get("/po/:id", verifyToken, async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
+        jasa: true,
         project: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true, role: true } },
         approvedBy: { select: { id: true, name: true, role: true } },
@@ -801,7 +816,7 @@ router.put(
           verifiedAt: new Date(),
           catatanFinance: catatanFinance ? String(catatanFinance).trim() : null,
         },
-        include: { supplier: true, items: true, project: { select: { id: true, name: true } } },
+        include: { supplier: true, jasa: true, items: true, project: { select: { id: true, name: true } } },
       });
 
       // Otomatis buat Pengajuan Pembayaran agar atasan bisa approve
@@ -816,7 +831,8 @@ router.put(
           pengajuan = await prisma.pengajuanPembayaran.create({
             data: {
               noPengajuan,
-              supplierId: po.supplierId,
+              supplierId: po.supplierId || null,
+              jasaId: po.jasaId || null,
               poId: po.id,
               projectId: po.projectId,
               tanggal: new Date(),
@@ -906,23 +922,24 @@ router.put(
           rejectedAt: null,
           rejectedById: null,
         },
-        include: { supplier: true },
+        include: { supplier: true, jasa: true },
       });
 
       // Jika pembayaran cash/transfer, langsung buat Pembayaran Supplier
       let pembayaran = null;
       try {
-        const isCash = /cash|transfer/i.test(po.caraPembayaran || "");
-        if (isCash) {
+        if (po.kategoriPO === "MATERIAL" || po.kategoriPO === "JASA") {
           const created = await prisma.pembayaranSupplier.create({
             data: {
               supplierId: po.supplierId,
+              jasaId: po.jasaId,
               poId: po.id,
               tanggal: new Date(),
-              jumlahBayar: po.grandTotal || po.subTotal || 0,
+              totalTagihan: po.grandTotal || po.subTotal || 0,
+              jumlahBayar: 0,
               metodeBayar: /cash/i.test(po.caraPembayaran || "") ? "CASH" : "TRANSFER",
               keterangan: `Pembayaran otomatis PO ${po.poNumber || po.id}`,
-              status: "PENDING",
+              status: "BELUM_BAYAR",
             },
           });
 
@@ -960,6 +977,27 @@ router.put(
               verifiedById: po.verifiedById,
               verifiedAt: po.verifiedAt,
               rejectReason: null,
+            },
+          });
+        } else {
+          const seq = await prisma.pengajuanPembayaran.count({});
+          const noPengajuan = `PJB-${String(seq + 1).padStart(5, "0")}`;
+          pengajuan = await prisma.pengajuanPembayaran.create({
+            data: {
+              noPengajuan,
+              supplierId: po.supplierId || null,
+              jasaId: po.jasaId || null,
+              poId: po.id,
+              projectId: po.projectId,
+              tanggal: new Date(),
+              totalTagihan: po.grandTotal || po.subTotal || 0,
+              status: "APPROVED",
+              verifiedById: po.verifiedById || null,
+              verifiedAt: po.verifiedAt || null,
+              approvedById: req.user?.userId || null,
+              approvedAt: new Date(),
+              rejectReason: null,
+              items: null,
             },
           });
         }
@@ -1108,6 +1146,7 @@ router.put("/po/:id", verifyToken, async (req, res) => {
     const {
       // poNumber dihapus dari destructure — gak diterima dari body, biar gak ke-overwrite
       supplierId,
+      jasaId,
       projectId,
       kategori,
       tanggal,
@@ -1173,7 +1212,8 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       const po = await tx.purchaseOrder.update({
         where: { id: req.params.id },
         data: {
-          supplierId: String(supplierId),
+          supplierId: supplierId ? String(supplierId) : null,
+          jasaId: jasaId ? String(jasaId) : null,
           projectId: String(projectId),
           kategori,
           tanggal: tanggal ? new Date(tanggal) : undefined,
@@ -1347,6 +1387,93 @@ router.get("/finance/:projectId/price-comparison", async (req, res) => {
   } catch (error) {
     console.error("Price Comparison Error:", error);
     res.status(500).json({ error: "Gagal membandingkan harga" });
+  }
+});
+
+router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
+  try {
+    const { projectId } = req.body || {};
+    if (!projectId) return res.status(400).json({ error: "projectId wajib diisi" });
+
+    // 1. Ambil RabItem yang category-nya JASA/UPAH
+    const rabItems = await prisma.rabItem.findMany({
+      where: {
+        projectId,
+        category: { in: ["UPAH", "JASA", "Upah", "Jasa", "upah", "jasa"] },
+      },
+      orderBy: [{ order: "asc" }],
+      include: {
+        group: { include: { parent: true } },
+        parent: { include: { parent: true } },
+      },
+    });
+
+    const resultItems = rabItems.map((it) => {
+      const rapQty = Number(it.volume || 0);
+      const rapPrice = Number(it.rabUnitPrice || 0);
+      const rapTotal = rapQty * rapPrice;
+      const overUnderNotes = [];
+      if (!rapQty || rapQty <= 0) overUnderNotes.push("Volume RAP belum terisi");
+      if (!rapPrice || rapPrice <= 0) overUnderNotes.push("Harga RAP belum terisi");
+      return {
+        uniqueId: `item_${it.id}`,
+        rabItemId: it.id,
+        itemName: it.name,
+        unit: it.paymentUnit || "-",
+        rapQty,
+        rapPrice,
+        rapTotal,
+        groupName: it.group?.name || null,
+        jobName: it.parent?.name || it.name,
+        notes: overUnderNotes.join("; ") || null,
+      };
+    });
+
+    // 2. Ambil RabItemComponent yang section-nya UPAH
+    const rabItemComps = await prisma.rabItemComponent.findMany({
+      where: {
+        section: "UPAH",
+        rabItem: { projectId },
+      },
+      include: {
+        rabItem: {
+          include: {
+            group: { include: { parent: true } },
+            parent: { include: { parent: true } },
+          },
+        },
+      },
+    });
+
+    const resultComps = rabItemComps.map((comp) => {
+      const it = comp.rabItem;
+      const rapQty = Number(comp.coefficient || 0) * Number(it.volume || 0);
+      const rapPrice = Number(comp.unitPrice || 0);
+      const rapTotal = rapQty * rapPrice;
+      const overUnderNotes = [];
+      if (!rapQty || rapQty <= 0) overUnderNotes.push("Volume RAP belum terisi");
+      if (!rapPrice || rapPrice <= 0) overUnderNotes.push("Harga RAP belum terisi");
+      return {
+        uniqueId: `comp_${comp.id}`,
+        rabItemId: it.id, // Gunakan ID parent (RabItem) agar sesuai dengan relasi database
+        itemName: `${comp.name} (${it.name})`,
+        unit: comp.unit || "-",
+        rapQty,
+        rapPrice,
+        rapTotal,
+        groupName: it.group?.name || null,
+        jobName: it.parent?.name || it.name,
+        notes: overUnderNotes.join("; ") || null,
+      };
+    });
+
+    // Gabungkan dan hilangkan duplikat jika kebetulan itemnya sama (meskipun jarang terjadi karena ID beda)
+    const result = [...resultItems, ...resultComps];
+
+    res.json({ projectId, items: result });
+  } catch (error) {
+    console.error("Get PO Jasa RAP Plan Error:", error);
+    res.status(500).json({ error: "Gagal mengambil rencana PO Jasa dari RAP" });
   }
 });
 

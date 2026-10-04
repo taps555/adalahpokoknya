@@ -248,6 +248,7 @@ model Project {
 
   rabStatus        RabStatus         @default(DRAFT)
   materialRequests MaterialRequest[]
+  jasaNilaiKontraks JasaNilaiKontrak[]
 
   rabGroups        RabGroup[]
   surveyReports    SurveyReport[]
@@ -332,6 +333,7 @@ model RabItem {
 
   components    RabItemComponent[]
   dailyProgress DailyProgress[]
+  poItems       PurchaseOrderItem[]
 
   // 👇 TAMBAHKAN 3 BARIS INI UNTUK RELASI INDUK-ANAK DI RAB ITEM 👇
   parentId String?
@@ -784,6 +786,7 @@ enum POStatus {
 enum KategoriPO {
   MATERIAL
   HABIS_PAKAI
+  JASA
 }
 
 /// Permintaan pembelian habis pakai dari Item Tracking (lapangan).
@@ -920,13 +923,53 @@ model Supplier {
   bankAccount         String?
   status              SupplierStatus?       @default(ACTIVE)
   orders              PurchaseOrder[]
-  items               SupplierItem[]
+  items               SupplierItem[]          @relation("SupplierItems")
   returPembelian      ReturPembelian[]
   pengajuanPembayaran PengajuanPembayaran[] @relation("PengajuanSupplier")
   pembayaranSupplier  PembayaranSupplier[]  @relation("PembayaranSupplier")
   invoicePenagihan    InvoicePenagihan[]    @relation("InvoiceSupplier")
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt
+}
+
+model Jasa {
+  id            String   @id @default(uuid())
+  seq           Int      @default(autoincrement())
+  code          String?  @unique
+  nama          String
+  nilaiKontrak  Float?
+  bank          String?
+  noRekening    String?
+  atasNama      String?
+  kontakPerson  String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  purchaseOrders      PurchaseOrder[]
+  pengajuanPembayaran PengajuanPembayaran[] @relation("PengajuanJasa")
+  pembayaranJasa      PembayaranSupplier[]  @relation("PembayaranJasa")
+  nilaiKontrakHistory JasaNilaiKontrak[]
+
+  @@index([nama])
+  @@index([isActive])
+}
+
+model JasaNilaiKontrak {
+  id          String   @id @default(cuid())
+  jasaId      String
+  jasa        Jasa     @relation(fields: [jasaId], references: [id])
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id])
+  rabItemId   String?  // Can point to RabItem or RabItemComponent ID
+  tanggal     DateTime @default(now())
+  nilaiKontrak Float
+  keterangan  String?
+  createdAt   DateTime @default(now())
+
+  @@index([jasaId])
+  @@index([projectId])
+  @@index([tanggal])
 }
 
 model SupplierPriceHistory {
@@ -943,8 +986,8 @@ model SupplierPriceHistory {
 
 model SupplierItem {
   id         String   @id @default(uuid())
-  supplierId String
-  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  supplierId    String?
+  supplier      Supplier?      @relation("SupplierItems", fields: [supplierId], references: [id])
 
   itemName          String // nama dasar, cth: "Amplas Klassik"
   variantName       String? // cth: "80", "100", "120" — null kalau item gak punya varian
@@ -973,8 +1016,10 @@ model PurchaseOrder {
   poNumber String? @unique
   seq      Int     @default(autoincrement())
 
-  supplierId   String
-  supplier     Supplier  @relation(fields: [supplierId], references: [id])
+  supplierId   String?
+  supplier     Supplier? @relation(fields: [supplierId], references: [id])
+  jasaId       String?
+  jasa         Jasa?     @relation(fields: [jasaId], references: [id])
   attn         String?
   projectId    String
   project      Project   @relation(fields: [projectId], references: [id])
@@ -1031,6 +1076,9 @@ model PurchaseOrder {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+  @@index([jasaId])
 }
 
 model PurchaseOrderItem {
@@ -1039,6 +1087,8 @@ model PurchaseOrderItem {
   purchaseOrder     PurchaseOrder        @relation(fields: [poId], references: [id], onDelete: Cascade)
   materialRequestId String?
   materialRequest   MaterialRequestItem? @relation(fields: [materialRequestId], references: [id])
+  rabItemId         String?
+  rabItem           RabItem?             @relation(fields: [rabItemId], references: [id])
 
   code         String?
   description  String
@@ -1113,6 +1163,9 @@ enum PembayaranStatus {
   PENDING
   PARTIAL
   PAID
+  BELUM_BAYAR
+  BON
+  LUNAS
 }
 
 enum InvoiceBayarStatus {
@@ -1175,8 +1228,10 @@ model PengajuanPembayaran {
   id            String         @id @default(cuid())
   noPengajuan   String?        @unique
   seq           Int            @default(autoincrement())
-  supplierId    String
-  supplier      Supplier       @relation("PengajuanSupplier", fields: [supplierId], references: [id])
+  supplierId    String?
+  supplier      Supplier?      @relation("PengajuanSupplier", fields: [supplierId], references: [id])
+  jasaId        String?
+  jasa          Jasa?          @relation("PengajuanJasa", fields: [jasaId], references: [id])
   poId          String?
   purchaseOrder PurchaseOrder? @relation(fields: [poId], references: [id])
   projectId     String?
@@ -1211,8 +1266,10 @@ model PembayaranSupplier {
   id            String               @id @default(cuid())
   noPembayaran  String?              @unique
   seq           Int                  @default(autoincrement())
-  supplierId    String
-  supplier      Supplier             @relation("PembayaranSupplier", fields: [supplierId], references: [id])
+  supplierId    String?
+  supplier      Supplier?            @relation("PembayaranSupplier", fields: [supplierId], references: [id])
+  jasaId        String?
+  jasa          Jasa?                @relation("PembayaranJasa", fields: [jasaId], references: [id])
   pengajuanId   String?
   pengajuan     PengajuanPembayaran? @relation(fields: [pengajuanId], references: [id])
   poId          String?

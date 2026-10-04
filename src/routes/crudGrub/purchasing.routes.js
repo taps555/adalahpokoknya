@@ -247,9 +247,11 @@ router.get("/pengajuan-bayar", async (req, res) => {
       where,
       include: {
         supplier: { select: { name: true, id: true } },
+        jasa: { select: { id: true, nama: true } },
         purchaseOrder: {
           include: {
             supplier: { select: { id: true, name: true } },
+            jasa: { select: { id: true, nama: true } },
             project: { select: { id: true, name: true } },
             items: {
               orderBy: { id: "asc" },
@@ -289,9 +291,11 @@ router.get("/pengajuan-bayar/inbox-atasan", async (req, res) => {
       where,
       include: {
         supplier: { select: { name: true, id: true } },
+        jasa: { select: { id: true, nama: true } },
         purchaseOrder: {
           include: {
             supplier: { select: { id: true, name: true } },
+            jasa: { select: { id: true, nama: true } },
             project: { select: { id: true, name: true } },
             items: {
               orderBy: { id: "asc" },
@@ -327,9 +331,11 @@ router.get("/pengajuan-bayar/inbox-finance", async (req, res) => {
       where,
       include: {
         supplier: { select: { name: true, id: true } },
+        jasa: { select: { id: true, nama: true } },
         purchaseOrder: {
           include: {
             supplier: { select: { id: true, name: true } },
+            jasa: { select: { id: true, nama: true } },
             project: { select: { id: true, name: true } },
             items: { orderBy: { id: "asc" } },
           },
@@ -364,6 +370,7 @@ router.get("/pengajuan-bayar/po-siap-ajukan", async (req, res) => {
       where,
       include: {
         supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
         project: { select: { id: true, name: true } },
         approvedBy: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true } },
@@ -412,6 +419,7 @@ router.get("/pengajuan-bayar/riwayat-pembelian", async (req, res) => {
       where,
       include: {
         supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
         project: { select: { id: true, name: true } },
         approvedBy: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true } },
@@ -455,6 +463,7 @@ router.get("/pengajuan-bayar/po-approved", async (req, res) => {
       where,
       include: {
         supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
         project: { select: { id: true, name: true } },
         approvedBy: { select: { id: true, name: true } },
         verifiedBy: { select: { id: true, name: true } },
@@ -491,9 +500,11 @@ router.get("/pengajuan-bayar/:id", async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
+        jasa: true,
         purchaseOrder: {
           include: {
             supplier: true,
+            jasa: true,
             project: { select: { id: true, name: true } },
             items: { orderBy: { id: "asc" } },
           },
@@ -521,6 +532,7 @@ router.post("/pengajuan-bayar", verifyToken, async (req, res) => {
   try {
     const {
       supplierId,
+      jasaId,
       poId,
       projectId,
       tanggal,
@@ -529,50 +541,37 @@ router.post("/pengajuan-bayar", verifyToken, async (req, res) => {
       items,
     } = req.body;
 
-    if (!supplierId && !poId) {
-      return res.status(400).json({ error: "Supplier wajib diisi" });
+    if (!supplierId && !jasaId && !poId) {
+      return res.status(400).json({ error: "Supplier/Jasa wajib diisi" });
     }
 
-    // projectId & supplierId ikut PO kalau tidak dikirim FE
+    // projectId, supplierId & jasaId ikut PO kalau tidak dikirim FE
     let finalProjectId = projectId || null;
     let finalSupplierId = supplierId || null;
-    if ((!finalProjectId || !finalSupplierId) && poId) {
+    let finalJasaId = jasaId || null;
+    if ((!finalProjectId || (!finalSupplierId && !finalJasaId)) && poId) {
       const po = await prisma.purchaseOrder.findUnique({
         where: { id: poId },
-        select: { projectId: true, supplierId: true },
+        select: { projectId: true, supplierId: true, jasaId: true },
       });
       finalProjectId = finalProjectId || po?.projectId || null;
       finalSupplierId = finalSupplierId || po?.supplierId || null;
+      finalJasaId = finalJasaId || po?.jasaId || null;
     }
-    if (!finalSupplierId) {
-      return res.status(400).json({ error: "Supplier wajib diisi" });
+    if (!finalSupplierId && !finalJasaId) {
+      return res.status(400).json({ error: "Supplier/Jasa wajib diisi" });
     }
 
-    // Kalau pengajuan terkait PO yang sudah final (APPROVED), langsung finalkan
-    // pengajuan bayarnya karena finance sudah approve PO dan atasan sudah approve PO.
     let initialStatus = "PENDING";
     let verifiedById = null;
     let verifiedAt = null;
     let approvedById = null;
     let approvedAt = null;
 
-    if (poId) {
-      const po = await prisma.purchaseOrder.findUnique({
-        where: { id: poId },
-        select: { status: true, verifiedById: true, verifiedAt: true, approvedById: true, approvedAt: true },
-      });
-      if (po?.status === "APPROVED") {
-        initialStatus = "APPROVED";
-        verifiedById = po.verifiedById;
-        verifiedAt = po.verifiedAt;
-        approvedById = po.approvedById;
-        approvedAt = po.approvedAt;
-      }
-    }
-
     const created = await prisma.pengajuanPembayaran.create({
       data: {
         supplierId: finalSupplierId,
+        jasaId: finalJasaId,
         poId: poId || null,
         projectId: finalProjectId,
         tanggal: new Date(tanggal || Date.now()),
@@ -616,6 +615,7 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
   try {
     const {
       supplierId,
+      jasaId,
       poId,
       projectId,
       tanggal,
@@ -627,7 +627,8 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
     const pengajuan = await prisma.pengajuanPembayaran.update({
       where: { id: req.params.id },
       data: {
-        supplierId: supplierId || undefined,
+        supplierId: supplierId !== undefined ? (supplierId || null) : undefined,
+        jasaId: jasaId !== undefined ? (jasaId || null) : undefined,
         poId: poId !== undefined ? poId : undefined,
         projectId: projectId !== undefined ? projectId : undefined,
         tanggal: tanggal ? new Date(tanggal) : undefined,
@@ -704,65 +705,69 @@ router.put(
           .json({ error: "Pengajuan sudah ditolak, batalkan reject dulu." });
       }
 
-      const pengajuan = await prisma.pengajuanPembayaran.update({
-        where: { id: req.params.id },
+    const pengajuan = await prisma.pengajuanPembayaran.update({
+      where: { id: req.params.id },
+      data: {
+        status: "APPROVED",
+        approvedById: req.user?.userId || null,
+        approvedAt: new Date(),
+        rejectReason: null,
+      },
+    });
+
+    // Sinkronkan status PO terkait menjadi APPROVED jika belum
+    if (existing.poId) {
+      const poForPayment = await prisma.purchaseOrder.findUnique({
+        where: { id: existing.poId },
+      });
+
+      await prisma.purchaseOrder.update({
+        where: { id: existing.poId },
         data: {
           status: "APPROVED",
           approvedById: req.user?.userId || null,
           approvedAt: new Date(),
           rejectReason: null,
+          rejectedAt: null,
+          rejectedById: null,
         },
       });
 
-      // Sinkronkan status PO terkait menjadi APPROVED jika belum
-      if (existing.poId) {
-        await prisma.purchaseOrder.update({
-          where: { id: existing.poId },
-          data: {
-            status: "APPROVED",
-            approvedById: req.user?.userId || null,
-            approvedAt: new Date(),
-            rejectReason: null,
-            rejectedAt: null,
-            rejectedById: null,
-          },
+      // Saat pengajuan di-approve, selalu siapkan draft PembayaranSupplier default
+      if (poForPayment) {
+        const sudahAda = await prisma.pembayaranSupplier.findFirst({
+          where: { poId: poForPayment.id },
         });
+        if (!sudahAda) {
+          const totalTagihan = Number(poForPayment.grandTotal || poForPayment.subTotal || 0);
 
-        // Saat pengajuan di-approve, selalu siapkan draft PembayaranSupplier default BELUM_BAYAR (PENDING)
-        const poForPayment = await prisma.purchaseOrder.findUnique({
-          where: { id: existing.poId },
-        });
-        if (poForPayment) {
-          const sudahAda = await prisma.pembayaranSupplier.findFirst({
-            where: { poId: poForPayment.id },
+          const cara = String(poForPayment.caraPembayaran || "").toLowerCase();
+          let metodeDefault = "TRANSFER";
+          if (cara.includes("cash")) metodeDefault = "CASH";
+          else if (cara.includes("cek")) metodeDefault = "CEK";
+          else if (cara.includes("giro")) metodeDefault = "GIRO";
+          else if (cara.includes("tempo") || cara.includes("cicil") || cara.includes("termin") || cara.includes("kredit")) {
+            metodeDefault = "TEMPO";
+          }
+
+          const createdPembayaran = await prisma.pembayaranSupplier.create({
+            data: {
+              supplierId: poForPayment.supplierId,
+              jasaId: poForPayment.jasaId || null,
+              poId: poForPayment.id,
+              tanggal: new Date(),
+              totalTagihan,
+              jumlahBayar: 0,
+              totalTerbayar: 0,
+              sisaBayar: totalTagihan,
+              metodeBayar: metodeDefault,
+              keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
+              status: poForPayment.kategoriPO === "JASA" ? "BELUM_BAYAR" : "PENDING",
+              noPembayaran: poForPayment.kategoriPO === "JASA" ? null : undefined,
+            },
           });
-          if (!sudahAda) {
-            const totalTagihan = Number(poForPayment.grandTotal || poForPayment.subTotal || 0);
 
-            const cara = String(poForPayment.caraPembayaran || "").toLowerCase();
-            let metodeDefault = "TRANSFER";
-            if (cara.includes("cash")) metodeDefault = "CASH";
-            else if (cara.includes("cek")) metodeDefault = "CEK";
-            else if (cara.includes("giro")) metodeDefault = "GIRO";
-            else if (cara.includes("tempo") || cara.includes("cicil") || cara.includes("termin") || cara.includes("kredit")) {
-              metodeDefault = "TEMPO";
-            }
-
-            const createdPembayaran = await prisma.pembayaranSupplier.create({
-              data: {
-                supplierId: poForPayment.supplierId,
-                poId: poForPayment.id,
-                tanggal: new Date(),
-                totalTagihan,
-                jumlahBayar: 0,
-                totalTerbayar: 0,
-                sisaBayar: totalTagihan,
-                metodeBayar: metodeDefault,
-                keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
-                status: "PENDING",
-              },
-            });
-
+          if (poForPayment.kategoriPO !== "JASA") {
             const noPembayaran = await buildNoPembayaran({
               pembayaranId: createdPembayaran.id,
               tanggal: createdPembayaran.tanggal,
@@ -775,6 +780,7 @@ router.put(
           }
         }
       }
+    }
 
       res.json({ message: "Pengajuan bayar di-approve", data: pengajuan });
     } catch (error) {
@@ -899,12 +905,28 @@ router.get("/pembayaran-supplier", async (req, res) => {
     const pembayaran = await prisma.pembayaranSupplier.findMany({
       include: {
         supplier: { select: { name: true, id: true, type: true } },
+        jasa: { select: { id: true, nama: true } },
         pengajuan: { select: { noPengajuan: true, id: true } },
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
         purchaseOrder: {
           include: {
-            items: { include: { materialRequest: true } },
+            items: {
+              include: {
+                materialRequest: true,
+                rabItem: {
+                  select: {
+                    id: true,
+                    name: true,
+                    rabTotalPrice: true,
+                    dailyProgress: {
+                      select: { id: true, date: true, progressPercent: true },
+                      orderBy: { date: "asc" },
+                    },
+                  },
+                },
+              },
+            },
             project: { select: { id: true, name: true } },
           },
         },
@@ -928,10 +950,33 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
+        jasa: true,
         pengajuan: true,
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
-        purchaseOrder: { include: { supplier: true, project: true, items: { include: { materialRequest: true } } } },
+        purchaseOrder: {
+          include: {
+            supplier: true,
+            jasa: true,
+            project: true,
+            items: {
+              include: {
+                materialRequest: true,
+                rabItem: {
+                  select: {
+                    id: true,
+                    name: true,
+                    rabTotalPrice: true,
+                    dailyProgress: {
+                      select: { id: true, date: true, progressPercent: true },
+                      orderBy: { date: "asc" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
     if (!pembayaran)
@@ -952,6 +997,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
   try {
     const {
       supplierId,
+      jasaId,
       pengajuanId,
       poId,
       tanggal,
@@ -970,8 +1016,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
     const tanggalForm = tanggal ? new Date(tanggal) : new Date();
     const tanggalBayarInput = req.body.tanggalBayar ? new Date(req.body.tanggalBayar) : null;
 
-    if (!supplierId) {
-      return res.status(400).json({ error: "Supplier wajib diisi" });
+    if (!supplierId && !jasaId) {
+      return res.status(400).json({ error: "Supplier/Jasa wajib diisi" });
     }
     if (Number.isNaN(jumlahBayarInput) || jumlahBayarInput < 0) {
       return res.status(400).json({ error: "Jumlah bayar harus angka >= 0" });
@@ -981,19 +1027,48 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       ? await prisma.purchaseOrder.findUnique({
           where: { id: poId },
           include: {
-            items: { include: { materialRequest: true } },
+            items: { include: { materialRequest: true, rabItem: true } },
             project: { select: { id: true, name: true } },
             permintaanHabisPakai: { select: { id: true, poId: true } },
           },
         })
       : null;
 
+    const isJasaFlow = (po?.kategoriPO === "JASA") || !!jasaId;
+
     const totalTagihan = Math.max(
       0,
       totalTagihanInput || Number(po?.grandTotal || po?.subTotal || 0),
     );
 
-    if (totalTagihan > 0 && jumlahBayarInput > totalTagihan) {
+    let maxByProgress = totalTagihan;
+    if (isJasaFlow && po?.projectId) {
+      const poRabItemIds = (po.items || []).map((it) => it.rabItemId).filter(Boolean);
+      if (poRabItemIds.length > 0) {
+        const rabRows = await prisma.rabItem.findMany({
+          where: { id: { in: poRabItemIds }, projectId: po.projectId },
+          include: { dailyProgress: true },
+        });
+
+        const progressCap = rabRows.reduce((sum, r) => {
+          const accum = (r.dailyProgress || []).reduce((s, dp) => s + Number(dp.progressPercent || 0), 0);
+          const pct = Math.max(0, Math.min(100, accum));
+          return sum + (Number(r.rabTotalPrice || 0) * (pct / 100));
+        }, 0);
+
+        maxByProgress = Math.min(totalTagihan, progressCap);
+      }
+    }
+
+    if (jumlahBayarInput > 0 && jumlahBayarInput > maxByProgress) {
+      return res.status(400).json({
+        error: isJasaFlow
+          ? `Nominal bayar melebihi batas progress JO saat ini (${fmtRp(maxByProgress)}).`
+          : "Jumlah bayar tidak boleh melebihi total tagihan",
+      });
+    }
+
+    if (!isJasaFlow && totalTagihan > 0 && jumlahBayarInput > totalTagihan) {
       return res.status(400).json({ error: "Jumlah bayar tidak boleh melebihi total tagihan" });
     }
 
@@ -1004,10 +1079,16 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       tipeAkunKasBank || (rekeningBankId ? "BANK" : "KAS");
 
     let autoStatus = "PENDING";
-    if (totalTagihan > 0 && totalTerbayar >= totalTagihan) autoStatus = "PAID";
-    else if (totalTerbayar > 0) autoStatus = "PARTIAL";
+    if (isJasaFlow) {
+      if (totalTagihan > 0 && totalTerbayar >= totalTagihan) autoStatus = "LUNAS";
+      else if (totalTerbayar > 0) autoStatus = "BON";
+      else autoStatus = "BELUM_BAYAR";
+    } else {
+      if (totalTagihan > 0 && totalTerbayar >= totalTagihan) autoStatus = "PAID";
+      else if (totalTerbayar > 0) autoStatus = "PARTIAL";
+    }
 
-    if (status && ["PENDING", "PARTIAL", "PAID"].includes(status)) {
+    if (status && ["PENDING", "PARTIAL", "PAID", "BELUM_BAYAR", "BON", "LUNAS"].includes(status)) {
       autoStatus = status;
     }
 
@@ -1031,7 +1112,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
 
     const created = await prisma.pembayaranSupplier.create({
       data: {
-        supplierId,
+        supplierId: supplierId || null,
+        jasaId: jasaId || po?.jasaId || null,
         pengajuanId: pengajuanId || null,
         poId: poId || null,
         tanggal: tanggalForm,
@@ -1052,21 +1134,39 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       },
     });
 
-    const noPembayaran = await buildNoPembayaran({
-      pembayaranId: created.id,
-      tanggal: created.tanggal,
-    });
+    const noPembayaran = isJasaFlow
+      ? null
+      : await buildNoPembayaran({
+          pembayaranId: created.id,
+          tanggal: created.tanggal,
+        });
 
     const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: created.id },
       data: { noPembayaran },
       include: {
         supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
         purchaseOrder: {
           include: {
-            items: { include: { materialRequest: true } },
+            items: {
+              include: {
+                materialRequest: true,
+                rabItem: {
+                  select: {
+                    id: true,
+                    name: true,
+                    rabTotalPrice: true,
+                    dailyProgress: {
+                      select: { id: true, date: true, progressPercent: true },
+                      orderBy: { date: "asc" },
+                    },
+                  },
+                },
+              },
+            },
             permintaanHabisPakai: { select: { id: true, poId: true } },
           },
         },
@@ -1087,9 +1187,11 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(pembayaran.purchaseOrder || po);
 
         const tipeLabel =
-          metodeBayar === "TEMPO"
-            ? (sisaBayar <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
-            : "Pembayaran Supplier";
+          isJasaFlow
+            ? (sisaBayar <= 0 ? "Pelunasan Jasa" : "Pembayaran Jasa")
+            : metodeBayar === "TEMPO"
+              ? (sisaBayar <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
+              : "Pembayaran Supplier";
 
         await createTransaksiBukuBesar({
           tanggal: tanggalBayarInput || tanggalForm,
@@ -1098,7 +1200,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
           jenis: "KELUAR",
           nominal: jumlahBayarInput,
           noReferensi: noPembayaran,
-          pihak: pembayaran.supplier?.name || "Supplier",
+          pihak: pembayaran.supplier?.name || pembayaran.jasa?.nama || "Supplier/Jasa",
           keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
           keteranganVolume: ketVol,
           keteranganHarga: ketHrg,
@@ -1136,6 +1238,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
   try {
     const {
       supplierId,
+      jasaId,
       pengajuanId,
       poId,
       tanggal,
@@ -1158,11 +1261,12 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       where: { id: req.params.id },
       include: {
         supplier: true,
+        jasa: true,
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
         purchaseOrder: {
           include: {
-            items: { include: { materialRequest: true } },
+            items: { include: { materialRequest: true, rabItem: true } },
             project: { select: { id: true, name: true } },
             permintaanHabisPakai: { select: { id: true, poId: true } },
           },
@@ -1176,12 +1280,14 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       ? await prisma.purchaseOrder.findUnique({
           where: { id: poFinalId },
           include: {
-            items: { include: { materialRequest: true } },
+            items: { include: { materialRequest: true, rabItem: true } },
             project: { select: { id: true, name: true } },
             permintaanHabisPakai: { select: { id: true, poId: true } },
           },
         })
       : existing.purchaseOrder;
+
+    const isJasaFlow = (poFinal?.kategoriPO === "JASA") || !!(jasaId || existing.jasaId);
 
     const metodeFinal = metodeBayar || existing.metodeBayar || "TRANSFER";
     const tanggalFinal = tanggal ? new Date(tanggal) : existing.tanggal;
@@ -1224,10 +1330,16 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     const sisaBayarBaru = Math.max(totalTagihan - totalTerbayarBaru, 0);
 
     let autoStatus = "PENDING";
-    if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "PAID";
-    else if (totalTerbayarBaru > 0) autoStatus = "PARTIAL";
+    if (isJasaFlow) {
+      if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "LUNAS";
+      else if (totalTerbayarBaru > 0) autoStatus = "BON";
+      else autoStatus = "BELUM_BAYAR";
+    } else {
+      if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "PAID";
+      else if (totalTerbayarBaru > 0) autoStatus = "PARTIAL";
+    }
 
-    if (status && ["PENDING", "PARTIAL", "PAID"].includes(status)) {
+    if (status && ["PENDING", "PARTIAL", "PAID", "BELUM_BAYAR", "BON", "LUNAS"].includes(status)) {
       autoStatus = status;
     }
 
@@ -1260,7 +1372,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: req.params.id },
       data: {
-        supplierId: supplierId || undefined,
+        supplierId: supplierId !== undefined ? (supplierId || null) : undefined,
+        jasaId: jasaId !== undefined ? (jasaId || null) : undefined,
         pengajuanId: pengajuanId !== undefined ? pengajuanId : undefined,
         poId: poId !== undefined ? poId : undefined,
         tanggal: tanggalFinal,
@@ -1282,11 +1395,27 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       },
       include: {
         supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
         purchaseOrder: {
           include: {
-            items: { include: { materialRequest: true } },
+            items: {
+              include: {
+                materialRequest: true,
+                rabItem: {
+                  select: {
+                    id: true,
+                    name: true,
+                    rabTotalPrice: true,
+                    dailyProgress: {
+                      select: { id: true, date: true, progressPercent: true },
+                      orderBy: { date: "asc" },
+                    },
+                  },
+                },
+              },
+            },
             permintaanHabisPakai: { select: { id: true, poId: true } },
             project: { select: { id: true, name: true } },
           },
@@ -1307,9 +1436,23 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
 
         const tipeLabel =
-          metodeFinal === "TEMPO"
-            ? (sisaBayarBaru <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
-            : "Pembayaran Supplier";
+          isJasaFlow
+            ? (sisaBayarBaru <= 0 ? "Pelunasan Jasa" : "Pembayaran Jasa")
+            : metodeFinal === "TEMPO"
+              ? (sisaBayarBaru <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
+              : "Pembayaran Supplier";
+
+        if (isJasaFlow && !existing.noPembayaran && !pembayaran.noPembayaran) {
+          const generatedNo = await buildNoPembayaran({
+            pembayaranId: pembayaran.id,
+            tanggal: pembayaran.tanggal || new Date(),
+          });
+          await prisma.pembayaranSupplier.update({
+            where: { id: pembayaran.id },
+            data: { noPembayaran: generatedNo },
+          });
+          pembayaran.noPembayaran = generatedNo;
+        }
 
         await createTransaksiBukuBesar({
           tanggal: tanggalBayarFinal || pembayaran.tanggal || new Date(),
@@ -1318,7 +1461,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
           jenis: "KELUAR",
           nominal: nominalJurnal,
           noReferensi: pembayaran.noPembayaran || existing.noPembayaran || req.params.id,
-          pihak: pembayaran.supplier?.name || existing.supplier?.name || "Supplier",
+          pihak: pembayaran.supplier?.name || pembayaran.jasa?.nama || existing.supplier?.name || existing.jasa?.nama || "Supplier/Jasa",
           keterangan: `${tipeLabel}${keterangan ? ` - ${keterangan}` : ""}`,
           keteranganVolume: ketVol,
           keteranganHarga: ketHrg,
