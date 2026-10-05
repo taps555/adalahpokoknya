@@ -124,10 +124,25 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
 
   // ---- HEADER PROJECT INFO ----
   ws.mergeCells(`B${startRow}:C${startRow + 7}`);
-  ws.getCell(`B${startRow}`).value = "logo";
+  ws.getCell(`B${startRow}`).value = "";
   ws.getCell(`B${startRow}`).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   ws.getCell(`B${startRow}`).font = { bold: true };
   ws.getCell(`B${startRow}`).border = { top: medium, bottom: medium, left: medium, right: medium };
+
+  try {
+    const logoPath = require("path").join(__dirname, "../../public/assets/dives.png");
+    const logoId = ws.workbook.addImage({
+      filename: logoPath,
+      extension: "png",
+    });
+    ws.addImage(logoId, {
+      tl: { col: 1, row: startRow - 1 },
+      br: { col: 3, row: startRow + 7 },
+      editAs: "oneCell"
+    });
+  } catch (err) {
+    console.error("Gagal menambahkan logo:", err);
+  }
 
   ws.mergeCells(`D${startRow}:I${startRow + 1}`);
   ws.getCell(`D${startRow}`).value = title;
@@ -137,7 +152,7 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
   ws.getCell(`D${startRow + 1}`).border = { top: medium, bottom: medium, left: medium, right: medium };
 
   ws.mergeCells(`J${startRow}:${lastPeriodCol}${startRow + 1}`);
-  ws.getCell(`J${startRow}`).value = "TIME LINE";
+  ws.getCell(`J${startRow}`).value = "";
   ws.getCell(`J${startRow}`).font = { bold: true, size: 15 };
   ws.getCell(`J${startRow}`).alignment = { horizontal: "center", vertical: "middle" };
   fillSolid(ws.getCell(`J${startRow}`), themeColor);
@@ -171,7 +186,7 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
   }
 
   // ---- HEADER TABEL ----
-  r = startRow + 9;
+  r = startRow + 8;
   const hr = r;
   const mainCols = [
     ["B", "NO"], ["C", "ITEM PEKERJAAN"], ["D", "SPESIFIKASI RINGKAS"], ["E", "SAT."],
@@ -475,9 +490,13 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
   ];
 
   ["C", "D"].forEach((col) => autoFitColumn(ws, col));
+  
   ws.eachRow({ includeEmpty: true }, (row) => {
-    row.eachCell({ includeEmpty: true }, (cell) => {
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
       cell.font = { ...cell.font, name: "Arial Narrow" };
+      if (colNumber === 3) { // Column C (Item Pekerjaan)
+        cell.alignment = { ...cell.alignment, wrapText: true, vertical: "middle" };
+      }
     });
   });
 }

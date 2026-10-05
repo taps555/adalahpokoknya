@@ -28,8 +28,8 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Static serve untuk frontend build
-// Path absolut ke D:\projekbaru\frontend\dist agar tidak bergantung working directory
-const FRONTEND_DIST = "D:\\\\projekbaru\\\\frontend\\\\dist";
+// Gunakan path relatif dari __dirname (berada di backend/src)
+const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
 app.use(express.static(FRONTEND_DIST));
 
 app.use(express.static("public"));

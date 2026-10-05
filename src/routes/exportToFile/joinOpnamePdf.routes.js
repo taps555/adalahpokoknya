@@ -20,18 +20,18 @@ const PINK_LIGHT = "#fce4ec";
 const MARGIN = 20;
 const MIN_ROW_H = 30;
 
-const PHOTO_W = 60;
-const PHOTO_H = 80;
-const PHOTO_GAP = 6;
+const PHOTO_W = 105;
+const PHOTO_H = 140;
+const PHOTO_GAP = 2;
 const PHOTO_COLS = 2; 
 
 function buildColumns(contentWidth) {
-  const no = 30;
-  const vol = 50;
-  const bobot = 50;
-  const progNow = 60;
-  const progRekap = 60;
-  const status = 60;
+  const no = 25;
+  const vol = 40;
+  const bobot = 40;
+  const progNow = 45;
+  const progRekap = 45;
+  const status = 35;
   const foto = PHOTO_COLS * PHOTO_W + (PHOTO_COLS + 1) * PHOTO_GAP;
   const pekerjan = contentWidth - (no + vol + bobot + progNow + progRekap + status + foto);
   return { no, pekerjan, foto, vol, bobot, progNow, progRekap, status };
@@ -116,18 +116,21 @@ function drawHeader(doc, project, contentWidth, targetDate, titleText) {
 }
 
 function drawTableHeader(doc, y, COL, X) {
-  const rowH = 22;
+  const rowH = 32;
   doc.rect(X.x0, y, X.xEnd - X.x0, rowH).fillAndStroke(GREY_HEADER_BG, BORDER);
   doc.fillColor("#000000").font("Helvetica-Bold").fontSize(8);
   
-  doc.text("NO", X.x0, y + 6, { width: COL.no, align: "center" });
-  doc.text("PEKERJAAN", X.x1 + 4, y + 6, { width: COL.pekerjan - 8 });
-  doc.text("PHOTO DOKUMENTASI", X.x2, y + 6, { width: COL.foto, align: "center" });
-  doc.text("VOL AKTUAL", X.x3, y + 6, { width: COL.vol, align: "center" });
-  doc.text("BOBOT %", X.x4, y + 6, { width: COL.bobot, align: "center" });
-  doc.text("PROG SAAT INI", X.x5, y + 6, { width: COL.progNow, align: "center" });
-  doc.text("PROG REKAP", X.x6, y + 6, { width: COL.progRekap, align: "center" });
-  doc.text("STATUS", X.x7, y + 6, { width: COL.status, align: "center" });
+  const y1 = y + 12;
+  const y2 = y + 6;
+  
+  doc.text("NO", X.x0, y1, { width: COL.no, align: "center" });
+  doc.text("PEKERJAAN", X.x1 + 4, y1, { width: COL.pekerjan - 8 });
+  doc.text("PHOTO DOKUMENTASI", X.x2, y1, { width: COL.foto, align: "center" });
+  doc.text("VOL\nAKTUAL", X.x3, y2, { width: COL.vol, align: "center" });
+  doc.text("BOBOT\n(%)", X.x4, y2, { width: COL.bobot, align: "center" });
+  doc.text("PROG\nSAAT INI", X.x5, y2, { width: COL.progNow, align: "center" });
+  doc.text("PROG\nREKAP", X.x6, y2, { width: COL.progRekap, align: "center" });
+  doc.text("STATUS", X.x7, y1, { width: COL.status, align: "center" });
 
   const xs = [X.x1, X.x2, X.x3, X.x4, X.x5, X.x6, X.x7];
   xs.forEach((x) => doc.moveTo(x, y).lineTo(x, y + rowH).stroke(BORDER));
@@ -179,7 +182,7 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
     doc.text(formatPercent(item.weight) + "%", X.x4, y + 6, { width: COL.bobot, align: "center" });
     doc.text(formatPercent(item.progNow) + "%", X.x5, y + 6, { width: COL.progNow, align: "center" });
     doc.text(formatPercent(item.rekapProgress) + "%", X.x6, y + 6, { width: COL.progRekap, align: "center" });
-    doc.text(item.status, X.x7, y + 6, { width: COL.status, align: "center" });
+    doc.fontSize(6).text(item.status, X.x7, y + 7, { width: COL.status, align: "center" });
     return;
   }
 
@@ -223,7 +226,7 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
   doc.text(formatPercent(item.weight) + "%", X.x4, y + 6, { width: COL.bobot, align: "center" });
   doc.text(formatPercent(item.progNow) + "%", X.x5, y + 6, { width: COL.progNow, align: "center" });
   doc.text(formatPercent(item.rekapProgress) + "%", X.x6, y + 6, { width: COL.progRekap, align: "center" });
-  doc.text(item.status, X.x7, y + 6, { width: COL.status, align: "center" });
+  doc.fontSize(6).text(item.status, X.x7, y + 7, { width: COL.status, align: "center" });
 }
 
 router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
@@ -425,12 +428,12 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
       
       while (d.getMonth() === targetMonth) {
         const startOfWeek = new Date(d);
-        const endOfWeek = new Date(d);
+        let endOfWeek = new Date(d);
         endOfWeek.setDate(endOfWeek.getDate() + 6);
         
         // If endOfWeek overflows to next month, cap it
         if (endOfWeek.getMonth() !== targetMonth) {
-           endOfWeek.setDate(new Date(targetYear, targetMonth + 1, 0).getDate());
+           endOfWeek = new Date(targetYear, targetMonth + 1, 0);
         }
 
         const items = getItemsForDateRange(startOfWeek, endOfWeek);
@@ -501,10 +504,21 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
           grouped.get(g).push(it);
         });
 
+        let groupRomanCounter = 1;
+        const getRoman = (num) => {
+          const romans = ["I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII","XIII","XIV","XV","XVI","XVII","XVIII","XIX","XX"];
+          return romans[num - 1] || String(num);
+        };
+
         Array.from(grouped.entries()).forEach(([gName, gItems]) => {
           // Draw Sub-Group Row
           doc.rect(X.x0, currentY, X.xEnd - X.x0, MIN_ROW_H).fillAndStroke("#fef3c7", BORDER);
-          doc.font("Helvetica-Bold").fontSize(9).fillColor(GREY_TEXT).text(gName, X.x0 + 5, currentY + 10, { width: X.xEnd - X.x0 });
+          doc.moveTo(X.x1, currentY).lineTo(X.x1, currentY + MIN_ROW_H).stroke(BORDER);
+          
+          const roman = getRoman(groupRomanCounter++);
+          doc.font("Helvetica-Bold").fontSize(9).fillColor(GREY_TEXT);
+          doc.text(roman, X.x0, currentY + 10, { width: COL.no, align: "center" });
+          doc.text(gName, X.x1 + 5, currentY + 10, { width: X.xEnd - X.x1 - 10 });
           currentY += MIN_ROW_H;
           
           let pCounter = 1;
