@@ -23,6 +23,8 @@ inspect_*.py
 # Database backup & dumps
 backupo/
 *.sql
+!prisma/migrations/
+!prisma/migrations/**/*.sql
 *.dump
 
 # Tool cache / analisis sementara

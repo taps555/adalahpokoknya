@@ -64,6 +64,7 @@ app.use("/api", require("./routes/exportToFile/fullExport.routes"));
 app.use("/api", require("./routes/exportToFile/rabView.routes"));
 app.use("/api", require("./routes/exportToFile/bvView.routes"));
 app.use("/api", require("./routes/exportToFile/tsView.routes"));
+app.use("/api", require("./routes/exportToFile/designQuotation.routes"));
 
 //shedule
 app.use("/api", require("./routes/crudGrub/timeSchedule.routes"));

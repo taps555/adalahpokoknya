@@ -253,6 +253,7 @@ model Project {
   rabGroups        RabGroup[]
   surveyReports    SurveyReport[]
   survey3dResult   Survey3DResult?
+  designQuotations DesignQuotation[]
   complaintReports ComplaintReport[]
 
   kanbanBoard KanbanBoard?
@@ -567,6 +568,7 @@ model SurveyReport {
   notes        String? // Catatan umum / informasi tambahan
 
   areas SurveyArea[]
+  designQuotations DesignQuotation[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -653,6 +655,29 @@ model SurveyDimension {
   luasan  Decimal? @db.Decimal(10, 4) // Contoh: 12.3
 
   keterangan String? // Opsional (misal: "Jendela Kiri", "Jendela Kanan")
+}
+
+// Penawaran khusus DESAIN (dari Survey -> Hasil 3D, OUTPUT fixed 3D + DED/2D).
+// Harga jual ke client. Penawaran RAB konstruksi pakai dokumen/template lain.
+model DesignQuotation {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  surveyReportId String? // Survey sumber luasan (opsional; fallback input manual)
+  surveyReport   SurveyReport? @relation(fields: [surveyReportId], references: [id], onDelete: SetNull)
+  quotationDate  DateTime @default(now())
+  discount       Decimal  @default(0) @db.Decimal(18, 2)
+
+  item3dVolume Decimal @db.Decimal(14, 4)
+  item3dPrice  Decimal @db.Decimal(18, 2)
+  item2dVolume Decimal @db.Decimal(14, 4)
+  item2dPrice  Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
 }
 
 model ComplaintReport {
