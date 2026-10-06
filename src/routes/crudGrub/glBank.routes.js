@@ -644,39 +644,14 @@ router.get("/saldo", verifyToken, async (req, res) => {
       orderBy: [{ namaRekening: "asc" }],
     });
 
-    const latest = await prisma.bukuBesarTransaksi.groupBy({
-      by: ["tipeAkun", "namaAkun", "rekeningBankId"],
-      _max: { createdAt: true },
-      where,
-    });
-
-    const saldoMap = {};
-    for (const g of latest) {
-      const row = await prisma.bukuBesarTransaksi.findFirst({
-        where: {
-          tipeAkun: g.tipeAkun,
-          namaAkun: g.namaAkun,
-          rekeningBankId: g.rekeningBankId,
-          createdAt: g._max.createdAt,
-        },
-        orderBy: { id: "desc" },
-      });
-      if (row) {
-        const key = g.rekeningBankId || `${g.tipeAkun}_${g.namaAkun}`;
-        saldoMap[key] = {
-          key,
-          tipeAkun: g.tipeAkun,
-          namaAkun: g.namaAkun,
-          rekeningBankId: g.rekeningBankId || null,
-          saldo: row.saldoBerjalan,
-          updatedAt: row.createdAt,
-        };
-      }
-    }
-
-    const masterSaldo = rekeningRows.map((r) => {
+    const masterSaldo = await Promise.all(rekeningRows.map(async (r) => {
       const namaAkun = [r.namaRekening, r.nomorRekening].filter(Boolean).join(" - ");
-      const existing = saldoMap[r.id];
+      
+      const lastTx = await prisma.bukuBesarTransaksi.findFirst({
+        where: { OR: [{ rekeningBankId: r.id }, { tipeAkun: "BANK", namaAkun }] },
+        orderBy: [{ tanggal: "desc" }, { createdAt: "desc" }],
+      });
+      
       return {
         key: r.id,
         tipeAkun: "BANK",
@@ -689,12 +664,34 @@ router.get("/saldo", verifyToken, async (req, res) => {
           nomorRekening: r.nomorRekening,
           tipeRekening: r.tipeRekening || null,
         },
-        saldo: existing ? existing.saldo : 0,
-        updatedAt: existing ? existing.updatedAt : null,
+        saldo: lastTx ? lastTx.saldoBerjalan : 0,
+        updatedAt: lastTx ? lastTx.createdAt : null,
       };
-    });
+    }));
 
-    res.json({ saldo: masterSaldo });
+    const kasRows = await prisma.bukuBesarTransaksi.findMany({
+      where: { tipeAkun: "KAS", ...where },
+      distinct: ["namaAkun"],
+      select: { namaAkun: true },
+    });
+    
+    const kasSaldo = await Promise.all(kasRows.map(async (r) => {
+      const lastTx = await prisma.bukuBesarTransaksi.findFirst({
+        where: { tipeAkun: "KAS", namaAkun: r.namaAkun },
+        orderBy: [{ tanggal: "desc" }, { createdAt: "desc" }],
+      });
+      return {
+        key: `KAS_${r.namaAkun}`,
+        tipeAkun: "KAS",
+        namaAkun: r.namaAkun,
+        rekeningBankId: null,
+        rekeningBank: null,
+        saldo: lastTx ? lastTx.saldoBerjalan : 0,
+        updatedAt: lastTx ? lastTx.createdAt : null,
+      };
+    }));
+
+    res.json({ saldo: [...masterSaldo, ...kasSaldo] });
   } catch (e) {
     console.error("GET /gl-bank/saldo error:", e);
     res.status(500).json({ error: e.message });

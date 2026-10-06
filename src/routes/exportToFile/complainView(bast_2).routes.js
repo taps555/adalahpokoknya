@@ -13,21 +13,19 @@ const GREY_HEADER_BG = "#e0e0e0";
 const MARGIN = 20;
 const MIN_ROW_H = 30;
 
-// Ukuran tiap foto (before & after pakai ukuran sama)
-const PHOTO_W = 60;
-const PHOTO_H = 60;
-
-const PHOTO_GAP = 5;
-const PHOTO_COLS = 2; // 1 kolom foto per grup (before / after), nambah baris kalau foto > 1
+const PHOTO_W = 65;
+const PHOTO_H = 86;
+const PHOTO_GAP = 2;
+const PHOTO_COLS = 2;
 
 // ==========================================
 // LEBAR KOLOM (proporsional, dihitung ulang tiap render sesuai CONTENT_WIDTH)
 // ==========================================
 function buildColumns(contentWidth) {
   const no = 25;
-  const defect = 140;
-  const repairDate = 60;
-  const status = 55;
+  const defect = 100;
+  const repairDate = 45;
+  const status = 45;
   const fotoGroupW = PHOTO_COLS * PHOTO_W + (PHOTO_COLS + 1) * PHOTO_GAP;
   const fotoBefore = fotoGroupW;
   const fotoAfter = fotoGroupW;
@@ -81,11 +79,9 @@ function drawHeader(doc, complaint, contentWidth) {
   try {
     doc.image(
       path.join(process.cwd(), "public/assets/dives.png"),
-      x0 + 224,
+      x0 + 10,
       y + 10,
-      {
-        fit: [140, 50],
-      },
+      { fit: [140, 50] }
     );
   } catch (err) {
     doc
@@ -100,16 +96,12 @@ function drawHeader(doc, complaint, contentWidth) {
       .text("INTERIOR CONTRACTOR", x0 + 14, y + 42);
   }
 
-  const infoX = x0 + contentWidth * 0.48;
+  doc.moveTo(x0 + 180, y).lineTo(x0 + 180, y + headerH).stroke(BORDER);
+
+  const infoX = x0 + 190;
   const labelW = 100;
   const valueX = infoX + labelW;
   const rowGap = 16;
-
-  doc.strokeColor(BORDER).lineWidth(0.5);
-  doc
-    .moveTo(infoX - 10, y)
-    .lineTo(infoX - 10, y + headerH)
-    .stroke();
 
   doc.font("Helvetica-Bold").fontSize(10).fillColor("#111111");
   doc.text("NAMA PROYEK", infoX, y + 12);
@@ -132,15 +124,14 @@ function drawHeader(doc, complaint, contentWidth) {
 
   y += headerH;
 
-  doc.rect(x0, y, contentWidth, 20).fill(GREY_HEADER_BG);
-  doc.rect(x0, y, contentWidth, 20).stroke(BORDER);
+  doc.rect(x0, y, contentWidth, 20).fillAndStroke(GREY_HEADER_BG, BORDER);
   doc
     .fillColor("#111111")
     .font("Helvetica-BoldOblique")
     .fontSize(12)
-    .text("FORM COMPLAINT PEKERJAAN", x0, y + 5, {
+    .text("FORM COMPLAINT PEKERJAAN", x0 + 10, y + 5, {
       width: contentWidth,
-      align: "center",
+      align: "left",
     });
 
   return y + 20;
@@ -150,32 +141,35 @@ function drawHeader(doc, complaint, contentWidth) {
 // HEADER TABEL (NO / DEFECT LIST / FOTO BEFORE / FOTO AFTER / REPAIR DATE / STATUS / REPAIR REPORT)
 // ==========================================
 function drawTableHeader(doc, y, COL, X) {
-  const rowH = 22;
+  const rowH = 32;
 
   doc.rect(X.x0, y, X.xEnd - X.x0, rowH).fill(GREY_HEADER_BG);
 
+  const y1 = y + 12;
+  const y2 = y + 6;
+
   doc.fillColor("#000000").font("Helvetica-Bold").fontSize(10);
-  doc.text("NO", X.x0, y + rowH / 2 - 4, { width: COL.no, align: "center" });
-  doc.text("DEFECT LIST", X.x1 + 4, y + rowH / 2 - 4, {
+  doc.text("NO", X.x0, y1, { width: COL.no, align: "center" });
+  doc.text("DEFECT LIST", X.x1 + 4, y1, {
     width: COL.defect - 8,
   });
-  doc.text("BEFORE", X.x2, y + rowH / 2 - 4, {
+  doc.text("BEFORE", X.x2, y1, {
     width: COL.fotoBefore,
     align: "center",
   });
-  doc.text("AFTER", X.x2b, y + rowH / 2 - 4, {
+  doc.text("AFTER", X.x2b, y1, {
     width: COL.fotoAfter,
     align: "center",
   });
-  doc.text("REPAIR DATE", X.x3, y + rowH / 2 - 4, {
+  doc.text("REPAIR\nDATE", X.x3, y2, {
     width: COL.repairDate,
     align: "center",
   });
-  doc.text("STATUS", X.x4, y + rowH / 2 - 4, {
+  doc.text("STATUS", X.x4, y1, {
     width: COL.status,
     align: "center",
   });
-  doc.text("REPAIR DEFECT REPORT", X.x5 + 4, y + rowH / 2 - 4, {
+  doc.text("REPAIR DEFECT REPORT", X.x5 + 4, y1, {
     width: COL.report - 8,
   });
 
@@ -201,14 +195,14 @@ function drawTableHeader(doc, y, COL, X) {
 // ==========================================
 function drawCategoryBar(doc, y, name, X) {
   const rowH = 18;
-  doc.rect(X.x0, y, X.xEnd - X.x0, rowH).fill(PINK_LIGHT);
+  doc.rect(X.x0, y, X.xEnd - X.x0, rowH).fillAndStroke(PINK_LIGHT, BORDER);
   doc
     .fillColor("#111111")
     .font("Helvetica-Bold")
     .fontSize(10)
-    .text((name || "-").toUpperCase(), X.x0, y + 5, {
-      width: X.xEnd - X.x0,
-      align: "center",
+    .text((name || "-").toUpperCase(), X.x0 + 10, y + 5, {
+      width: X.xEnd - X.x0 - 10,
+      align: "left",
     });
   doc.font("Helvetica").fillColor(GREY_TEXT);
   return y + rowH;
@@ -355,7 +349,7 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
 function streamComplaintPdff(complaint, res) {
   const PDFDocument = require("pdfkit");
   const doc = new PDFDocument({
-    size: "A3",
+    size: "A4",
     layout: "portrait",
     margin: MARGIN,
   });
