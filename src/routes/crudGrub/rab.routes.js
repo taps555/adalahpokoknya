@@ -866,6 +866,7 @@ router.post(
             components: true,
             group: { include: { parent: true } },
             parent: { include: { parent: true } },
+            children: { select: { id: true } },
           },
         },
       },
@@ -880,7 +881,9 @@ router.post(
       // FIX: dulu baris ini `return` saat komponen kosong, sehingga Material Request
       // selalu KOSONG untuk item yang di-link dari BV (BV item tidak punya components).
       // Sekarang item tanpa komponen tetap dikirim sebagai 1 baris material.
-      const isHeaderBv = rabItem.isHeaderOnly || (rabItem.children && rabItem.children.length > 0);
+      const isHeaderBv =
+        rabItem.isHeaderOnly ||
+        (Array.isArray(rabItem.children) && rabItem.children.length > 0);
       const itemsBefore = requestItemsData.length;
 
       // --- GROUP ---
@@ -893,27 +896,25 @@ router.post(
       const jobVolume = Number(rabItem.volume);
 
       // --- TIME SCHEDULE CALCULATION ---
-      const startW = rabItem.timeSchedule?.startWeek || null;
-      const endW = rabItem.timeSchedule?.endWeek || null;
+      // TimeSchedule menyimpan tanggal aktual, bukan nomor minggu.
+      const startDate = rabItem.timeSchedule?.startDate
+        ? new Date(rabItem.timeSchedule.startDate)
+        : null;
+      const endDate = rabItem.timeSchedule?.endDate
+        ? new Date(rabItem.timeSchedule.endDate)
+        : null;
       let scheduleStr = null;
 
-      if (startW !== null && endW !== null) {
-        if (project.startDate) {
-          // Jika proyek punya startDate, konversi Week menjadi Tanggal
-          const projectStart = new Date(project.startDate);
-
-          // Mulai minggu ke-N: startDate + ((startWeek - 1) * 7 hari)
-          const startTaskDate = addDays(projectStart, (startW - 1) * 7);
-
-          // Akhir minggu ke-N: startDate + (endWeek * 7 hari) - 1 hari
-          const endTaskDate = addDays(projectStart, endW * 7 - 1);
-
-          scheduleStr = `${formatDate(startTaskDate)} - ${formatDate(endTaskDate)}`;
-        } else {
-          // Fallback jika project.startDate belum diisi (masih null)
-          scheduleStr =
-            startW === endW ? `W${startW}` : `W${startW} - W${endW}`;
-        }
+      if (
+        startDate &&
+        endDate &&
+        !Number.isNaN(startDate.getTime()) &&
+        !Number.isNaN(endDate.getTime())
+      ) {
+        scheduleStr =
+          startDate.getTime() === endDate.getTime()
+            ? formatDate(startDate)
+            : `${formatDate(startDate)} - ${formatDate(endDate)}`;
       }
 
       rabItem.components.forEach((comp) => {
