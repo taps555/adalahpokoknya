@@ -170,6 +170,8 @@ function withStatus(it) {
     const sameMetadata =
       Boolean(it.isHeaderOnly) === Boolean(it.linkedRabItem.isHeaderOnly) &&
       (it.sourceJobTypeId || null) === (it.linkedRabItem.sourceJobTypeId || null) &&
+      (it.workCategoryId || null) === (it.linkedRabItem.workCategoryId || null) &&
+      (it.workSubCategoryId || null) === (it.linkedRabItem.workSubCategoryId || null) &&
       ((it.disciplineLabel === "GENERAL" ? null : it.disciplineLabel) || null) ===
         (it.linkedRabItem.discipline || null);
 
@@ -303,6 +305,139 @@ function disciplineForRab(bvItem, ahspDiscipline = null) {
   return null;
 }
 
+async function resolveBvClassification(db, {
+  isHeaderOnly,
+  parent = null,
+  existing = null,
+  workCategoryId,
+  workSubCategoryId,
+  isEdit = false,
+  classificationTouched = true,
+  projectHasCategories = true,
+} = {}) {
+  if (parent && !parent.isHeaderOnly) throw new TypeError("Item induk BV harus berupa header.");
+  const finalWorkCategoryId = parent
+    ? parent.workCategoryId || null
+    : workCategoryId !== undefined ? workCategoryId || null : existing?.workCategoryId || null;
+  const finalWorkSubCategoryId = workSubCategoryId !== undefined
+    ? workSubCategoryId || null : existing?.workSubCategoryId || null;
+
+  // Existing legacy/incomplete rows remain editable when the request does not
+  // touch type/parent/category/subcategory. This keeps transition reads and
+  // ordinary name/volume edits backwards compatible.
+  if (isEdit && !classificationTouched) {
+    return { workCategoryId: finalWorkCategoryId, workSubCategoryId: finalWorkSubCategoryId };
+  }
+  // Projects with no ProjectWorkCategory configuration stay on the legacy
+  // SIPIL/INTERIOR discipline path. Once configured, the governed taxonomy is
+  // authoritative for every create or classification edit.
+  if (!projectHasCategories && !finalWorkCategoryId) {
+    return { workCategoryId: null, workSubCategoryId: null };
+  }
+  if (isHeaderOnly) {
+    if (!finalWorkCategoryId) throw new TypeError("Kategori pekerjaan wajib dipilih untuk header BV.");
+    return { workCategoryId: finalWorkCategoryId, workSubCategoryId: null };
+  }
+  if (!finalWorkCategoryId) throw new TypeError("Kategori pekerjaan wajib dipilih untuk item BV.");
+  if (!finalWorkSubCategoryId) throw new TypeError("Subkategori pekerjaan wajib dipilih untuk item BV non-header.");
+  const subCategory = await db.workSubCategory.findUnique({ where: { id: finalWorkSubCategoryId } });
+  if (!subCategory) throw new TypeError("Subkategori pekerjaan tidak ditemukan.");
+  if (!subCategory.isActive) throw new TypeError("Subkategori pekerjaan tidak aktif.");
+  if (subCategory.categoryId !== finalWorkCategoryId) {
+    throw new TypeError("Subkategori pekerjaan bukan milik kategori pekerjaan item.");
+  }
+  return { workCategoryId: finalWorkCategoryId, workSubCategoryId: finalWorkSubCategoryId };
+}
+
+function linkedRabClassificationPatch(existing, classification) {
+  // Header category changes are cascaded separately because linked leaf
+  // subcategories become invalid. This patch handles ordinary non-header leaf
+  // changes, including a root leaf.
+  if (!existing?.linkedRabItemId || existing.isHeaderOnly) return null;
+  const workCategoryId = classification?.workCategoryId || null;
+  const workSubCategoryId = classification?.workSubCategoryId || null;
+  if (
+    workCategoryId === (existing.workCategoryId || null)
+    && workSubCategoryId === (existing.workSubCategoryId || null)
+  ) return null;
+  return { id: existing.linkedRabItemId, workCategoryId, workSubCategoryId };
+}
+
+async function resolveRabSwitchJobClassification(db, {
+  existing,
+  project,
+  requestedWorkCategoryId,
+  requestedWorkSubCategoryId,
+  jobTypeWorkCategoryId = null,
+} = {}) {
+  const linkedToBv = Boolean(existing?.bvItem);
+  const existingCategoryId = existing?.workCategoryId || null;
+  const existingSubCategoryId = existing?.workSubCategoryId || null;
+
+  if (linkedToBv) {
+    if (
+      requestedWorkCategoryId !== undefined
+      && (requestedWorkCategoryId || null) !== existingCategoryId
+    ) {
+      throw new TypeError("Klasifikasi item RAB terhubung harus mengikuti item BV.");
+    }
+    if (
+      requestedWorkSubCategoryId !== undefined
+      && (requestedWorkSubCategoryId || null) !== existingSubCategoryId
+    ) {
+      throw new TypeError("Klasifikasi item RAB terhubung harus mengikuti item BV.");
+    }
+    return {
+      workCategoryId: existingCategoryId,
+      workSubCategoryId: existingSubCategoryId,
+    };
+  }
+
+  const categoryWasRequested = requestedWorkCategoryId !== undefined;
+  const workCategoryId = categoryWasRequested
+    ? requestedWorkCategoryId || null
+    : jobTypeWorkCategoryId || existingCategoryId;
+  if (workCategoryId) {
+    const active = (project?.workCategories || []).some((entry) =>
+      (entry.workCategoryId === workCategoryId || entry.workCategory?.id === workCategoryId)
+      && entry.isActive !== false
+      && entry.workCategory?.isActive !== false,
+    );
+    if (!active) throw new TypeError("Kategori pekerjaan tidak aktif pada project.");
+  }
+
+  let workSubCategoryId = requestedWorkSubCategoryId !== undefined
+    ? requestedWorkSubCategoryId || null
+    : existingSubCategoryId;
+  if (categoryWasRequested && workCategoryId !== existingCategoryId
+      && requestedWorkSubCategoryId === undefined) {
+    workSubCategoryId = null;
+  }
+  if (workSubCategoryId) {
+    const subCategory = await db.workSubCategory.findUnique({ where: { id: workSubCategoryId } });
+    if (!subCategory) throw new TypeError("Subkategori pekerjaan tidak ditemukan.");
+    if (!subCategory.isActive) throw new TypeError("Subkategori pekerjaan tidak aktif.");
+    if (subCategory.categoryId !== workCategoryId) {
+      throw new TypeError("Subkategori pekerjaan bukan milik kategori pekerjaan item.");
+    }
+  }
+  return { workCategoryId, workSubCategoryId };
+}
+
+async function collectBvSubtreeIds(db, seedIds) {
+  const collected = new Set(seedIds || []);
+  let frontier = [...collected];
+  while (frontier.length > 0) {
+    const children = await db.bvItem.findMany({
+      where: { parentBvItemId: { in: frontier } },
+      select: { id: true },
+    });
+    frontier = children.map((child) => child.id).filter((id) => !collected.has(id));
+    frontier.forEach((id) => collected.add(id));
+  }
+  return [...collected];
+}
+
 function buildWorkCategoryItemWhere({ workCategoryId = null, categoryCode = null } = {}) {
   const code = String(categoryCode || "").trim().toUpperCase();
   if (workCategoryId) {
@@ -410,6 +545,10 @@ module.exports = {
   gradeForBv,
   normalizeAhspDiscipline,
   disciplineForRab,
+  resolveBvClassification,
+  resolveRabSwitchJobClassification,
+  linkedRabClassificationPatch,
+  collectBvSubtreeIds,
   normalizeWorkCategoryCode,
   normalizeProjectWorkCategoryConfigs,
   normalizeRequiredProjectWorkCategoryConfigs,

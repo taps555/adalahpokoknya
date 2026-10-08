@@ -125,8 +125,27 @@ model WorkCategory {
   uploadBatches  UploadBatch[]
   bvItems        BvItem[]
   rabItems       RabItem[]
+  subCategories  WorkSubCategory[]
 
   @@index([isActive, sortOrder])
+}
+
+model WorkSubCategory {
+  id         String       @id @default(cuid())
+  categoryId String
+  category   WorkCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  code       String
+  name       String
+  isActive   Boolean      @default(true)
+  sortOrder  Int          @default(0)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  bvItems  BvItem[]
+  rabItems RabItem[]
+
+  @@unique([categoryId, code])
+  @@index([categoryId, isActive, sortOrder])
 }
 
 /// Daftar harga satuan dasar: bahan, upah (tenaga kerja), dan alat.
@@ -335,6 +354,8 @@ model RabItem {
   project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   workCategoryId String?
   workCategory   WorkCategory? @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
+  workSubCategoryId String?
+  workSubCategory   WorkSubCategory? @relation(fields: [workSubCategoryId], references: [id], onDelete: Restrict)
 
   name            String
   paymentUnit     String
@@ -380,6 +401,7 @@ model RabItem {
 
   @@index([projectId])
   @@index([workCategoryId])
+  @@index([workSubCategoryId])
   @@index([parentId]) // <-- Tambahkan index ini juga
 }
 
@@ -435,6 +457,8 @@ model BvItem {
   project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   workCategoryId String?
   workCategory   WorkCategory? @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
+  workSubCategoryId String?
+  workSubCategory   WorkSubCategory? @relation(fields: [workSubCategoryId], references: [id], onDelete: Restrict)
   groupId        String?
   group          RabGroup?     @relation(fields: [groupId], references: [id], onDelete: SetNull)
 
@@ -472,6 +496,7 @@ model BvItem {
 
   @@index([projectId])
   @@index([workCategoryId])
+  @@index([workSubCategoryId])
   @@index([groupId])
   @@index([parentBvItemId])
 }

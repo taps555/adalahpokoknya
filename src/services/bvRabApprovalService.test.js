@@ -13,6 +13,7 @@ const {
   redactBaselineSnapshot,
   diffBaselineSnapshots,
   assertProjectEditable,
+  assertApprovalClassificationComplete,
 } = require("./bvRabApprovalService");
 
 const sampleSnapshotInput = () => ({
@@ -86,4 +87,72 @@ test("diffs BV/RAB rows against baseline and redacts selling values from non-adm
   assert.equal(diff.rab.changed.length, 1);
   assert.ok(diff.rab.changed[0].changes.every((change) => !["rabUnitPrice", "rabTotalPrice"].includes(change.field)));
   assert.equal(diffBaselineSnapshots(baseline, current, "SUPER_ADMIN").rab.changed[0].changes.some((change) => change.field === "rabUnitPrice"), true);
+});
+
+test("submit rejects non-header leaves missing a subcategory but keeps legacy discipline rows", async () => {
+  const db = {
+    bvItem: {
+      findMany: async () => [
+        { id: "bv-cat", isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: null },
+      ],
+    },
+    rabItem: { findMany: async () => [] },
+  };
+
+  // Non-header leaf that picked a category but no subcategory is incomplete.
+  await assert.rejects(
+    () => assertApprovalClassificationComplete(db, "project-1"),
+    (error) => error.statusCode === 400 && /subkategori/i.test(error.message),
+  );
+
+  // Legacy discipline-only rows (no category) remain readable and allowed.
+  const legacyDb = {
+    bvItem: {
+      findMany: async () => [
+        { id: "bv-legacy", isHeaderOnly: false, workCategoryId: null, workSubCategoryId: null },
+      ],
+    },
+    rabItem: { findMany: async () => [] },
+  };
+  await assert.doesNotReject(() => assertApprovalClassificationComplete(legacyDb, "project-1"));
+
+  // Headers with a category are complete with a null subcategory.
+  const headerDb = {
+    bvItem: {
+      findMany: async () => [
+        { id: "bv-header", isHeaderOnly: true, workCategoryId: "cat-1", workSubCategoryId: null },
+      ],
+    },
+    rabItem: { findMany: async () => [] },
+  };
+  await assert.doesNotReject(() => assertApprovalClassificationComplete(headerDb, "project-1"));
+
+  // RAB leaf that carries a category but no subcategory is blocked too.
+  const rabDb = {
+    bvItem: { findMany: async () => [] },
+    rabItem: {
+      findMany: async () => [
+        { id: "rab-1", isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: null },
+      ],
+    },
+  };
+  await assert.rejects(
+    () => assertApprovalClassificationComplete(rabDb, "project-1"),
+    (error) => error.statusCode === 400 && /subkategori/i.test(error.message),
+  );
+
+  // Fully classified rows pass.
+  const completeDb = {
+    bvItem: {
+      findMany: async () => [
+        { id: "bv-cat", isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: "sub-1" },
+      ],
+    },
+    rabItem: {
+      findMany: async () => [
+        { id: "rab-1", isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: "sub-1" },
+      ],
+    },
+  };
+  await assert.doesNotReject(() => assertApprovalClassificationComplete(completeDb, "project-1"));
 });
