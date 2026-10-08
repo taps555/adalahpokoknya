@@ -18,6 +18,7 @@ function fakeDb(overrides = {}) {
     },
     workSubCategory: {
       findMany: async () => [],
+      findFirst: async () => null,
       findUnique: async () => null,
       create: async ({ data }) => ({ id: "sub-new", ...data }),
       update: async ({ data }) => ({ id: "sub-1", categoryId: "cat-1", ...data }),
@@ -50,13 +51,60 @@ test("lists only subcategories owned by the requested category in stable order",
   });
 });
 
+test("auto-increments subcategory order per category when sortOrder is omitted", async () => {
+  let createArgs;
+  let findFirstArgs;
+  const db = fakeDb({
+    workSubCategory: {
+      findFirst: async (args) => (findFirstArgs = args, null),
+      create: async ({ data }) => (createArgs = data, { id: "sub-new", ...data }),
+    },
+  });
+  const created = await createWorkSubCategory(db, "cat-1", { code: "BATA", name: "Bata" });
+  assert.deepEqual(createArgs, {
+    categoryId: "cat-1",
+    code: "BATA",
+    name: "Bata",
+    sortOrder: 1,
+    isActive: true,
+  });
+  assert.equal(created.sortOrder, 1);
+  assert.deepEqual(findFirstArgs, {
+    where: { categoryId: "cat-1" },
+    orderBy: [{ sortOrder: "desc" }, { createdAt: "desc" }],
+    select: { sortOrder: true },
+  });
+
+  const nextDb = fakeDb({
+    workSubCategory: {
+      findFirst: async () => ({ sortOrder: 4 }),
+      create: async ({ data }) => ({ id: "sub-next", ...data }),
+    },
+  });
+  const next = await createWorkSubCategory(nextDb, "cat-1", { code: "KAYU", name: "Kayu" });
+  assert.equal(next.sortOrder, 5);
+});
+
+test("auto-incremented subcategory order is scoped to its own category", async () => {
+  const seen = [];
+  const db = fakeDb({
+    workSubCategory: {
+      findFirst: async (args) => (seen.push(args.where.categoryId), { sortOrder: 2 }),
+      create: async ({ data }) => ({ id: "sub-new", ...data }),
+    },
+  });
+  await createWorkSubCategory(db, "cat-A", { code: "A", name: "A" });
+  await createWorkSubCategory(db, "cat-B", { code: "B", name: "B" });
+  assert.deepEqual(seen, ["cat-A", "cat-B"]);
+});
+
 test("creates a normalized subcategory only under an active existing category", async () => {
   const created = await createWorkSubCategory(fakeDb(), "cat-1", {
-    code: "  ceiling works ", name: " Ceiling Works ", sortOrder: 2,
+    code: "  ceiling works ", name: " Ceiling Works ",
   });
   assert.deepEqual(created, {
     id: "sub-new", categoryId: "cat-1", code: "CEILING_WORKS",
-    name: "Ceiling Works", sortOrder: 2, isActive: true,
+    name: "Ceiling Works", sortOrder: 1, isActive: true,
   });
   await assert.rejects(
     () => createWorkSubCategory(fakeDb({ workCategory: { findUnique: async () => null } }), "missing", { code: "A", name: "A" }),
@@ -86,11 +134,11 @@ test("updates only a subcategory owned by the route category and supports active
     workSubCategory: { findUnique: async () => ({ id: "sub-1", categoryId: "cat-1" }) },
   });
   const updated = await updateWorkSubCategory(db, "cat-1", "sub-1", {
-    code: "wall finish", name: " Wall Finish ", isActive: false, sortOrder: 7,
+    code: "wall finish", name: " Wall Finish ", isActive: false,
   });
   assert.deepEqual(updated, {
     id: "sub-1", categoryId: "cat-1", code: "WALL_FINISH",
-    name: "Wall Finish", isActive: false, sortOrder: 7,
+    name: "Wall Finish", isActive: false,
   });
 
   const wrongOwner = fakeDb({

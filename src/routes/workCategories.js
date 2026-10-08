@@ -12,6 +12,7 @@ const {
   getWorkSubCategoryReferences,
   deleteWorkSubCategory,
 } = require("../services/workSubCategoryService");
+const { nextWorkCategorySortOrder } = require("../services/workCategoryOrderService");
 
 const CATEGORY_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
 
@@ -96,16 +97,17 @@ router.get("/", verifyToken, async (req, res) => {
 // POST /api/work-categories
 router.post("/", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
   try {
-    const { code, name, sortOrder } = req.body;
+    const { code, name } = req.body;
     const normalizedCode = normalizeWorkCategoryCode(code);
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "Nama kategori wajib diisi." });
     }
+    const sortOrder = await nextWorkCategorySortOrder(prisma);
     const category = await prisma.workCategory.create({
       data: {
         code: normalizedCode,
         name: name.trim(),
-        sortOrder: Number.isInteger(sortOrder) ? sortOrder : 0,
+        sortOrder,
       },
     });
     res.status(201).json({ message: "Kategori berhasil dibuat.", data: category });
@@ -125,7 +127,7 @@ router.post("/", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res
 router.put("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, code, sortOrder, isActive } = req.body;
+    const { name, code, isActive } = req.body;
     const existing = await prisma.workCategory.findUnique({ where: { id } });
     if (!existing) return res.status(404).json({ error: "Kategori tidak ditemukan." });
 
@@ -137,7 +139,6 @@ router.put("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, r
     if (code !== undefined) {
       data.code = normalizeWorkCategoryCode(code);
     }
-    if (sortOrder !== undefined) data.sortOrder = Number(sortOrder);
     if (isActive !== undefined) data.isActive = !!isActive;
 
     const updated = await prisma.workCategory.update({ where: { id }, data });

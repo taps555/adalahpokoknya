@@ -39,14 +39,20 @@ async function listWorkSubCategories(db, categoryId, { activeOnly = false } = {}
   });
 }
 
+async function nextSubCategorySortOrder(db, categoryId) {
+  const latest = await db.workSubCategory.findFirst({
+    where: { categoryId },
+    orderBy: [{ sortOrder: "desc" }, { createdAt: "desc" }],
+    select: { sortOrder: true },
+  });
+  return Number(latest?.sortOrder || 0) + 1;
+}
+
 async function createWorkSubCategory(db, categoryId, input = {}) {
   await requireCategory(db, categoryId, { active: true });
   const name = String(input.name || "").trim();
   if (!name) throw httpError("Nama subkategori wajib diisi.", 400);
-  const sortOrder = input.sortOrder === undefined ? 0 : Number(input.sortOrder);
-  if (!Number.isInteger(sortOrder)) {
-    throw httpError("Urutan subkategori harus berupa bilangan bulat.", 400);
-  }
+  const sortOrder = await nextSubCategorySortOrder(db, categoryId);
   const isActive = input.isActive === undefined ? true : input.isActive;
   if (typeof isActive !== "boolean") {
     throw httpError("Status aktif subkategori harus berupa boolean.", 400);
@@ -74,11 +80,6 @@ async function updateWorkSubCategory(db, categoryId, id, input = {}) {
     const name = String(input.name || "").trim();
     if (!name) throw httpError("Nama subkategori tidak boleh kosong.", 400);
     data.name = name;
-  }
-  if (input.sortOrder !== undefined) {
-    const sortOrder = Number(input.sortOrder);
-    if (!Number.isInteger(sortOrder)) throw httpError("Urutan subkategori harus berupa bilangan bulat.", 400);
-    data.sortOrder = sortOrder;
   }
   if (input.isActive !== undefined) {
     if (typeof input.isActive !== "boolean") {
