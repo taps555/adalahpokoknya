@@ -116,6 +116,7 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
             bvItem: { select: { id: true, parentBvItemId: true } }, // <-- tambah
             components: true,
             workCategory: true,
+            workSubCategory: true,
           },
         },
       },

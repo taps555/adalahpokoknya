@@ -11,6 +11,9 @@ const {
   validateJobTypeForProject,
   gradeForBv,
   disciplineForRab,
+  resolveBvClassification,
+  linkedRabClassificationPatch,
+  collectBvSubtreeIds,
 } = require("../../services/bvCalculationService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("../../services/ahspPricingService");
 const { recordChange } = require("../../services/bvRabAuditService");
@@ -74,22 +77,6 @@ async function validateBvParent(itemId, parentBvItemId, projectId) {
   }
 
   return { parent };
-}
-
-async function collectBvSubtreeIds(seedIds) {
-  const collected = new Set(seedIds);
-  let frontier = [...seedIds];
-  while (frontier.length > 0) {
-    const children = await prisma.bvItem.findMany({
-      where: { parentBvItemId: { in: frontier } },
-      select: { id: true },
-    });
-    frontier = children
-      .map((child) => child.id)
-      .filter((id) => !collected.has(id));
-    frontier.forEach((id) => collected.add(id));
-  }
-  return [...collected];
 }
 
 async function findLinkedBvItems(itemIds) {
@@ -180,6 +167,7 @@ router.post(
       disciplineLabel,
       ahspDiscipline,
       workCategoryId,
+      workSubCategoryId,
     } = req.body;
 
     if (typeof isHeaderOnly !== "boolean") {
@@ -237,7 +225,15 @@ router.post(
     const finalDisciplineLabel = parent
       ? parent.disciplineLabel
       : normalizeDisciplineLabel(disciplineLabel);
-    const finalWorkCategoryId = workCategoryId || (parent ? parent.workCategoryId : null) || null;
+    const classification = await resolveBvClassification(prisma, {
+      isHeaderOnly,
+      parent,
+      workCategoryId,
+      workSubCategoryId,
+      projectHasCategories: (project.workCategories || []).length > 0,
+    });
+    const finalWorkCategoryId = classification.workCategoryId;
+    const finalWorkSubCategoryId = classification.workSubCategoryId;
     const projectCategory = finalWorkCategoryId
       ? project.workCategories.find((entry) =>
           entry.workCategoryId === finalWorkCategoryId && entry.isActive,
@@ -316,12 +312,15 @@ router.post(
         nameEcommerceLink: nameEcommerceLink || null,
         disciplineLabel: finalDisciplineLabel,
         workCategoryId: finalWorkCategoryId,
+        workSubCategoryId: finalWorkSubCategoryId,
         totalVolume,
         breakdowns: { create: breakdownRows },
       },
       include: {
         breakdowns: true,
         sourceJobType: true,
+        workCategory: true,
+        workSubCategory: true,
         children: { include: { breakdowns: true } },
       },
     });
@@ -352,6 +351,7 @@ router.get("/projects/:projectId/bv-items", verifyToken, async (req, res) => {
         parentBvItem: { select: { linkedRabItemId: true } },
         sourceJobType: true,
         workCategory: true,
+        workSubCategory: true,
         children: {
           include: {
             breakdowns: true,
@@ -359,6 +359,7 @@ router.get("/projects/:projectId/bv-items", verifyToken, async (req, res) => {
             parentBvItem: { select: { linkedRabItemId: true } },
             sourceJobType: true,
             workCategory: true,
+            workSubCategory: true,
           },
           orderBy: { createdAt: "asc" },
         },
@@ -396,6 +397,7 @@ router.put(
       disciplineLabel,
       ahspDiscipline,
       workCategoryId,
+      workSubCategoryId,
     } = req.body;
 
     const existing = await prisma.bvItem.findUnique({
@@ -462,6 +464,29 @@ router.put(
       : workCategoryId !== undefined
         ? workCategoryId || null
         : existing.workCategoryId || null;
+    const classificationTouched = workCategoryId !== undefined
+      || workSubCategoryId !== undefined
+      || (parentBvItemId !== undefined && (parentBvItemId || null) !== (existing.parentBvItemId || null))
+      || (isHeaderOnly !== undefined && finalIsHeaderOnly !== existing.isHeaderOnly);
+    const requestedWorkSubCategoryId = finalIsHeaderOnly
+      ? null
+      : workSubCategoryId;
+    const editProject = await prisma.project.findUnique({
+      where: { id: existing.projectId },
+      include: { workCategories: { include: { workCategory: true } } },
+    });
+    const projectHasCategories = (editProject?.workCategories || []).length > 0;
+    const classification = await resolveBvClassification(prisma, {
+      isHeaderOnly: finalIsHeaderOnly,
+      parent: selectedParent,
+      existing,
+      workCategoryId: finalWorkCategoryId,
+      workSubCategoryId: requestedWorkSubCategoryId,
+      isEdit: true,
+      classificationTouched,
+      projectHasCategories,
+    });
+    const finalWorkSubCategoryId = classification.workSubCategoryId;
 
     const typeChange =
       existing.linkedRabItemId &&
@@ -505,10 +530,7 @@ router.put(
           return res
             .status(404)
             .json({ error: "Jenis pekerjaan (master) tidak ditemukan." });
-        const project = await prisma.project.findUnique({
-          where: { id: existing.projectId },
-          include: { workCategories: { include: { workCategory: true } } },
-        });
+        const project = editProject;
         const activeCategory = finalWorkCategoryId
           ? project.workCategories.find((entry) =>
               entry.workCategoryId === finalWorkCategoryId && entry.isActive,
@@ -604,15 +626,32 @@ router.put(
           ...(workCategoryId !== undefined || selectedParent
             ? { workCategoryId: finalWorkCategoryId }
             : {}),
+          ...(classificationTouched
+            ? { workSubCategoryId: finalWorkSubCategoryId }
+            : {}),
           totalVolume,
           ...(breakdownUpdate ? { breakdowns: breakdownUpdate } : {}),
         },
         include: { breakdowns: true, sourceJobType: true },
       });
 
+      // A linked non-header leaf owns its RAB row's classification. Any change
+      // to its category/subcategory is mirrored in the same transaction so
+      // drift cannot appear as synchronized data.
+      const linkedPatch = linkedRabClassificationPatch(existing, classification);
+      if (linkedPatch) {
+        await tx.rabItem.update({
+          where: { id: linkedPatch.id },
+          data: {
+            workCategoryId: linkedPatch.workCategoryId,
+            workSubCategoryId: linkedPatch.workSubCategoryId,
+          },
+        });
+      }
+
       if (disciplineLabel !== undefined && !selectedParent) {
         const finalLabel = finalDisciplineLabel;
-        const subtreeIds = await collectBvSubtreeIds([id]);
+        const subtreeIds = await collectBvSubtreeIds(tx, [id]);
         if (subtreeIds.length > 0) {
           await tx.bvItem.updateMany({
             where: { id: { in: subtreeIds } },
@@ -636,23 +675,38 @@ router.put(
         }
       }
 
-      if (workCategoryId !== undefined && !selectedParent) {
-        const subtreeIds = await collectBvSubtreeIds([id]);
-        const allIds = [id, ...subtreeIds];
-        await tx.bvItem.updateMany({
-          where: { id: { in: allIds } },
-          data: { workCategoryId: finalWorkCategoryId },
-        });
-        const affectedBvItems = await tx.bvItem.findMany({
-          where: { id: { in: allIds }, linkedRabItemId: { not: null } },
-          select: { linkedRabItemId: true },
-        });
-        const rabIds = affectedBvItems.map((item) => item.linkedRabItemId).filter(Boolean);
-        if (rabIds.length > 0) {
-          await tx.rabItem.updateMany({
-            where: { id: { in: rabIds } },
-            data: { workCategoryId: finalWorkCategoryId },
+      // A root item owns its whole subtree's category. Only an actual category
+      // change cascades to descendants and their linked RAB rows, clearing
+      // now-invalid descendant subcategories so they must be reclassified. The
+      // root's own row was already written above (header: null subcategory;
+      // leaf: validated subcategory, mirrored to its RAB row by linkedPatch).
+      const rootCategoryChanged = !selectedParent
+        && workCategoryId !== undefined
+        && finalWorkCategoryId !== (existing.workCategoryId || null);
+      if (rootCategoryChanged) {
+        const subtreeIds = await collectBvSubtreeIds(tx, [id]);
+        const descendantIds = subtreeIds.filter((descendantId) => descendantId !== id);
+        if (descendantIds.length > 0) {
+          await tx.bvItem.updateMany({
+            where: { id: { in: descendantIds } },
+            data: { workCategoryId: finalWorkCategoryId, workSubCategoryId: null },
           });
+        }
+        // Headers keep no subcategory of their own, so their linked RAB row is
+        // updated here; a leaf's own RAB row is handled by linkedPatch.
+        const rabTargetIds = finalIsHeaderOnly ? [id, ...descendantIds] : descendantIds;
+        if (rabTargetIds.length > 0) {
+          const affectedBvItems = await tx.bvItem.findMany({
+            where: { id: { in: rabTargetIds }, linkedRabItemId: { not: null } },
+            select: { linkedRabItemId: true },
+          });
+          const rabIds = affectedBvItems.map((item) => item.linkedRabItemId).filter(Boolean);
+          if (rabIds.length > 0) {
+            await tx.rabItem.updateMany({
+              where: { id: { in: rabIds } },
+              data: { workCategoryId: finalWorkCategoryId, workSubCategoryId: null },
+            });
+          }
         }
       }
 
@@ -700,7 +754,7 @@ router.delete(
         error: "Item BV masih terhubung ke RAB. Unlink dahulu sebelum menghapus.",
       });
     }
-    const subtreeIds = await collectBvSubtreeIds([req.params.id]);
+    const subtreeIds = await collectBvSubtreeIds(prisma, [req.params.id]);
     const linkedItems = await findLinkedBvItems(subtreeIds);
     if (linkedItems.length > 0) {
       return res.status(409).json({
@@ -747,7 +801,7 @@ router.delete(
       });
     }
 
-    const subtreeIds = await collectBvSubtreeIds(uniqueItemIds);
+    const subtreeIds = await collectBvSubtreeIds(prisma, uniqueItemIds);
     const linkedItems = await findLinkedBvItems(subtreeIds);
     if (linkedItems.length > 0) {
       return res.status(409).json({
@@ -822,6 +876,7 @@ async function pastikanIndukTerlink(tx, bvItem) {
       isHeaderOnly: true,
       discipline: disciplineForRab(parent),
       workCategoryId: parent.workCategoryId || null,
+      workSubCategoryId: null,
       grade: gradeForBv(parent, proj),
       overheadPercent: 0,
       rapUnitPrice: 0,
@@ -1059,6 +1114,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
           isHeaderOnly: bvItem.isHeaderOnly || false,
           discipline: disciplineForRab(bvItem, ahspDiscipline),
           workCategoryId: bvItem.workCategoryId || null,
+          workSubCategoryId: bvItem.workSubCategoryId || null,
           grade: gradeForBv(bvItem, bvProject, ahspDiscipline),
 
           rapUnitPrice: rapUnitPrice,
@@ -1111,6 +1167,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
                 ? null
                 : childBv.disciplineLabel,
               workCategoryId: childBv.workCategoryId || null,
+              workSubCategoryId: childBv.workSubCategoryId || null,
               grade: gradeForBv(childBv, bvProject),
               rapUnitPrice: childRapSatuan,
               rapTotalPrice: childRapSatuan * childVol,
@@ -1272,6 +1329,7 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
               ? null
               : bvItem.disciplineLabel,
             workCategoryId: bvItem.workCategoryId || null,
+            workSubCategoryId: bvItem.workSubCategoryId || null,
             grade: gradeForBv(bvItem, bulkProject),
             sourceJobTypeId: bvItem.sourceJobTypeId || null,
 
@@ -1405,6 +1463,8 @@ router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "P
             discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
               ? null
               : bvItem.disciplineLabel,
+            workCategoryId: bvItem.workCategoryId || null,
+            workSubCategoryId: bvItem.workSubCategoryId || null,
             groupId: bvItem.groupId || null,
             parentId: rabParentId,
             overheadPercent: overheadPct,
@@ -1530,6 +1590,8 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
           discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
             ? null
             : bvItem.disciplineLabel,
+          workCategoryId: bvItem.workCategoryId || null,
+          workSubCategoryId: bvItem.workSubCategoryId || null,
         },
         include: { components: true },
       });

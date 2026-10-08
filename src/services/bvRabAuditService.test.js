@@ -50,6 +50,8 @@ test("projects snapshots to reversible BV/RAB fields only", () => {
       isHeaderOnly: null,
       groupId: "group-current",
       parentBvItemId: null,
+      workCategoryId: null,
+      workSubCategoryId: null,
       totalVolume: "8.0000",
       ecommerceLink: null,
       nameEcommerceLink: null,

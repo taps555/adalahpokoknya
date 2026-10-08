@@ -5,12 +5,13 @@ const SELLING_FIELDS = new Set(["rabUnitPrice", "rabTotalPrice"]);
 const AUDIT_FIELDS = Object.freeze({
   BV_ITEM: [
     "id", "projectId", "name", "keterangan", "paymentUnit", "sourceJobTypeId",
-    "isHeaderOnly", "groupId", "parentBvItemId", "totalVolume", "ecommerceLink",
+    "isHeaderOnly", "groupId", "parentBvItemId", "workCategoryId", "workSubCategoryId",
+    "totalVolume", "ecommerceLink",
     "nameEcommerceLink", "breakdowns",
   ],
   RAB_ITEM: [
     "id", "projectId", "name", "volume", "category", "reference", "discipline", "grade",
-    "workCategoryId", "sourceJobTypeId", "overheadPercent", "rapUnitPrice", "rapTotalPrice",
+    "workCategoryId", "workSubCategoryId", "sourceJobTypeId", "overheadPercent", "rapUnitPrice", "rapTotalPrice",
     "rabUnitPrice", "rabTotalPrice", "isByOwner", "isStip", "components",
   ],
 });

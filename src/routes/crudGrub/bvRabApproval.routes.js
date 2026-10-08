@@ -11,6 +11,7 @@ const {
   lockApprovalProject,
   getCurrentApproval,
   getLatestApprovedApproval,
+  assertApprovalClassificationComplete,
 } = require("../../services/bvRabApprovalService");
 
 const router = express.Router();
@@ -91,6 +92,7 @@ router.post(
           error.statusCode = 409;
           throw error;
         }
+        await assertApprovalClassificationComplete(tx, projectId);
         const next = transitionApproval(current, "SUBMIT");
         const data = {
           projectId,

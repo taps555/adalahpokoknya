@@ -14,12 +14,12 @@ const ACTION_TRANSITIONS = Object.freeze({
 
 const GROUP_FIELDS = ["id", "projectId", "name", "reference", "order", "parentId"];
 const BV_FIELDS = [
-  "id", "projectId", "workCategoryId", "groupId", "parentBvItemId", "isHeaderOnly",
+  "id", "projectId", "workCategoryId", "workSubCategoryId", "groupId", "parentBvItemId", "isHeaderOnly",
   "sourceJobTypeId", "name", "keterangan", "paymentUnit", "disciplineLabel", "totalVolume",
   "ecommerceLink", "nameEcommerceLink", "linkedRabItemId", "linkedGroupId", "breakdowns",
 ];
 const RAB_FIELDS = [
-  "id", "projectId", "workCategoryId", "name", "paymentUnit", "category", "reference",
+  "id", "projectId", "workCategoryId", "workSubCategoryId", "name", "paymentUnit", "category", "reference",
   "overheadPercent", "discipline", "grade", "volume", "rapUnitPrice", "rapTotalPrice",
   "rabUnitPrice", "rabTotalPrice", "sourceJobTypeId", "groupId", "isByOwner", "isStip",
   "isHeaderOnly", "order", "parentId", "components",
@@ -147,6 +147,41 @@ async function getLatestApprovedApproval(db, projectId) {
   });
 }
 
+async function assertApprovalClassificationComplete(db, projectId) {
+  const [bvItems, rabItems] = await Promise.all([
+    db.bvItem.findMany({
+      where: { projectId },
+      select: {
+        id: true, name: true, isHeaderOnly: true,
+        workCategoryId: true, workSubCategoryId: true,
+      },
+    }),
+    db.rabItem.findMany({
+      where: { projectId },
+      select: {
+        id: true, name: true, isHeaderOnly: true,
+        workCategoryId: true, workSubCategoryId: true,
+      },
+    }),
+  ]);
+  const incomplete = (rows) => rows.filter((item) =>
+    !item.isHeaderOnly && item.workCategoryId && !item.workSubCategoryId,
+  );
+  const incompleteBvItems = incomplete(bvItems);
+  const incompleteRabItems = incomplete(rabItems);
+  if (incompleteBvItems.length > 0 || incompleteRabItems.length > 0) {
+    const error = new Error(
+      "Semua item BV/RAB non-header yang memiliki kategori pekerjaan wajib memiliki subkategori sebelum diajukan.",
+    );
+    error.statusCode = 400;
+    error.incompleteClassification = {
+      bvItems: incompleteBvItems,
+      rabItems: incompleteRabItems,
+    };
+    throw error;
+  }
+}
+
 async function assertProjectEditable(db, projectId) {
   if (!projectId) throw new Error("Project untuk perubahan BV/RAB tidak ditemukan.");
   if (!BV_RAB_APPROVAL_ENABLED) return null;
@@ -175,5 +210,6 @@ module.exports = {
   lockApprovalProject,
   getCurrentApproval,
   getLatestApprovedApproval,
+  assertApprovalClassificationComplete,
   assertProjectEditable,
 };

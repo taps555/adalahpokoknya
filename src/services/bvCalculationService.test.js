@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   calcBreakdownSubtotal,
   sumBreakdownSubtotals,
@@ -14,6 +16,10 @@ const {
   normalizeProjectWorkCategoryConfigs,
   normalizeRequiredProjectWorkCategoryConfigs,
   buildWorkCategoryItemWhere,
+  resolveBvClassification,
+  resolveRabSwitchJobClassification,
+  linkedRabClassificationPatch,
+  collectBvSubtreeIds,
 } = require("./bvCalculationService");
 const { deleteUploadBatchData } = require("./importService");
 const { computeAhspPricing, normalizeAhspOverhead } = require("./ahspPricingService");
@@ -378,6 +384,348 @@ test("konfigurasi edit proyek menerima SIPIL dan INTERIOR CUSTOM tanpa grade", (
     ], categories),
     /Interior wajib/i,
   );
+});
+
+test("validates BV header child standalone and legacy edit classification invariants", async () => {
+  const db = {
+    workSubCategory: {
+      findUnique: async ({ where }) => ({
+        id: where.id,
+        categoryId: where.id === "sub-other" ? "cat-2" : "cat-1",
+        isActive: where.id !== "sub-inactive",
+      }),
+    },
+  };
+
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: true,
+    workCategoryId: "cat-1",
+    workSubCategoryId: "sub-1",
+  }), { workCategoryId: "cat-1", workSubCategoryId: null });
+
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false,
+      parent: { id: "parent", isHeaderOnly: false, workCategoryId: "cat-1" },
+      workSubCategoryId: "sub-1",
+    }),
+    /induk.*header/i,
+  );
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    parent: { id: "parent", isHeaderOnly: true, workCategoryId: "cat-1" },
+    workCategoryId: "cat-2",
+    workSubCategoryId: "sub-1",
+  }), { workCategoryId: "cat-1", workSubCategoryId: "sub-1" });
+
+  await assert.rejects(
+    () => resolveBvClassification(db, { isHeaderOnly: false, workCategoryId: "cat-1" }),
+    /subkategori/i,
+  );
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: "sub-other",
+    }),
+    /bukan milik kategori/i,
+  );
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false, workCategoryId: "cat-1", workSubCategoryId: "sub-inactive",
+    }),
+    /tidak aktif/i,
+  );
+
+  // Unrelated edits on legacy discipline-only rows must NOT be blocked during
+  // transition: the stored (in)complete classification is preserved as-is.
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    existing: { workCategoryId: null, workSubCategoryId: null },
+    isEdit: true,
+    classificationTouched: false,
+  }), { workCategoryId: null, workSubCategoryId: null });
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false,
+      existing: { workCategoryId: null, workSubCategoryId: null },
+      isEdit: true,
+      classificationTouched: true,
+    }),
+    /kategori pekerjaan/i,
+  );
+});
+
+test("legacy edit keeps category-configured rows with null subcategory readable and untouched", async () => {
+  const db = {
+    workSubCategory: { findUnique: async ({ where }) => ({ id: where.id, categoryId: "cat-1", isActive: true }) },
+  };
+  // Existing leaf with a category but a null subcategory: an unrelated edit
+  // (volume/name/breakdown only) must resolve without requiring a subcategory.
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    existing: { workCategoryId: "cat-1", workSubCategoryId: null },
+    isEdit: true,
+    classificationTouched: false,
+  }), { workCategoryId: "cat-1", workSubCategoryId: null });
+  // But once classification is touched, a valid active subcategory is required.
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false,
+      existing: { workCategoryId: "cat-1", workSubCategoryId: null },
+      workCategoryId: "cat-1",
+      isEdit: true,
+      classificationTouched: true,
+    }),
+    /subkategori/i,
+  );
+  // When classification is touched and a fresh valid subcategory arrives, it resolves.
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    existing: { workCategoryId: "cat-1", workSubCategoryId: null },
+    workCategoryId: "cat-1",
+    workSubCategoryId: "sub-1",
+    isEdit: true,
+    classificationTouched: true,
+  }), { workCategoryId: "cat-1", workSubCategoryId: "sub-1" });
+});
+
+test("legacy projects without configured work categories keep the discipline fallback", async () => {
+  const db = { workSubCategory: { findUnique: async () => null } };
+  // Create on a project with zero ProjectWorkCategory rows: null category must
+  // NOT be an unconditional new-classification error.
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: true,
+    workCategoryId: null,
+    projectHasCategories: false,
+  }), { workCategoryId: null, workSubCategoryId: null });
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    workCategoryId: null,
+    workSubCategoryId: null,
+    projectHasCategories: false,
+  }), { workCategoryId: null, workSubCategoryId: null });
+  // Update of an existing legacy row likewise passes when untouched or touched
+  // without introducing a category.
+  assert.deepEqual(await resolveBvClassification(db, {
+    isHeaderOnly: false,
+    existing: { workCategoryId: null, workSubCategoryId: null },
+    isEdit: true,
+    classificationTouched: true,
+    projectHasCategories: false,
+  }), { workCategoryId: null, workSubCategoryId: null });
+  // On a configured project the same writes are rejected.
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: true,
+      workCategoryId: null,
+      projectHasCategories: true,
+    }),
+    /header/i,
+  );
+  await assert.rejects(
+    () => resolveBvClassification(db, {
+      isHeaderOnly: false,
+      workCategoryId: null,
+      projectHasCategories: true,
+    }),
+    /kategori/i,
+  );
+});
+
+test("linked RAB classification patch follows leaf changes only", () => {
+  const linkedLeaf = {
+    isHeaderOnly: false, linkedRabItemId: "rab-1",
+    workCategoryId: "cat-1", workSubCategoryId: "sub-1",
+  };
+  // Subcategory update on a linked leaf propagates both FKs to the RAB row.
+  assert.deepEqual(
+    linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-1", workSubCategoryId: "sub-2" }),
+    { id: "rab-1", workCategoryId: "cat-1", workSubCategoryId: "sub-2" },
+  );
+  // Category update propagates both values as well.
+  assert.deepEqual(
+    linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-2", workSubCategoryId: "sub-9" }),
+    { id: "rab-1", workCategoryId: "cat-2", workSubCategoryId: "sub-9" },
+  );
+  // No classification change -> no linked-row write.
+  assert.equal(
+    linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-1", workSubCategoryId: "sub-1" }),
+    null,
+  );
+  // Headers are handled by the subtree cascade, never by the leaf patch.
+  assert.equal(
+    linkedRabClassificationPatch(
+      { isHeaderOnly: true, linkedRabItemId: "rab-2", workCategoryId: "cat-1", workSubCategoryId: null },
+      { workCategoryId: "cat-2", workSubCategoryId: null },
+    ),
+    null,
+  );
+  // Unlinked rows have nothing to sync.
+  assert.equal(
+    linkedRabClassificationPatch(
+      { isHeaderOnly: false, linkedRabItemId: null, workCategoryId: "cat-1", workSubCategoryId: "sub-1" },
+      { workCategoryId: "cat-1", workSubCategoryId: "sub-2" },
+    ),
+    null,
+  );
+  // Legacy leaf that stays unclassified during transition: no write.
+  assert.equal(
+    linkedRabClassificationPatch(
+      { isHeaderOnly: false, linkedRabItemId: "rab-3", workCategoryId: null, workSubCategoryId: null },
+      { workCategoryId: null, workSubCategoryId: null },
+    ),
+    null,
+  );
+});
+
+test("switch-job classification keeps BV ownership for linked rows and validates free rows", async () => {
+  const db = {
+    workSubCategory: {
+      findUnique: async ({ where }) => ({
+        id: where.id,
+        categoryId: where.id === "sub-1" ? "cat-1" : "cat-9",
+        isActive: where.id !== "sub-inactive",
+      }),
+    },
+  };
+  const project = {
+    workCategories: [
+      { workCategoryId: "cat-1", isActive: true },
+      { workCategoryId: "cat-2", isActive: true },
+      { workCategoryId: "cat-off", isActive: false },
+    ],
+  };
+
+  // Linked rows preserve BV classification and refuse explicit drift.
+  const linked = {
+    workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: { id: "bv-1" },
+  };
+  assert.deepEqual(await resolveRabSwitchJobClassification(db, {
+    existing: linked, project, jobTypeWorkCategoryId: "cat-2",
+  }), { workCategoryId: "cat-1", workSubCategoryId: "sub-1" });
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: linked, project, requestedWorkCategoryId: "cat-2",
+    }),
+    /mengikuti item BV/i,
+  );
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: linked, project, requestedWorkSubCategoryId: "sub-9",
+    }),
+    /mengikuti item BV/i,
+  );
+
+  // Unlinked rows may adopt a validated payload category; a stale subcategory
+  // is cleared when the category actually changes.
+  assert.deepEqual(await resolveRabSwitchJobClassification(db, {
+    existing: { workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: null },
+    project,
+    requestedWorkCategoryId: "cat-2",
+  }), { workCategoryId: "cat-2", workSubCategoryId: null });
+  // Payload subcategory is validated against the owning active category.
+  assert.deepEqual(await resolveRabSwitchJobClassification(db, {
+    existing: { workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: null },
+    project,
+    requestedWorkSubCategoryId: "sub-1",
+  }), { workCategoryId: "cat-1", workSubCategoryId: "sub-1" });
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: { workCategoryId: "cat-1", workSubCategoryId: null, bvItem: null },
+      project,
+      requestedWorkSubCategoryId: "sub-wrong",
+    }),
+    /bukan milik kategori/i,
+  );
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: { workCategoryId: "cat-1", workSubCategoryId: null, bvItem: null },
+      project,
+      requestedWorkSubCategoryId: "sub-inactive",
+    }),
+    /tidak aktif/i,
+  );
+  // Unknown/inactive payload categories are refused.
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: { workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: null },
+      project,
+      requestedWorkCategoryId: "cat-off",
+    }),
+    /tidak aktif pada project/i,
+  );
+  await assert.rejects(
+    () => resolveRabSwitchJobClassification(db, {
+      existing: { workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: null },
+      project,
+      requestedWorkCategoryId: "cat-ghost",
+    }),
+    /tidak aktif pada project/i,
+  );
+  // No payload category keeps the fallback chain: jobType category first.
+  assert.deepEqual(await resolveRabSwitchJobClassification(db, {
+    existing: { workCategoryId: null, workSubCategoryId: null, bvItem: null },
+    project,
+    jobTypeWorkCategoryId: "cat-2",
+  }), { workCategoryId: "cat-2", workSubCategoryId: null });
+  assert.deepEqual(await resolveRabSwitchJobClassification(db, {
+    existing: { workCategoryId: "cat-1", workSubCategoryId: "sub-1", bvItem: null },
+    project,
+    jobTypeWorkCategoryId: null,
+  }), { workCategoryId: "cat-1", workSubCategoryId: "sub-1" });
+});
+
+test("collectBvSubtreeIds walks the tree on the supplied db handle", async () => {
+  const queries = [];
+  const children = {
+    "root-1": ["a", "b"],
+    "a": ["a1"],
+    "b": [],
+    "a1": [],
+  };
+  const db = {
+    bvItem: {
+      findMany: async ({ where }) => {
+        queries.push(where.parentBvItemId.in);
+        const frontier = where.parentBvItemId.in;
+        return frontier.flatMap((id) => (children[id] || []).map((childId) => ({ id: childId })));
+      },
+    },
+  };
+  const ids = await collectBvSubtreeIds(db, ["root-1"]);
+  assert.deepEqual(ids.sort(), ["a", "a1", "b", "root-1"].sort());
+  // The supplied handle was used, never a global import.
+  assert.equal(queries[0][0], "root-1");
+  // Seeding duplicated ids does not loop forever or duplicate output.
+  const dedup = await collectBvSubtreeIds(db, ["root-1", "root-1"]);
+  assert.equal(new Set(dedup).size, dedup.length);
+});
+
+test("BV route keeps subtree reads on the active transaction and mirrors classification", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/bv.routes.js"), "utf8");
+  assert.match(source, /collectBvSubtreeIds\(tx, \[id\]\)/);
+  assert.match(source, /const linkedPatch = linkedRabClassificationPatch\(existing, classification\);[\s\S]*tx\.rabItem\.update\(/);
+  assert.match(source, /rootCategoryChanged[\s\S]*workCategoryId: finalWorkCategoryId, workSubCategoryId: null/);
+});
+
+test("withStatus detects work category and subcategory drift", () => {
+  const item = {
+    name: "Ceiling", paymentUnit: "m2", totalVolume: 10,
+    isHeaderOnly: false, sourceJobTypeId: null, disciplineLabel: "GENERAL",
+    groupId: null, parentBvItem: null,
+    workCategoryId: "cat-1", workSubCategoryId: "sub-1",
+    linkedRabItem: {
+      name: "Ceiling", paymentUnit: "m2", volume: 10,
+      isHeaderOnly: false, sourceJobTypeId: null, discipline: null,
+      groupId: null, parentId: null,
+      workCategoryId: "cat-1", workSubCategoryId: "sub-2",
+    },
+  };
+  assert.equal(require("./bvCalculationService").withStatus(item).linkStatus, "BELUM_SINKRON");
+  item.linkedRabItem.workSubCategoryId = "sub-1";
+  item.linkedRabItem.workCategoryId = "cat-2";
+  assert.equal(require("./bvCalculationService").withStatus(item).linkStatus, "BELUM_SINKRON");
+  item.linkedRabItem.workCategoryId = "cat-1";
+  assert.equal(require("./bvCalculationService").withStatus(item).linkStatus, "SUDAH_DILINK");
 });
 
 test("hapus batch HSPK membersihkan seluruh isi dalam satu transaksi", async () => {

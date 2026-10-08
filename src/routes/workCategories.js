@@ -5,13 +5,85 @@ const router = express.Router();
 const prisma = require("../lib/prisma");
 const { verifyToken, authorizeRoles } = require("../middleware/auth");
 const { normalizeWorkCategoryCode } = require("../services/bvCalculationService");
+const {
+  listWorkSubCategories,
+  createWorkSubCategory,
+  updateWorkSubCategory,
+  getWorkSubCategoryReferences,
+  deleteWorkSubCategory,
+} = require("../services/workSubCategoryService");
 
 const CATEGORY_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+
+function sendServiceError(res, error, label) {
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      error: error.message,
+      ...(error.references ? { references: error.references } : {}),
+    });
+  }
+  if (error instanceof TypeError) return res.status(400).json({ error: error.message });
+  console.error(label, error);
+  return res.status(500).json({ error: error.message || "Terjadi kesalahan." });
+}
+
+// Nested CRUD: a WorkSubCategory is globally owned by exactly one WorkCategory.
+router.get("/:categoryId/subcategories", verifyToken, async (req, res) => {
+  try {
+    const activeOnly = ["1", "true"].includes(String(req.query.activeOnly || "").toLowerCase());
+    res.json(await listWorkSubCategories(prisma, req.params.categoryId, { activeOnly }));
+  } catch (error) {
+    sendServiceError(res, error, "Error List WorkSubCategory:");
+  }
+});
+
+router.post("/:categoryId/subcategories", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
+  try {
+    const data = await createWorkSubCategory(prisma, req.params.categoryId, req.body);
+    res.status(201).json({ message: "Subkategori berhasil dibuat.", data });
+  } catch (error) {
+    sendServiceError(res, error, "Error Create WorkSubCategory:");
+  }
+});
+
+router.put("/:categoryId/subcategories/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
+  try {
+    const data = await updateWorkSubCategory(prisma, req.params.categoryId, req.params.id, req.body);
+    res.json({ message: "Subkategori berhasil diperbarui.", data });
+  } catch (error) {
+    sendServiceError(res, error, "Error Update WorkSubCategory:");
+  }
+});
+
+router.delete("/:categoryId/subcategories/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
+  try {
+    const data = await deleteWorkSubCategory(prisma, req.params.categoryId, req.params.id);
+    res.json({ message: "Subkategori berhasil dihapus.", data });
+  } catch (error) {
+    sendServiceError(res, error, "Error Delete WorkSubCategory:");
+  }
+});
+
+// GET /api/work-categories/:categoryId/subcategories/:id/references
+// Ringkasan dampak hapus subkategori (dipakai pemilih subkategori di BV/RAB).
+router.get("/:categoryId/subcategories/:id/references", verifyToken, async (req, res) => {
+  try {
+    const references = await getWorkSubCategoryReferences(
+      prisma,
+      req.params.categoryId,
+      req.params.id,
+    );
+    res.json({ references });
+  } catch (error) {
+    sendServiceError(res, error, "Error Get WorkSubCategory References:");
+  }
+});
 
 // GET /api/work-categories
 router.get("/", verifyToken, async (req, res) => {
   try {
     const categories = await prisma.workCategory.findMany({
+      include: { subCategories: { orderBy: [{ sortOrder: "asc" }, { name: "asc" }] } },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     });
     res.json(categories);
@@ -101,6 +173,7 @@ router.get(
               uploadBatches: true,
               bvItems: true,
               rabItems: true,
+              subCategories: true,
             },
           },
         },
@@ -122,8 +195,17 @@ router.get(
 router.delete("/:id", verifyToken, authorizeRoles(...CATEGORY_ROLES), async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.workCategory.findUnique({ where: { id } });
+    const existing = await prisma.workCategory.findUnique({
+      where: { id },
+      include: { _count: { select: { subCategories: true } } },
+    });
     if (!existing) return res.status(404).json({ error: "Kategori tidak ditemukan." });
+    if (existing._count.subCategories > 0) {
+      return res.status(409).json({
+        error: "Kategori masih memiliki subkategori. Hapus subkategori terlebih dahulu.",
+        references: { subCategories: existing._count.subCategories },
+      });
+    }
 
     const detached = await prisma.$transaction(async (tx) => {
       const projectConfigs = await tx.projectWorkCategory.deleteMany({
