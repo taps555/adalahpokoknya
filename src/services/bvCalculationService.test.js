@@ -697,6 +697,21 @@ test("collectBvSubtreeIds walks the tree on the supplied db handle", async () =>
   assert.equal(new Set(dedup).size, dedup.length);
 });
 
+test("project create/edit paths never require or auto-infer SIPIL/INTERIOR", () => {
+  const projectRoute = fs.readFileSync(path.join(__dirname, "../routes/projects.js"), "utf8");
+  assert.doesNotMatch(projectRoute, /requiredCode|Kategori Sipil wajib|Kategori Interior wajib/);
+  assert.doesNotMatch(projectRoute, /requestedConfigs = \["SIPIL", "INTERIOR"\]/);
+  assert.match(projectRoute, /Kategori wajib dikirim eksplisit/);
+
+  const projectForm = fs.readFileSync(
+    path.join(__dirname, "../../../bv-rab-dynamic-fe/src/components/CreateProjectModal.jsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(projectForm, /requiredCodes|Kategori Sipil wajib dipilih/);
+  assert.doesNotMatch(projectForm, /code !== "SIPIL" && code !== "INTERIOR"/);
+  assert.match(projectForm, /Pilih minimal satu kategori pekerjaan/);
+});
+
 test("canonical category migration defines the requested taxonomy and clears category references", () => {
   const sql = fs.readFileSync(
     path.join(__dirname, "../../prisma/migrations/20261009170000_reset_canonical_work_categories/migration.sql"),

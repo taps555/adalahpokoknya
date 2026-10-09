@@ -54,38 +54,10 @@ router.post(
       orderBy: { sortOrder: "asc" },
     });
     const categoryById = new Map(activeCategories.map((c) => [c.id, c]));
-    const categoryByCode = new Map(
-      activeCategories.map((c) => [String(c.code).toUpperCase(), c]),
-    );
 
-    // Konfigurasi kategori: pakai payload `categories` kalau ada, kalau tidak
-    // susun dari field legacy sipilGrade/interiorGrade agar klien lama tetap jalan.
-    let requestedConfigs = Array.isArray(categories) ? categories : [];
-    if (requestedConfigs.length === 0) {
-      requestedConfigs = [];
-      if (interiorGrade) {
-        const interiorCat = categoryByCode.get("INTERIOR");
-        if (interiorCat) {
-          requestedConfigs.push({
-            workCategoryId: interiorCat.id,
-            pricingMode: "HSPK",
-            grade: interiorGrade,
-            isActive: true,
-          });
-        }
-      }
-      if (sipilGrade) {
-        const sipilCat = categoryByCode.get("SIPIL");
-        if (sipilCat) {
-          requestedConfigs.push({
-            workCategoryId: sipilCat.id,
-            pricingMode: "HSPK",
-            grade: sipilGrade,
-            isActive: true,
-          });
-        }
-      }
-    }
+    // Kategori wajib dikirim eksplisit. Tidak ada fallback otomatis ke kode
+    // SIPIL/INTERIOR karena pilihan project sepenuhnya dinamis.
+    const requestedConfigs = Array.isArray(categories) ? categories : [];
 
     let normalizedCategories;
     try {
@@ -308,12 +280,9 @@ router.put(
       orderBy: { sortOrder: "asc" },
     });
     const categoryById = new Map(activeCategories.map((category) => [category.id, category]));
-    const categoryByCode = new Map(
-      activeCategories.map((category) => [String(category.code).toUpperCase(), category]),
-    );
 
-    // Edit memakai konfigurasi dari form yang sama dengan Create. Untuk klien lama
-    // yang tidak mengirim `categories`, pertahankan konfigurasi yang sudah tersimpan.
+    // Edit memakai konfigurasi dinamis dari form. Jika klien lama tidak
+    // mengirim categories, pertahankan konfigurasi yang memang sudah tersimpan.
     let requestedConfigs = Array.isArray(categories)
       ? categories
       : existing.workCategories.map((config) => ({
@@ -323,22 +292,8 @@ router.put(
           isActive: config.isActive,
         }));
 
-    // Migrasi aman untuk proyek legacy yang belum mempunyai ProjectWorkCategory.
-    if (requestedConfigs.length === 0) {
-      requestedConfigs = ["SIPIL", "INTERIOR"]
-        .map((code) => {
-          const category = categoryByCode.get(code);
-          if (!category) return null;
-          const legacyGrade = code === "SIPIL" ? existing.sipilGrade : existing.interiorGrade;
-          return {
-            workCategoryId: category.id,
-            pricingMode: legacyGrade ? "HSPK" : "CUSTOM",
-            grade: legacyGrade || null,
-            isActive: true,
-          };
-        })
-        .filter(Boolean);
-    }
+    // Proyek lama yang belum mempunyai ProjectWorkCategory tidak dipaksa ke
+    // SIPIL/INTERIOR. UI wajib meminta user memilih kategori dinamis.
 
     let normalizedCategories;
     try {
