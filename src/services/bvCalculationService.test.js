@@ -704,10 +704,13 @@ test("project create/edit paths never require or auto-infer SIPIL/INTERIOR", () 
   assert.doesNotMatch(projectRoute, /const gradeForCode|categoryByCode\.get/);
   assert.match(projectRoute, /Kategori wajib dikirim eksplisit/);
 
-  const projectForm = fs.readFileSync(
-    path.join(__dirname, "../../../bv-rab-dynamic-fe/src/components/CreateProjectModal.jsx"),
-    "utf8",
-  );
+  const frontendCandidates = [
+    path.resolve(__dirname, "../../../fe/src/components/CreateProjectModal.jsx"),
+    path.resolve(__dirname, "../../../bv-rab-dynamic-fe/src/components/CreateProjectModal.jsx"),
+  ];
+  const projectFormPath = frontendCandidates.find((candidate) => fs.existsSync(candidate));
+  assert.ok(projectFormPath, "CreateProjectModal.jsx frontend tidak ditemukan");
+  const projectForm = fs.readFileSync(projectFormPath, "utf8");
   assert.doesNotMatch(projectForm, /requiredCodes|Kategori Sipil wajib dipilih/);
   assert.doesNotMatch(projectForm, /code !== "SIPIL" && code !== "INTERIOR"/);
   assert.match(projectForm, /Pilih minimal satu kategori pekerjaan/);
