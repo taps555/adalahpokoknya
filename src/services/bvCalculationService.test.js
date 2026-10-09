@@ -701,6 +701,7 @@ test("project create/edit paths never require or auto-infer SIPIL/INTERIOR", () 
   const projectRoute = fs.readFileSync(path.join(__dirname, "../routes/projects.js"), "utf8");
   assert.doesNotMatch(projectRoute, /requiredCode|Kategori Sipil wajib|Kategori Interior wajib/);
   assert.doesNotMatch(projectRoute, /requestedConfigs = \["SIPIL", "INTERIOR"\]/);
+  assert.doesNotMatch(projectRoute, /const gradeForCode|categoryByCode\.get/);
   assert.match(projectRoute, /Kategori wajib dikirim eksplisit/);
 
   const projectForm = fs.readFileSync(
@@ -710,6 +711,21 @@ test("project create/edit paths never require or auto-infer SIPIL/INTERIOR", () 
   assert.doesNotMatch(projectForm, /requiredCodes|Kategori Sipil wajib dipilih/);
   assert.doesNotMatch(projectForm, /code !== "SIPIL" && code !== "INTERIOR"/);
   assert.match(projectForm, /Pilih minimal satu kategori pekerjaan/);
+});
+
+test("dynamic category write paths clear legacy discipline", () => {
+  const routeSource = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/bv.routes.js"), "utf8");
+  const uploadSource = fs.readFileSync(path.join(__dirname, "../routes/upload.routes.js"), "utf8");
+  const importSource = fs.readFileSync(path.join(__dirname, "importService.js"), "utf8");
+
+  assert.match(routeSource, /discipline: bvItem\.workCategoryId\s*\? null/);
+  assert.match(routeSource, /discipline: childBv\.workCategoryId\s*\? null/);
+  assert.match(routeSource, /discipline: parent\.workCategoryId \? null/);
+  assert.match(uploadSource, /effectiveDiscipline = workCategoryId \? null : discipline/);
+  assert.match(importSource, /effectiveDiscipline = workCategoryId \? null : discipline/);
+  assert.match(importSource, /`\|\$\{effectiveDiscipline\}\|\$\{grade\}\|\$\{workCategoryId \|\| ""\}`/);
+  assert.doesNotMatch(importSource, /`\|\$\{discipline\}\|\$\{grade\}\|\$\{workCategoryId \|\| ""\}`/);
+  assert.match(importSource, /discipline: null, workCategory: \{ connect/);
 });
 
 test("canonical category migration defines the requested taxonomy and clears category references", () => {

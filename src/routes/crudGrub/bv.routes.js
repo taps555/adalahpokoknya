@@ -899,7 +899,7 @@ async function pastikanIndukTerlink(tx, bvItem) {
       paymentUnit: parent.paymentUnit || "-",
       volume: Number(parent.totalVolume) || 0,
       isHeaderOnly: true,
-      discipline: disciplineForRab(parent),
+      discipline: parent.workCategoryId ? null : disciplineForRab(parent),
       workCategoryId: parent.workCategoryId || null,
       workSubCategoryId: null,
       grade: gradeForBv(parent, proj),
@@ -1137,7 +1137,9 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
           overheadPercent: overheadPct, // <-- Pastikan overheadPercent
           volume: vol,
           isHeaderOnly: bvItem.isHeaderOnly || false,
-          discipline: disciplineForRab(bvItem, ahspDiscipline),
+          discipline: bvItem.workCategoryId
+            ? null
+            : disciplineForRab(bvItem, ahspDiscipline),
           workCategoryId: bvItem.workCategoryId || null,
           workSubCategoryId: bvItem.workSubCategoryId || null,
           grade: gradeForBv(bvItem, bvProject, ahspDiscipline),
@@ -1188,9 +1190,11 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
               category: childCategory,
               overheadPercent: childOverhead,
               volume: childVol,
-              discipline: (childBv.disciplineLabel === "GENERAL" || !childBv.disciplineLabel)
+              discipline: childBv.workCategoryId
                 ? null
-                : childBv.disciplineLabel,
+                : (childBv.disciplineLabel === "GENERAL" || !childBv.disciplineLabel)
+                  ? null
+                  : childBv.disciplineLabel,
               workCategoryId: childBv.workCategoryId || null,
               workSubCategoryId: childBv.workSubCategoryId || null,
               grade: gradeForBv(childBv, bvProject),
@@ -1350,9 +1354,11 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
             reference: bulkPricing?.jobType?.reference || null,
             volume: Number(bvItem.totalVolume) || 0,
             isHeaderOnly: bvItem.isHeaderOnly || false,
-            discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+            discipline: bvItem.workCategoryId
               ? null
-              : bvItem.disciplineLabel,
+              : (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+                ? null
+                : bvItem.disciplineLabel,
             workCategoryId: bvItem.workCategoryId || null,
             workSubCategoryId: bvItem.workSubCategoryId || null,
             grade: gradeForBv(bvItem, bulkProject),
@@ -1485,9 +1491,11 @@ router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "P
             volume: vol,
             isHeaderOnly: bvItem.isHeaderOnly,
             sourceJobTypeId: bvItem.sourceJobTypeId || null,
-            discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+            discipline: bvItem.workCategoryId
               ? null
-              : bvItem.disciplineLabel,
+              : (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+                ? null
+                : bvItem.disciplineLabel,
             workCategoryId: bvItem.workCategoryId || null,
             workSubCategoryId: bvItem.workSubCategoryId || null,
             groupId: bvItem.groupId || null,
@@ -1612,9 +1620,11 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
           groupId: bvItem.groupId || null,
           isHeaderOnly: bvItem.isHeaderOnly,
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
-          discipline: (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+          discipline: bvItem.workCategoryId
             ? null
-            : bvItem.disciplineLabel,
+            : (bvItem.disciplineLabel === "GENERAL" || !bvItem.disciplineLabel)
+              ? null
+              : bvItem.disciplineLabel,
           workCategoryId: bvItem.workCategoryId || null,
           workSubCategoryId: bvItem.workSubCategoryId || null,
         },
@@ -2136,8 +2146,6 @@ async function buildBvSheetFiltered(
           if (!matchesLegacy && children.length === 0) return [];
           return [{ ...item, children }];
         }
-        if (!workCategoryId && categoryCode === "GENERAL") return [item, ...(item.children || [])];
-
         const itemLabel2 = String(item.disciplineLabel || "GENERAL").toUpperCase();
         const matches = workCategoryId
           ? item.workCategoryId === workCategoryId

@@ -27,8 +27,6 @@ router.post(
       name,
       location,
       hspkPeriod,
-      interiorGrade,
-      sipilGrade,
       categories,
       clientId,
       clientName,
@@ -131,8 +129,8 @@ router.post(
         // Proyek bersifat general (campuran); disiplin kosong, grade disimpan terpisah.
         discipline: null,
         grade: null,
-        interiorGrade: interiorGrade || null,
-        sipilGrade: sipilGrade || null,
+        interiorGrade: null,
+        sipilGrade: null,
         clientId: finalClientId,
         workCategories: {
           create: normalizedCategories.map((cfg) => ({
@@ -337,14 +335,6 @@ router.put(
       });
     }
 
-    const gradeForCode = (code) => {
-      const category = categoryByCode.get(code);
-      const config = normalizedCategories.find(
-        (item) => item.workCategoryId === category?.id && item.isActive,
-      );
-      return config?.pricingMode === "HSPK" ? config.grade : null;
-    };
-
     const project = await prisma.$transaction(async (tx) => {
       let finalClientId = clientId || existing.clientId;
       if (!clientId && clientName !== undefined) {
@@ -378,8 +368,8 @@ router.put(
           hspkPeriod: finalPeriod,
           discipline: null,
           grade: null,
-          interiorGrade: gradeForCode("INTERIOR"),
-          sipilGrade: gradeForCode("SIPIL"),
+          interiorGrade: null,
+          sipilGrade: null,
           clientId: finalClientId,
         },
         include: {

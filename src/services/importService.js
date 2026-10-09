@@ -66,14 +66,15 @@ async function upsertPriceItem(
   cache,
   { type, name, unit, price, period, discipline, grade, workCategoryId, filename, batchId },
 ) {
-  const key = priceItemKey(type, name, unit) + `|${discipline}|${grade}|${workCategoryId || ""}`;
+  const effectiveDiscipline = workCategoryId ? null : discipline;
+  const key = priceItemKey(type, name, unit) + `|${effectiveDiscipline}|${grade}|${workCategoryId || ""}`;
   if (cache.has(key)) return cache.get(key);
 
   const where = workCategoryId
     ? { uniq_price_item_work_category: { type, name, unit, period, workCategoryId, grade } }
     : { uniq_price_item: { type, name, unit, period, discipline, grade } };
   const categoryData = workCategoryId
-    ? { workCategory: { connect: { id: workCategoryId } } }
+    ? { discipline: null, workCategory: { connect: { id: workCategoryId } } }
     : {};
   const rec = await prisma.priceItem.upsert({
     where,
@@ -82,7 +83,7 @@ async function upsertPriceItem(
       source: filename,
       batch: { connect: { id: batchId } },
       ...(workCategoryId
-        ? { workCategory: { connect: { id: workCategoryId } } }
+        ? { discipline: null, workCategory: { connect: { id: workCategoryId } } }
         : {}),
     },
     create: {
@@ -91,7 +92,7 @@ async function upsertPriceItem(
       unit,
       price,
       period,
-      discipline,
+      discipline: effectiveDiscipline,
       grade,
       ...categoryData,
       source: filename,
@@ -130,6 +131,7 @@ async function importParsedData({
     },
   });
 
+  const effectiveDiscipline = workCategoryId ? null : discipline;
   const priceItemCache = new Map();
 
   try {
@@ -142,7 +144,7 @@ async function importParsedData({
         unit: m.unit,
         price: m.price,
         period,
-        discipline,
+        discipline: effectiveDiscipline,
         grade,
         workCategoryId,
         filename,
@@ -161,7 +163,7 @@ async function importParsedData({
             unit: item.unit,
             price: item.price,
             period,
-            discipline,
+            discipline: effectiveDiscipline,
             grade,
             workCategoryId,
             filename,
@@ -195,7 +197,7 @@ async function importParsedData({
                 name: job.name,
                 paymentUnit: job.paymentUnit,
                 period,
-                discipline,
+                discipline: effectiveDiscipline,
                 grade,
               },
             },
@@ -207,7 +209,7 @@ async function importParsedData({
           needsReview: !!job.needsReview,
           overhead: job.overhead,
           ...(workCategoryId
-            ? { workCategory: { connect: { id: workCategoryId } } }
+            ? { discipline: null, workCategory: { connect: { id: workCategoryId } } }
             : {}),
         },
         create: {
@@ -216,7 +218,7 @@ async function importParsedData({
           category: job.category,
           reference: job.reference,
           period,
-          discipline,
+          discipline: effectiveDiscipline,
           grade,
           ...(workCategoryId
             ? { workCategory: { connect: { id: workCategoryId } } }
@@ -237,7 +239,7 @@ async function importParsedData({
           if (item.price == null || item.coefficient == null) continue;
           const priceItemId = priceItemCache.get(
             priceItemKey(type, item.name, item.unit) +
-              `|${discipline}|${grade}|${workCategoryId || ""}`,
+              `|${effectiveDiscipline}|${grade}|${workCategoryId || ""}`,
           );
           if (!priceItemId) continue;
           componentRows.push({
