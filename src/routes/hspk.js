@@ -51,13 +51,30 @@ router.get('/grades', async (req, res, next) => {
     if (!discipline && !workCategoryId)
       return res.status(400).json({ error: 'discipline atau workCategoryId wajib diisi' });
 
+    let categoryWhere = {};
+    if (workCategoryId) {
+      const category = await prisma.workCategory.findUnique({
+        where: { id: workCategoryId },
+        select: { code: true },
+      });
+      const code = String(category?.code || '').toUpperCase();
+      categoryWhere = ['SIPIL', 'INTERIOR'].includes(code)
+        ? {
+            OR: [
+              { workCategoryId },
+              { workCategoryId: null, discipline: code },
+            ],
+          }
+        : { workCategoryId };
+    } else {
+      categoryWhere = { discipline };
+    }
+
     const rows = await prisma.jobType.findMany({
       where: {
         period: Number(period),
         grade: { not: null },
-        ...(workCategoryId
-          ? { workCategoryId }
-          : { discipline }),
+        ...categoryWhere,
       },
       distinct: ['grade'],
       select: { grade: true },

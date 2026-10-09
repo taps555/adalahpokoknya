@@ -72,10 +72,11 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       });
     }
 
+    const effectiveDiscipline = workCategoryId ? null : discipline;
     const result = await importParsedData({
       parsed,
       period,
-      discipline,
+      discipline: effectiveDiscipline,
       grade,
       workCategoryId,
       filename: req.file.originalname,
