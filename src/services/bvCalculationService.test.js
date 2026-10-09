@@ -697,6 +697,20 @@ test("collectBvSubtreeIds walks the tree on the supplied db handle", async () =>
   assert.equal(new Set(dedup).size, dedup.length);
 });
 
+test("canonical category migration defines the requested taxonomy and clears category references", () => {
+  const sql = fs.readFileSync(
+    path.join(__dirname, "../../prisma/migrations/20261009170000_reset_canonical_work_categories/migration.sql"),
+    "utf8",
+  );
+  for (const code of ["STRUKTUR", "ARSITEKTUR", "MEP", "INTERIOR", "P.TN", "P.BS", "P.BT", "DP", "PA", "PDL", "CAT", "PJ", "EL", "FS", "CCTV", "PLB", "FUR", "CRP", "FLR", "BW"]) {
+    assert.match(sql, new RegExp(`'${code.replace('.', '\\.')}'`));
+  }
+  assert.match(sql, /UPDATE "BvItem" SET "workCategoryId" = NULL/);
+  assert.match(sql, /UPDATE "RabItem" SET "workCategoryId" = NULL/);
+  assert.match(sql, /DELETE FROM "WorkSubCategory"/);
+  assert.match(sql, /DELETE FROM "WorkCategory"/);
+});
+
 test("BV route keeps subtree reads on the active transaction and mirrors classification", () => {
   const source = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/bv.routes.js"), "utf8");
   assert.match(source, /collectBvSubtreeIds\(tx, \[id\]\)/);
