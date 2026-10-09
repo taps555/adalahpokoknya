@@ -100,23 +100,8 @@ router.post(
       throw err;
     }
 
-    // Setiap project wajib menyertakan Sipil dan Interior.
-    const activeCodes = new Set(
-      normalizedCategories
-        .filter((cfg) => cfg.isActive)
-        .map((cfg) => {
-          const category = categoryById.get(cfg.workCategoryId);
-          return String(category?.code || "").toUpperCase();
-        }),
-    );
-    for (const requiredCode of ["SIPIL", "INTERIOR"]) {
-      if (!activeCodes.has(requiredCode)) {
-        const label = requiredCode === "SIPIL" ? "Sipil" : "Interior";
-        return res
-          .status(400)
-          .json({ error: `Kategori ${label} wajib ada di setiap project.` });
-      }
-    }
+    // Kategori project sepenuhnya dinamis; minimal satu kategori aktif sudah
+    // divalidasi oleh normalizeRequiredProjectWorkCategoryConfigs().
 
     // Validasi ketersediaan data HSPK untuk tiap kategori bermode HSPK.
     for (const cfg of normalizedCategories) {

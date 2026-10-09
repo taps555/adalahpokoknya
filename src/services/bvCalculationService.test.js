@@ -358,31 +358,19 @@ test("filter kategori RAB memakai FK dan fallback legacy terbatas", () => {
   assert.deepEqual(buildWorkCategoryItemWhere({ categoryCode: "GENERAL" }), {});
 });
 
-test("konfigurasi edit proyek menerima SIPIL dan INTERIOR CUSTOM tanpa grade", () => {
+test("konfigurasi proyek menerima kategori dinamis tanpa mewajibkan SIPIL atau INTERIOR", () => {
   const categories = [
-    { id: "cat-sipil", code: "SIPIL", name: "Sipil", isActive: true },
-    { id: "cat-interior", code: "INTERIOR", name: "Interior", isActive: true },
-    { id: "cat-mep", code: "MEP", name: "MEP", isActive: true },
+    { id: "cat-konstruksi", code: "KONSTRUKSI", name: "Konstruksi", isActive: true },
+    { id: "cat-canopy", code: "CANOPY", name: "Canopy", isActive: true },
   ];
 
   assert.deepEqual(
     normalizeRequiredProjectWorkCategoryConfigs([
-      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", isActive: true },
-      { workCategoryId: "cat-interior", pricingMode: "CUSTOM", isActive: true },
-      { workCategoryId: "cat-mep", pricingMode: "HSPK", grade: "B", isActive: true },
+      { workCategoryId: "cat-canopy", pricingMode: "HSPK", grade: "B", isActive: true },
     ], categories),
     [
-      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", grade: null, isActive: true },
-      { workCategoryId: "cat-interior", pricingMode: "CUSTOM", grade: null, isActive: true },
-      { workCategoryId: "cat-mep", pricingMode: "HSPK", grade: "B", isActive: true },
+      { workCategoryId: "cat-canopy", pricingMode: "HSPK", grade: "B", isActive: true },
     ],
-  );
-
-  assert.throws(
-    () => normalizeRequiredProjectWorkCategoryConfigs([
-      { workCategoryId: "cat-sipil", pricingMode: "CUSTOM", isActive: true },
-    ], categories),
-    /Interior wajib/i,
   );
 });
 
@@ -539,14 +527,23 @@ test("linked RAB classification patch follows leaf changes only", () => {
   // Subcategory update on a linked leaf propagates both FKs to the RAB row.
   assert.deepEqual(
     linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-1", workSubCategoryId: "sub-2" }),
-    { id: "rab-1", workCategoryId: "cat-1", workSubCategoryId: "sub-2" },
+    { id: "rab-1", workCategoryId: "cat-1", workSubCategoryId: "sub-2", discipline: null },
   );
   // Category update propagates both values as well.
   assert.deepEqual(
     linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-2", workSubCategoryId: "sub-9" }),
-    { id: "rab-1", workCategoryId: "cat-2", workSubCategoryId: "sub-9" },
+    { id: "rab-1", workCategoryId: "cat-2", workSubCategoryId: "sub-9", discipline: null },
   );
-  // No classification change -> no linked-row write.
+  // Same category/subcategory still emits a repair when linked RAB retains a
+  // stale legacy discipline alongside a dynamic category.
+  assert.deepEqual(
+    linkedRabClassificationPatch({
+      ...linkedLeaf,
+      linkedRabItem: { discipline: "SIPIL" },
+    }, { workCategoryId: "cat-1", workSubCategoryId: "sub-1" }),
+    { id: "rab-1", workCategoryId: "cat-1", workSubCategoryId: "sub-1", discipline: null },
+  );
+  // No classification change and no stale discipline -> no linked-row write.
   assert.equal(
     linkedRabClassificationPatch(linkedLeaf, { workCategoryId: "cat-1", workSubCategoryId: "sub-1" }),
     null,
@@ -703,8 +700,8 @@ test("collectBvSubtreeIds walks the tree on the supplied db handle", async () =>
 test("BV route keeps subtree reads on the active transaction and mirrors classification", () => {
   const source = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/bv.routes.js"), "utf8");
   assert.match(source, /collectBvSubtreeIds\(tx, \[id\]\)/);
-  assert.match(source, /const linkedPatch = linkedRabClassificationPatch\(existing, classification\);[\s\S]*tx\.rabItem\.update\(/);
-  assert.match(source, /rootCategoryChanged[\s\S]*workCategoryId: finalWorkCategoryId, workSubCategoryId: null/);
+  assert.match(source, /const linkedPatch = linkedRabClassificationPatch\(existing, classification\);[\s\S]*discipline: linkedPatch\.discipline/);
+  assert.match(source, /rootCategoryChanged[\s\S]*disciplineLabel: finalWorkCategoryId \? null : finalDisciplineLabel[\s\S]*discipline: null/);
 });
 
 test("withStatus detects work category and subcategory drift", () => {

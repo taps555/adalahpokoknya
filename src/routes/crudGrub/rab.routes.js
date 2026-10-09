@@ -427,7 +427,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
         data: {
           category: calc.jobType.category,
           reference: calc.jobType.reference,
-          discipline: calc.jobType.discipline,
+          discipline: classification.workCategoryId ? null : calc.jobType.discipline,
           workCategoryId: classification.workCategoryId,
           workSubCategoryId: classification.workSubCategoryId,
           grade: calc.jobType.grade,
@@ -736,7 +736,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
           data: {
             category: calc.jobType.category,
             reference: calc.jobType.reference,
-            discipline: calc.jobType.discipline,
+            discipline: classification.workCategoryId ? null : calc.jobType.discipline,
             workCategoryId: classification.workCategoryId,
             workSubCategoryId: classification.workSubCategoryId,
             grade: calc.jobType.grade,

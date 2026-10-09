@@ -29,11 +29,15 @@ const BV_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
 const VALID_DISCIPLINE_LABELS = new Set(["GENERAL", "SIPIL", "INTERIOR"]);
 
 function normalizeDisciplineLabel(value) {
-  const normalized = String(value || "GENERAL").trim().toUpperCase();
+  const normalized = String(value || '').trim().toUpperCase();
   if (!VALID_DISCIPLINE_LABELS.has(normalized)) {
-    throw new TypeError("Label disiplin harus GENERAL, SIPIL, atau INTERIOR.");
+    throw new TypeError('Label disiplin harus GENERAL, SIPIL, atau INTERIOR.');
   }
   return normalized;
+}
+
+function disciplineLabelForCategory(workCategoryId, disciplineLabel) {
+  return workCategoryId ? null : normalizeDisciplineLabel(disciplineLabel);
 }
 
 function ensureBvRole(req, res) {
@@ -222,9 +226,13 @@ router.post(
       }
     }
 
-    const finalDisciplineLabel = parent
+    const requestedDisciplineLabel = parent
       ? parent.disciplineLabel
-      : normalizeDisciplineLabel(disciplineLabel);
+      : disciplineLabel;
+    const finalDisciplineLabel = disciplineLabelForCategory(
+      workCategoryId || parent?.workCategoryId,
+      requestedDisciplineLabel,
+    );
     const classification = await resolveBvClassification(prisma, {
       isHeaderOnly,
       parent,
@@ -402,7 +410,10 @@ router.put(
 
     const existing = await prisma.bvItem.findUnique({
       where: { id },
-      include: { breakdowns: true },
+      include: {
+        breakdowns: true,
+        linkedRabItem: { select: { discipline: true } },
+      },
     });
     if (!existing)
       return res.status(404).json({ error: "Item BV tidak ditemukan." });
@@ -454,16 +465,20 @@ router.put(
       });
     }
 
-    const finalDisciplineLabel = selectedParent
+    const requestedDisciplineLabel = selectedParent
       ? selectedParent.disciplineLabel
       : disciplineLabel !== undefined
-        ? normalizeDisciplineLabel(disciplineLabel)
+        ? disciplineLabel
         : existing.disciplineLabel;
     const finalWorkCategoryId = selectedParent
       ? selectedParent.workCategoryId || null
       : workCategoryId !== undefined
         ? workCategoryId || null
         : existing.workCategoryId || null;
+    const finalDisciplineLabel = disciplineLabelForCategory(
+      finalWorkCategoryId,
+      requestedDisciplineLabel,
+    );
     const classificationTouched = workCategoryId !== undefined
       || workSubCategoryId !== undefined
       || (parentBvItemId !== undefined && (parentBvItemId || null) !== (existing.parentBvItemId || null))
@@ -618,7 +633,7 @@ router.put(
             ? { isHeaderOnly: finalIsHeaderOnly }
             : {}),
           ...(finalGroupId !== undefined ? { groupId: finalGroupId } : {}),
-          ...(disciplineLabel !== undefined && !selectedParent
+          ...(disciplineLabel !== undefined || workCategoryId !== undefined || selectedParent
             ? { disciplineLabel: finalDisciplineLabel }
             : {}),
           ...(ecommerceLink !== undefined ? { ecommerceLink } : {}),
@@ -645,16 +660,18 @@ router.put(
           data: {
             workCategoryId: linkedPatch.workCategoryId,
             workSubCategoryId: linkedPatch.workSubCategoryId,
+            discipline: linkedPatch.discipline,
           },
         });
       }
 
-      if (disciplineLabel !== undefined && !selectedParent) {
+      if ((disciplineLabel !== undefined || workCategoryId !== undefined) && !selectedParent) {
         const finalLabel = finalDisciplineLabel;
         const subtreeIds = await collectBvSubtreeIds(tx, [id]);
-        if (subtreeIds.length > 0) {
+        const descendantIds = subtreeIds.filter((subtreeId) => subtreeId !== id);
+        if (descendantIds.length > 0) {
           await tx.bvItem.updateMany({
-            where: { id: { in: subtreeIds } },
+            where: { id: { in: descendantIds } },
             data: { disciplineLabel: finalLabel },
           });
         }
@@ -689,7 +706,11 @@ router.put(
         if (descendantIds.length > 0) {
           await tx.bvItem.updateMany({
             where: { id: { in: descendantIds } },
-            data: { workCategoryId: finalWorkCategoryId, workSubCategoryId: null },
+            data: {
+              disciplineLabel: finalWorkCategoryId ? null : finalDisciplineLabel,
+              workCategoryId: finalWorkCategoryId,
+              workSubCategoryId: null,
+            },
           });
         }
         // Headers keep no subcategory of their own, so their linked RAB row is
@@ -704,7 +725,11 @@ router.put(
           if (rabIds.length > 0) {
             await tx.rabItem.updateMany({
               where: { id: { in: rabIds } },
-              data: { workCategoryId: finalWorkCategoryId, workSubCategoryId: null },
+              data: {
+                workCategoryId: finalWorkCategoryId,
+                workSubCategoryId: null,
+                discipline: null,
+              },
             });
           }
         }

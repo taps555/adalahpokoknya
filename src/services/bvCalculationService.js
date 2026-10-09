@@ -356,11 +356,20 @@ function linkedRabClassificationPatch(existing, classification) {
   if (!existing?.linkedRabItemId || existing.isHeaderOnly) return null;
   const workCategoryId = classification?.workCategoryId || null;
   const workSubCategoryId = classification?.workSubCategoryId || null;
+  // A dynamic category owns classification; legacy discipline must be cleared
+  // so a migrated row cannot keep stale SIPIL/INTERIOR data.
+  const discipline = workCategoryId
+    ? null
+    : (existing.disciplineLabel === "GENERAL" ? null : existing.disciplineLabel || null);
+  const staleLinkedDiscipline = Boolean(
+    workCategoryId && existing.linkedRabItem?.discipline,
+  );
   if (
     workCategoryId === (existing.workCategoryId || null)
     && workSubCategoryId === (existing.workSubCategoryId || null)
+    && !staleLinkedDiscipline
   ) return null;
-  return { id: existing.linkedRabItemId, workCategoryId, workSubCategoryId };
+  return { id: existing.linkedRabItemId, workCategoryId, workSubCategoryId, discipline };
 }
 
 async function resolveRabSwitchJobClassification(db, {
@@ -516,22 +525,7 @@ function normalizeProjectWorkCategoryConfigs(configs, categories) {
 }
 
 function normalizeRequiredProjectWorkCategoryConfigs(configs, categories) {
-  const normalized = normalizeProjectWorkCategoryConfigs(configs, categories);
-  const categoryById = new Map((categories || []).map((category) => [category.id, category]));
-  const activeCodes = new Set(
-    normalized
-      .filter((config) => config.isActive)
-      .map((config) => String(categoryById.get(config.workCategoryId)?.code || "").toUpperCase()),
-  );
-
-  for (const requiredCode of ["SIPIL", "INTERIOR"]) {
-    if (!activeCodes.has(requiredCode)) {
-      const label = requiredCode === "SIPIL" ? "Sipil" : "Interior";
-      throw new TypeError(`Kategori ${label} wajib ada di setiap project.`);
-    }
-  }
-
-  return normalized;
+  return normalizeProjectWorkCategoryConfigs(configs, categories);
 }
 
 module.exports = {
