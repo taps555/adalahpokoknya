@@ -137,9 +137,12 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
     if (!items.length) return res.status(400).json({ error: 'Pilih minimal satu item RAB sebagai sumber kontrak.' });
 
     const snapshot = buildSpkSnapshot(project, { id: projectId }, items, type);
-    const totalContractValue = Number(req.body.contractValue || snapshot.contractValue);
-    if (totalContractValue !== snapshot.contractValue) {
-      return res.status(400).json({ error: 'Nilai kontrak harus berasal dari snapshot RAB yang dipilih.' });
+    const totalContractValue = snapshot.contractValue;
+    if (req.body.contractValue !== undefined && req.body.contractValue !== null && req.body.contractValue !== '') {
+      const incomingValue = Number(req.body.contractValue);
+      if (Number.isFinite(incomingValue) && Math.abs(Math.round(incomingValue) - snapshot.contractValue) > 1) {
+        return res.status(400).json({ error: 'Nilai kontrak harus berasal dari snapshot RAB yang dipilih.' });
+      }
     }
     const termData = normalizeSpkTerms(req.body.terms, totalContractValue, req.body.retentionPercent || 0, false);
     const contract = await prisma.spkContract.create({

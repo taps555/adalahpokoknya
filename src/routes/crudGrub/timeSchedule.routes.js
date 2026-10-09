@@ -154,7 +154,7 @@ router.delete("/rap-items/:id/schedule", async (req, res) => {
 router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline, workCategoryId, viewMode = 'week' } = req.query;
+    const { discipline, workCategoryId, workSubCategoryId, viewMode = 'week' } = req.query;
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -175,6 +175,10 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
       itemWhere = buildWorkCategoryItemWhere({ categoryCode: discipline });
     }
 
+    if (workSubCategoryId) {
+      itemWhere.workSubCategoryId = workSubCategoryId;
+    }
+
     const groups = await prisma.rabGroup.findMany({
       where: { projectId, parentId: null },
       include: {
@@ -184,6 +188,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
             timeSchedule: true,
             bvItem: { select: { id: true, parentBvItemId: true } },
             workCategory: true,
+            workSubCategory: true,
           },
           orderBy: { order: "asc" },
         },
@@ -195,6 +200,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
                 timeSchedule: true,
                 bvItem: { select: { id: true, parentBvItemId: true } },
                 workCategory: true,
+                workSubCategory: true,
               },
               orderBy: { order: "asc" },
             },
@@ -215,6 +221,7 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         timeSchedule: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
         workCategory: true,
+        workSubCategory: true,
       },
       orderBy: { order: "asc" },
     });
@@ -389,6 +396,10 @@ router.get("/projects/:projectId/rap-time-schedule", async (req, res) => {
         isStip: it.isStip,
         discipline: it.discipline,
         workCategoryCode: it.workCategory ? it.workCategory.code : null,
+        workCategoryId: it.workCategoryId,
+        workSubCategoryId: it.workSubCategoryId,
+        workSubCategoryCode: it.workSubCategory ? it.workSubCategory.code : null,
+        workSubCategoryName: it.workSubCategory ? it.workSubCategory.name : null,
       };
     });
 

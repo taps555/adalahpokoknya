@@ -136,7 +136,7 @@ module.exports = router;
 router.get("/projects/:projectId/join-opname", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline, workCategoryId } = req.query;
+    const { discipline, workCategoryId, workSubCategoryId } = req.query;
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
@@ -166,8 +166,18 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
           include: {
             dailyProgress: true,
             timeSchedule: true,
-            bvItem: { select: { id: true, parentBvItemId: true } },
+            bvItem: {
+              select: {
+                id: true,
+                parentBvItemId: true,
+                workCategoryId: true,
+                workSubCategoryId: true,
+                workCategory: true,
+                workSubCategory: true,
+              },
+            },
             workCategory: true,
+            workSubCategory: true,
           },
           orderBy: { order: "asc" },
         },
@@ -178,8 +188,18 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
               include: {
                 dailyProgress: true,
                 timeSchedule: true,
-                bvItem: { select: { id: true, parentBvItemId: true } },
+                bvItem: {
+                  select: {
+                    id: true,
+                    parentBvItemId: true,
+                    workCategoryId: true,
+                    workSubCategoryId: true,
+                    workCategory: true,
+                    workSubCategory: true,
+                  },
+                },
                 workCategory: true,
+                workSubCategory: true,
               },
               orderBy: { order: "asc" },
             },
@@ -199,29 +219,56 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
       include: {
         dailyProgress: true,
         timeSchedule: true,
-        bvItem: { select: { id: true, parentBvItemId: true } },
+        bvItem: {
+          select: {
+            id: true,
+            parentBvItemId: true,
+            workCategoryId: true,
+            workSubCategoryId: true,
+            workCategory: true,
+            workSubCategory: true,
+          },
+        },
         workCategory: true,
+        workSubCategory: true,
       },
       orderBy: { order: "asc" },
     });
 
-    const rabItems = [];
+    const allRabItems = [];
     groups.forEach((group) => {
-      rabItems.push(
+      allRabItems.push(
         ...group.items.map((it) => ({
           ...it,
           groupName: group.name.toUpperCase(),
         })),
       );
       (group.children || []).forEach((sub) => {
-        rabItems.push(
+        allRabItems.push(
           ...sub.items.map((it) => ({ ...it, groupName: sub.name })),
         );
       });
     });
-    rabItems.push(
+    allRabItems.push(
       ...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })),
     );
+
+    let rabItems = allRabItems;
+    if (workSubCategoryId) {
+      // Pilihan B: Ambil item anak yang cocok DITAMBAH item parent-nya
+      const matchingChildItems = allRabItems.filter(
+        (it) => it.workSubCategoryId === workSubCategoryId,
+      );
+      const matchingParentBvItemIds = new Set(
+        matchingChildItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
+      );
+
+      rabItems = allRabItems.filter((it) => {
+        if (it.workSubCategoryId === workSubCategoryId) return true;
+        if (matchingParentBvItemIds.has(it.bvItem?.id)) return true;
+        return false;
+      });
+    }
 
     const parentIds = new Set(
       rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
@@ -351,6 +398,10 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         };
       });
 
+      const isChild = !!it.bvItem?.parentBvItemId;
+      const workCategory = it.workCategory || it.bvItem?.workCategory;
+      const workSubCategory = it.workSubCategory || it.bvItem?.workSubCategory;
+
       return {
         rabItemId: it.id,
         name: it.name,
@@ -361,9 +412,20 @@ router.get("/projects/:projectId/join-opname", async (req, res) => {
         weight,
         groupId: it.groupId,
         groupName: it.groupName,
-        discipline: it.discipline,
-        workCategoryCode: it.workCategory ? it.workCategory.code : null,
+        isChild,
         hasChildren,
+        discipline: it.discipline,
+        workCategoryId: it.workCategoryId || it.bvItem?.workCategoryId,
+        workCategoryCode: workCategory ? workCategory.code : null,
+        workCategoryName: workCategory ? workCategory.name : null,
+        workSubCategoryId: it.workSubCategoryId || it.bvItem?.workSubCategoryId,
+        workSubCategoryCode: workSubCategory ? workSubCategory.code : null,
+        workSubCategoryName: workSubCategory ? workSubCategory.name : null,
+        workSubCategory: workSubCategory ? {
+          id: workSubCategory.id,
+          code: workSubCategory.code,
+          name: workSubCategory.name,
+        } : null,
         dailyBreakdown,
         rekapProgress,
         status: statusFor(rekapProgress),

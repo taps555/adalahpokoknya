@@ -232,7 +232,7 @@ function drawItemRow(doc, y, rowH, item, no, COL, X) {
 router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
   try {
     const { projectId } = req.params;
-    const { discipline, workCategoryId, date, type = "daily" } = req.query;
+    const { discipline, workCategoryId, workSubCategoryId, date, type = "daily" } = req.query;
 
     const project = await prisma.project.findUnique({ where: { id: projectId } });
     if (!project) return res.status(404).send("Project not found");
@@ -257,14 +257,14 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
       include: {
         items: {
           where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
-          include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true },
+          include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true, workSubCategory: true },
           orderBy: { order: "asc" }
         },
         children: {
           include: {
             items: {
               where: Object.keys(itemWhere).length > 0 ? itemWhere : undefined,
-              include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true },
+              include: { dailyProgress: true, bvItem: { select: { id: true, parentBvItemId: true } }, workCategory: true, workSubCategory: true },
               orderBy: { order: "asc" }
             }
           },
@@ -284,6 +284,7 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
         dailyProgress: true,
         bvItem: { select: { id: true, parentBvItemId: true } },
         workCategory: true,
+        workSubCategory: true,
       },
       orderBy: { order: "asc" },
     });
@@ -296,6 +297,25 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
       });
     });
     rabItems.push(...ungroupedItems.map((it) => ({ ...it, groupName: "Tanpa Group" })));
+
+    let targetSubCategory = null;
+    if (workSubCategoryId) {
+      targetSubCategory = await prisma.workSubCategory.findUnique({
+        where: { id: workSubCategoryId }
+      });
+      const matchingChildItems = rabItems.filter(
+        (it) => it.workSubCategoryId === workSubCategoryId,
+      );
+      const matchingParentBvItemIds = new Set(
+        matchingChildItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean),
+      );
+
+      rabItems = rabItems.filter((it) => {
+        if (it.workSubCategoryId === workSubCategoryId) return true;
+        if (matchingParentBvItemIds.has(it.bvItem?.id)) return true;
+        return false;
+      });
+    }
 
     const parentIds = new Set();
     rabItems.forEach((it) => {
@@ -467,8 +487,10 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
 
     const doc = new PDFDocument({ size: "A4", layout: "portrait", margin: MARGIN });
     const titleType = { "daily": "HARIAN", "weekly": "MINGGUAN", "monthly": "BULANAN", "overall": "KESELURUHAN" }[type];
-    const fullTitle = `LAPORAN JOIN OPNAME - ${titleType}${discipline && discipline !== "General" ? " - " + discipline.toUpperCase() : ""}`;
-    const fileName = `Join_Opname_${project.name}_${titleType}_${fmtDate(targetDate)}.pdf`;
+    const subTitle = targetSubCategory ? ` (${targetSubCategory.code.toUpperCase()})` : "";
+    const fullTitle = `LAPORAN JOIN OPNAME - ${titleType}${discipline && discipline !== "General" ? " - " + discipline.toUpperCase() : ""}${subTitle}`;
+    const subFilePart = targetSubCategory ? `_${targetSubCategory.code.toUpperCase()}` : "";
+    const fileName = `Join_Opname_${project.name}_${titleType}${subFilePart}_${fmtDate(targetDate)}.pdf`;
     res.setHeader("Content-disposition", `inline; filename="${fileName}"`);
     res.setHeader("Content-type", "application/pdf");
     doc.pipe(res);

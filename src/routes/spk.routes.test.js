@@ -47,6 +47,7 @@ function loadRouterWithPrisma(mockPrisma) {
 
 async function withServer(router, run) {
   const app = express();
+  app.use(express.json());
   app.use('/api', router);
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -154,3 +155,76 @@ test('PDF endpoints require authentication', async () => {
     loaded.restore();
   }
 });
+
+test('POST spk-contracts tolerates decimal floating point from frontend and uses rounded snapshot value', async () => {
+  let createdPayload = null;
+  const mockPrisma = {
+    project: {
+      findUnique: async () => ({
+        id: 'proj-1',
+        name: 'Project Tes',
+        location: 'Surabaya',
+        client: { id: 'client-1', name: 'Pak Budi' },
+      }),
+    },
+    rabItem: {
+      findMany: async () => [
+        {
+          id: 'item-1',
+          name: 'Item Pecahan',
+          paymentUnit: 'ls',
+          volume: 1,
+          rabUnitPrice: 29335.1893,
+          rabTotalPrice: 29335.1893,
+          rapUnitPrice: 29335.1893,
+          rapTotalPrice: 29335.1893,
+        },
+      ],
+    },
+    spkContract: {
+      create: async ({ data }) => {
+        createdPayload = data;
+        return {
+          id: 'spk-new-1',
+          ...data,
+          createdAt: new Date(),
+          terms: [{ id: 't1', ...data.terms.create[0] }],
+        };
+      },
+    },
+  };
+
+  const loaded = loadRouterWithPrisma(mockPrisma);
+  const token = jwt.sign({ userId: 'user-1' }, process.env.JWT_SECRET || 'rahasia_super_aman_123');
+
+  try {
+    await withServer(loaded.router, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/projects/proj-1/spk-contracts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          type: 'CLIENT',
+          rabItemIds: ['item-1'],
+          contractValue: 29335.1893, // unrounded value sent by frontend
+          firstParty: { name: 'Direktur DJP', position: 'Direktur' },
+          secondParty: { name: 'Pak Budi', position: 'Owner' },
+          workDurationDays: 14,
+          startDate: '2026-10-10',
+          endDate: '2026-10-24',
+          terms: [{ label: 'Termin 1', percent: 100, amount: 29335 }],
+        }),
+      });
+
+      assert.equal(response.status, 201);
+      const json = await response.json();
+      assert.equal(json.contractValue, 29335);
+      assert.equal(createdPayload.contractValue, 29335);
+    });
+  } finally {
+    loaded.restore();
+  }
+});
+

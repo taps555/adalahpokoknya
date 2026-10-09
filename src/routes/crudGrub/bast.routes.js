@@ -74,11 +74,28 @@ router.get("/projects/:projectId/bast", async (req, res) => {
       return res.status(404).json({ error: "Project tidak ditemukan." });
     }
 
-    const basts = await prisma.bast.findMany({
-      where: { projectId },
-      include: { photos: { orderBy: { order: "asc" } } },
-      orderBy: { createdAt: "desc" },
-    });
+    const [basts, clientSpks] = await Promise.all([
+      prisma.bast.findMany({
+        where: { projectId },
+        include: { photos: { orderBy: { order: "asc" } } },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.spkContract.findMany({
+        where: {
+          projectId,
+          type: "CLIENT",
+          spkNumber: { not: null },
+          status: { not: "DIBATALKAN" },
+        },
+        select: {
+          id: true,
+          spkNumber: true,
+          status: true,
+          partyData: true,
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
 
     // Gabung data DB dengan input BAST
     const responseData = basts.map((bast) => ({
@@ -88,7 +105,17 @@ router.get("/projects/:projectId/bast", async (req, res) => {
       namaClient: project.client.name,
     }));
 
-    res.json({ data: responseData });
+    res.json({
+      data: responseData,
+      projectClientName: project.client ? project.client.name : "",
+      clientSpks: clientSpks.map((c) => ({
+        id: c.id,
+        spkNumber: c.spkNumber,
+        status: c.status,
+        clientName: c.partyData?.firstParty?.name || project.client?.name || "",
+      })),
+      hasIssuedClientSpk: clientSpks.length > 0,
+    });
   } catch (error) {
     console.error("Error Get BAST List:", error);
     res.status(500).json({ error: "Terjadi kesalahan pada server." });
@@ -98,7 +125,8 @@ router.get("/projects/:projectId/bast", async (req, res) => {
 /**
  * POST /projects/:projectId/bast
  * Buat BAST baru + Foto
- */ router.post(
+ */
+router.post(
   "/projects/:projectId/bast",
   uploadBast.array("photos", MAX_PHOTOS_PER_ITEM),
   async (req, res) => {
@@ -121,6 +149,35 @@ router.get("/projects/:projectId/bast", async (req, res) => {
       if (!project)
         return res.status(404).json({ error: "Project tidak ditemukan." });
 
+      // Cek ketersediaan SPK Client yang terbit dengan spkNumber
+      const clientSpks = await prisma.spkContract.findMany({
+        where: {
+          projectId,
+          type: "CLIENT",
+          spkNumber: { not: null },
+          status: { not: "DIBATALKAN" },
+        },
+      });
+
+      if (!clientSpks || clientSpks.length === 0) {
+        return res.status(400).json({
+          error:
+            "BAST tidak dapat dibuat karena project ini belum memiliki SPK Client yang diterbitkan (Nomor SPK belum ada). Silakan terbitkan SPK Client terlebih dahulu di menu SPK Client.",
+        });
+      }
+
+      // Validasi nomor SPK yang dipilih
+      const validSpkNumbers = clientSpks.map((c) => c.spkNumber);
+      const chosenSpkNumber =
+        spkNumber || (clientSpks.length === 1 ? clientSpks[0].spkNumber : null);
+
+      if (!chosenSpkNumber || !validSpkNumbers.includes(chosenSpkNumber)) {
+        return res.status(400).json({
+          error:
+            "Nomor SPK tidak valid atau belum dipilih dari daftar SPK Client yang terbit.",
+        });
+      }
+
       // Siapkan array foto dari file yang ditangkap Multer
       const photosData = req.files
         ? req.files.map((file, index) => ({
@@ -133,7 +190,7 @@ router.get("/projects/:projectId/bast", async (req, res) => {
         data: {
           projectId,
           bastNumber,
-          spkNumber,
+          spkNumber: chosenSpkNumber,
           handoverDate: new Date(handoverDate),
           pihakPertamaName: pihakPertamaName || project.client.name,
           pihakKeduaName: pihakKeduaName || "JIMMY CHRISTIAN, S.Ds.",
@@ -180,6 +237,25 @@ router.put(
 
       if (!existingBast) {
         return res.status(404).json({ error: "BAST tidak ditemukan." });
+      }
+
+      // Validasi spkNumber jika diubah
+      if (spkNumber && spkNumber !== existingBast.spkNumber) {
+        const clientSpks = await prisma.spkContract.findMany({
+          where: {
+            projectId: existingBast.projectId,
+            type: "CLIENT",
+            spkNumber: { not: null },
+            status: { not: "DIBATALKAN" },
+          },
+        });
+        const validSpkNumbers = clientSpks.map((c) => c.spkNumber);
+        if (!validSpkNumbers.includes(spkNumber)) {
+          return res.status(400).json({
+            error:
+              "Nomor SPK tidak valid untuk project ini. Harus dipilih dari SPK Client yang terbit.",
+          });
+        }
       }
 
       // existingPhotosToKeep dikirim dari Frontend (Bisa undefined, string tunggal, atau array)
@@ -310,4 +386,3 @@ router.get("/bast/:id/pdf/download", async (req, res) => {
 
 module.exports = router;
 
-module.exports = router;
