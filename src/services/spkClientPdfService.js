@@ -1,8 +1,18 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const PDFDocument = require('pdfkit');
 const { normalizeStoredSpkParties } = require('./spkService');
 const { terbilangRupiah } = require('../lib/terbilang');
+
+const LOGO_PATH = path.join(__dirname, '../assets/spk-client-logo.png');
+const FONT = {
+  normal: 'Times-Roman',
+  bold: 'Times-Bold',
+  italic: 'Times-Italic',
+  boldItalic: 'Times-BoldItalic',
+};
 
 const COMPANY = {
   name: 'PT. DIVES JAYA PERKASA',
@@ -81,7 +91,7 @@ function getBankDetails(bankData = {}) {
   const accountNumber = bankData.accountNumber || bankData.nomorRekening || bankData.accountNo;
   const accountName = bankData.accountName || bankData.namaRekening || bankData.accountHolder;
   if (!bank && !accountNumber && !accountName) return 'Detail rekening pembayaran resmi PIHAK PERTAMA belum tersedia.';
-  return `Rekening resmi PIHAK PERTAMA: ${[bank, accountNumber, accountName].filter(Boolean).join(' — ')}.`;
+  return `Rekening resmi PIHAK PERTAMA: ${[bank, accountNumber, accountName].filter(Boolean).join(' ')}.`;
 }
 
 function ensureSpace(doc, height = 70) {
@@ -92,12 +102,16 @@ function drawHeader(doc) {
   const left = doc.page.margins.left;
   const width = doc.page.width - left - doc.page.margins.right;
   doc.save();
-  doc.font('Helvetica-Bold').fontSize(12).text(COMPANY.name, left, 35, { align: 'center', width });
-  doc.font('Helvetica').fontSize(8).text(COMPANY.address, { align: 'center', width });
-  doc.text(COMPANY.contact, { align: 'center', width });
-  doc.moveTo(left, 75).lineTo(left + width, 75).lineWidth(1.2).stroke();
+  if (fs.existsSync(LOGO_PATH)) {
+    doc.image(LOGO_PATH, left, 24, { fit: [145, 50], align: 'left', valign: 'center' });
+  }
+  doc.fillColor('#111111');
+  doc.font(FONT.bold).fontSize(11).text(COMPANY.name, left + 170, 26, { align: 'right', width: width - 170 });
+  doc.font(FONT.normal).fontSize(9).text(COMPANY.address, left + 170, 42, { align: 'right', width: width - 170 });
+  doc.text(COMPANY.contact, left + 170, 54, { align: 'right', width: width - 170 });
+  doc.moveTo(left, 72).lineTo(left + width, 72).lineWidth(1).stroke();
   doc.restore();
-  doc.y = 88;
+  doc.y = 84;
 }
 
 function drawDraftWatermark(doc) {
@@ -112,44 +126,71 @@ function drawDraftWatermark(doc) {
 
 function paragraph(doc, text, options = {}) {
   ensureSpace(doc, options.minHeight || 60);
-  doc.font(options.bold ? 'Helvetica-Bold' : 'Helvetica')
-    .fontSize(options.size || 9)
+  const font = options.bold && options.italic
+    ? FONT.boldItalic
+    : options.bold ? FONT.bold : options.italic ? FONT.italic : FONT.normal;
+  doc.font(font)
+    .fontSize(options.size || 12)
     .fillColor('#111111')
     .text(String(text), { align: options.align || 'justify', lineGap: 2, ...options.text });
   doc.moveDown(options.gap ?? 0.55);
 }
 
+function clauseTitle(doc, title) {
+  ensureSpace(doc, 50);
+  doc.font(FONT.bold).fontSize(12).fillColor('#111111').text(title, { align: 'center' });
+  doc.moveDown(0.3);
+}
+
 function clause(doc, title, body) {
-  ensureSpace(doc, 95);
-  doc.font('Helvetica-Bold').fontSize(10).text(title.toUpperCase(), { align: 'center' });
-  doc.moveDown(0.25);
+  clauseTitle(doc, title);
   paragraph(doc, body, { minHeight: 45 });
 }
 
-function identity(doc, label, party, definition) {
-  ensureSpace(doc, 115);
-  doc.font('Helvetica-Bold').fontSize(9).text(`${label} — ${definition}`);
+function listItem(doc, text, options = {}) {
+  const left = doc.page.margins.left + 18;
+  ensureSpace(doc, 26);
+  const font = options.bold && options.italic
+    ? FONT.boldItalic
+    : options.bold ? FONT.bold : options.italic ? FONT.italic : FONT.normal;
+  doc.font(font).fontSize(options.size || 12).fillColor('#111111');
+  doc.text(String(text), left, doc.y, {
+    align: 'justify', lineGap: 2, width: doc.page.width - left - doc.page.margins.right,
+  });
+  doc.moveDown(options.gap ?? 0.3);
+}
+
+function identity(doc, label, party) {
+  ensureSpace(doc, 120);
+  doc.font(FONT.bold).fontSize(12).fillColor('#111111').text(label);
   const entries = [
     ['Nama', party.name || '-'],
     ['Jabatan', party.position || '-'],
     ['Perusahaan', party.companyName || '-'],
     ['Alamat', party.address || '-'],
   ];
+  const left = doc.page.margins.left + 16;
+  const labelWidth = 92;
   for (const [key, value] of entries) {
+    ensureSpace(doc, 20);
     const y = doc.y;
-    doc.font('Helvetica').fontSize(9).text(key, doc.page.margins.left + 10, y, { width: 75 });
-    doc.text(`: ${value}`, doc.page.margins.left + 88, y, { width: 390 });
-    doc.y = Math.max(doc.y, y + 13);
+    doc.font(FONT.normal).fontSize(12);
+    doc.text(key, left, y, { width: labelWidth, lineBreak: false });
+    doc.text(`: ${value}`, left + labelWidth, y, { width: doc.page.width - left - labelWidth - doc.page.margins.right });
+    doc.y = Math.max(doc.y, y + 16);
   }
   doc.moveDown(0.4);
 }
 
 function drawScope(doc, scope) {
   const items = Array.isArray(scope) ? scope : [];
-  const lines = items.length
-    ? items.map((item, index) => `${index + 1}. ${item.name || '-'} — ${asNumber(item.volume)} ${item.unit || ''} (${rupiah(item.totalPrice)})`)
-    : ['Lingkup pekerjaan sesuai lampiran yang telah disepakati PARA PIHAK.'];
-  paragraph(doc, lines.join('\n'), { align: 'left' });
+  if (!items.length) {
+    paragraph(doc, 'Lingkup pekerjaan sesuai lampiran yang telah disepakati PARA PIHAK.', { align: 'left' });
+    return;
+  }
+  items.forEach((item, index) => {
+    listItem(doc, `${index + 1}. ${item.name || '-'} — ${asNumber(item.volume)} ${item.unit || ''} (${rupiah(item.totalPrice)})`);
+  });
 }
 
 function drawTerms(doc, terms, retentionPercent, retentionAmount) {
@@ -157,35 +198,37 @@ function drawTerms(doc, terms, retentionPercent, retentionAmount) {
   if (!rows.length) {
     paragraph(doc, 'Jadwal pembayaran mengikuti kesepakatan tertulis PARA PIHAK.', { align: 'left' });
   } else {
-    rows.forEach((term, index) => {
+    rows.forEach((term) => {
       const detail = [term.dueDescription, term.milestone].filter(Boolean).join('; ');
-      paragraph(doc, `${index + 1}. ${term.label}: ${asNumber(term.percent)}% atau ${rupiah(term.amount)}${detail ? ` — ${detail}` : ''}`, { align: 'left', minHeight: 25, gap: 0.15 });
+      listItem(doc, `${term.label}: Sebesar ${rupiah(term.amount)}${detail ? ` ${detail}` : ''}`, { bold: true, italic: true });
     });
   }
   if (asNumber(retentionPercent) > 0) {
-    paragraph(doc, `Retensi: ${asNumber(retentionPercent)}% atau ${rupiah(retentionAmount)}.`, { align: 'left', minHeight: 25 });
+    listItem(doc, `Retensi: ${asNumber(retentionPercent)}% atau ${rupiah(retentionAmount)}.`);
   }
 }
 
 function signatureBlocks(doc, parties, issueDate) {
-  ensureSpace(doc, 175);
+  ensureSpace(doc, 180);
   const left = doc.page.margins.left;
-  const gap = 25;
+  const gap = 30;
   const width = (doc.page.width - left - doc.page.margins.right - gap) / 2;
-  doc.font('Helvetica').fontSize(9).text(`Surabaya, ${dateId(issueDate)}`, left, doc.y, { align: 'center', width: width * 2 + gap });
-  doc.moveDown(1);
+  doc.font(FONT.normal).fontSize(12).fillColor('#111111')
+    .text(`Surabaya, ${dateId(issueDate)}`, left, doc.y, { align: 'center', width: width * 2 + gap });
+  doc.moveDown(1.2);
   const y = doc.y;
   const blocks = [
-    { x: left, label: 'PIHAK PERTAMA\nPELAKSANA JASA', party: parties.firstParty },
-    { x: left + width + gap, label: 'PIHAK KEDUA\nPEMBERI TUGAS', party: parties.secondParty },
+    { x: left, label: 'PIHAK PERTAMA', sub: 'PELAKSANA JASA', party: parties.firstParty },
+    { x: left + width + gap, label: 'PIHAK KEDUA', sub: 'PEMBERI TUGAS', party: parties.secondParty },
   ];
   for (const block of blocks) {
-    doc.font('Helvetica-Bold').text(block.label, block.x, y, { width, align: 'center' });
-    doc.font('Helvetica').fontSize(8).text('\n\n\n\n\n', block.x, doc.y, { width, align: 'center' });
-    doc.font('Helvetica-Bold').fontSize(9).text(block.party.name || '-', block.x, y + 100, { width, align: 'center', underline: true });
-    doc.font('Helvetica').fontSize(8).text(block.party.position || '-', block.x, y + 115, { width, align: 'center' });
+    doc.font(FONT.bold).fontSize(12).text(block.label, block.x, y, { width, align: 'center' });
+    doc.text(block.sub, block.x, doc.y, { width, align: 'center' });
+    const nameY = y + 90;
+    doc.font(FONT.bold).fontSize(12).text(String(block.party.name || '-').toUpperCase(), block.x, nameY, { width, align: 'center', underline: true });
+    doc.font(FONT.normal).fontSize(11).text(block.party.position || '-', block.x, nameY + 18, { width, align: 'center' });
   }
-  doc.y = y + 140;
+  doc.y = y + 150;
 }
 
 function renderSpkClientPdf(contract) {
@@ -224,38 +267,72 @@ function renderSpkClientPdf(contract) {
     doc.on('pageAdded', () => drawHeader(doc));
     drawHeader(doc);
 
-    doc.font('Helvetica-Bold').fontSize(13).text('SURAT PERJANJIAN KONTRAK KERJASAMA', { align: 'center', underline: true });
-    doc.fontSize(10).text(`Nomor: ${number}`, { align: 'center' });
-    doc.moveDown(0.8);
-    paragraph(doc, `Perihal: Perjanjian Kerjasama ${snapshot.projectName || 'Pekerjaan Proyek'}`, { align: 'left' });
-    paragraph(doc, `Pada tanggal ${dateId(issueDate)}, para pihak yang bertanda tangan di bawah ini sepakat mengikatkan diri dalam Surat Perjanjian Kontrak Kerjasama ini:`);
+    doc.font(FONT.bold).fontSize(14).fillColor('#111111')
+      .text('SURAT PERJANJIAN KONTRAK KERJASAMA', { align: 'center', underline: true });
+    doc.moveDown(0.35);
+    doc.font(FONT.normal).fontSize(12).text(number, { align: 'center' });
+    doc.moveDown(0.55);
 
-    identity(doc, 'PIHAK PERTAMA', parties.firstParty, 'Pelaksana Jasa');
-    identity(doc, 'PIHAK KEDUA', parties.secondParty, 'Client / Pemberi Tugas');
+    const projectName = snapshot.projectName || 'Pekerjaan Proyek';
+    const projectLocation = snapshot.projectLocation || parties.secondParty.address || '-';
+    const clientName = parties.secondParty.name || snapshot.clientName || '-';
+    doc.font(FONT.normal).fontSize(12).fillColor('#111111');
+    doc.text(`Perihal : Perjanjian Kerjasama ${projectName}`, { align: 'left' });
+    doc.text('Kepada Yth.', { align: 'left' });
+    doc.font(FONT.bold).text(clientName, { align: 'left' });
+    doc.font(FONT.normal).text(parties.secondParty.address || projectLocation, { align: 'left' });
+    doc.moveDown(0.55);
 
-    paragraph(doc, `PIHAK PERTAMA dan PIHAK KEDUA selanjutnya disebut PARA PIHAK. Sehubungan dengan proyek ${snapshot.projectName || '-'} yang berlokasi di ${snapshot.projectLocation || parties.secondParty.address || '-'}, PARA PIHAK sepakat pada ketentuan berikut.`);
+    paragraph(doc, `Pada ${dateId(issueDate)} kami yang bertanda tangan di bawah ini :`, { align: 'left', minHeight: 28 });
+    identity(doc, 'PIHAK PERTAMA (Selanjutnya disebut pelaksana jasa).', parties.firstParty);
+    identity(doc, 'PIHAK KEDUA (Selanjutnya disebut pemberi tugas / klien).', parties.secondParty);
 
-    clause(doc, 'PASAL 1 — LINGKUP PEKERJAAN', 'PIHAK KEDUA memberikan pekerjaan kepada PIHAK PERTAMA dan PIHAK PERTAMA menerima serta melaksanakan pekerjaan sesuai spesifikasi, mutu, dan lingkup yang disepakati:');
+    paragraph(doc, `PIHAK PERTAMA dan PIHAK KEDUA secara bersama-sama selanjutnya disebut PARA PIHAK. PARA PIHAK dengan ini menerangkan terlebih dahulu bahwa sehubungan dengan Proyek ${projectName} yang berlokasi di ${projectLocation}, PARA PIHAK telah setuju dan sepakat untuk mengikat diri dalam suatu Perjanjian Kerjasama. Selanjutnya disebut PERJANJIAN dengan ketentuan dan syarat-syarat sebagai berikut :`);
+
+    clause(doc, 'PASAL 1 LINGKUP PEKERJAAN', 'PIHAK KEDUA memberikan pekerjaan kepada PIHAK PERTAMA dan PIHAK PERTAMA menerima pekerjaan tersebut dari PIHAK KEDUA yaitu melaksanakan pekerjaan dengan spesifikasi teknis yang diuraikan sesuai dengan yang terlampir dalam Surat Penawaran.');
     drawScope(doc, snapshot.workScope);
 
-    clause(doc, 'PASAL 2 — NILAI KONTRAK', `Nilai kontrak pekerjaan disepakati sebesar ${rupiah(value)} (${words}). Nilai tersebut bersumber dari item RAB terpilih yang menjadi bagian tidak terpisahkan dari perjanjian ini.`);
+    clause(doc, 'PASAL 2 NILAI KONTRAK', `Nilai kontrak yang telah disepakati bersama sebesar ${rupiah(value)} (${words}). Harga yang sudah disepakati merupakan harga borongan atau paket.`);
 
-    clause(doc, 'PASAL 3 — CARA PEMBAYARAN', `PIHAK KEDUA melakukan pembayaran kepada PIHAK PERTAMA sesuai termin berikut. ${getBankDetails(bankData)} Keterlambatan pembayaran: apabila sampai tanggal jatuh tempo pembayaran belum diterima, PIHAK PERTAMA berhak menerbitkan surat penagihan resmi dan menghentikan sementara pekerjaan tanpa dianggap wanprestasi sampai pembayaran diterima.`);
+    clauseTitle(doc, 'PASAL 3 Cara Pembayaran');
+    paragraph(doc, `Pembayaran dilakukan oleh PIHAK KEDUA kepada PIHAK PERTAMA sebesar ${rupiah(value)} (${words}) melalui transfer ke rekening resmi PIHAK PERTAMA. ${getBankDetails(bankData)}`);
+    paragraph(doc, 'Pembayaran dilakukan dengan sistem termin sebagai berikut:', { align: 'left', minHeight: 30 });
     drawTerms(doc, terms, retentionPercent, retentionAmount);
-    paragraph(doc, 'Dokumen penagihan termin wajib disampaikan sebelum tanggal jatuh tempo agar tersedia waktu untuk proses administrasi dan pencairan.');
+    paragraph(doc, 'Pengajuan dokumen penagihan termin wajib disampaikan sebelum tanggal jatuh tempo pembayaran, guna memberikan waktu yang cukup bagi PIHAK PERTAMA untuk proses administrasi dan pencairan.');
+    paragraph(doc, 'Apabila sampai dengan tanggal jatuh tempo pembayaran PIHAK PERTAMA belum menerima pembayaran, maka PIHAK PERTAMA berhak menerbitkan surat penagihan resmi dan menghentikan pekerjaan sementara, tanpa dianggap sebagai wanprestasi, sampai pembayaran diterima.');
 
-    const duration = durationDays ? `${durationDays} hari kerja` : 'sesuai jadwal yang disepakati';
-    clause(doc, 'PASAL 4 — JANGKA WAKTU PELAKSANAAN', `Pekerjaan dilaksanakan selama ${duration}, mulai ${dateId(startDate)} sampai ${dateId(endDate)}. Perubahan jadwal wajib disepakati tertulis oleh PARA PIHAK.`);
+    clauseTitle(doc, 'PASAL 4 Jangka Waktu Pelaksanaan');
+    paragraph(doc, `Pelaksanaan pekerjaan dimulai pada ${dateId(startDate)}.`);
+    paragraph(doc, `Lama pekerjaan adalah ${durationDays} hari kerja sampai dengan ${dateId(endDate)}, dengan ketentuan:`);
+    listItem(doc, 'Hari Minggu dan hari libur nasional tidak dihitung sebagai hari kerja');
+    listItem(doc, 'Pekerjaan lembur tidak diperhitungkan sebagai pengurang waktu kontrak');
 
-    clause(doc, 'PASAL 5 — JAMINAN DAN GARANSI', `PIHAK PERTAMA menjamin pelaksanaan sesuai spesifikasi yang disetujui, menjaga keamanan dan ketertiban area kerja. Garansi atas kerusakan pekerjaan berlaku selama 3 (tiga) bulan. Kerusakan akibat faktor alam, kecelakaan, atau kelalaian PIHAK KEDUA yang bukan disebabkan PIHAK PERTAMA tidak termasuk garansi. Material, perlengkapan, dan/atau bagian pekerjaan yang belum dilunasi sepenuhnya tetap menjadi hak milik PIHAK PERTAMA dan tidak boleh dipindahkan, digunakan, atau diklaim PIHAK KEDUA sebelum pembayaran diselesaikan.${notes ? ` Catatan: ${notes}` : ''}`);
+    clauseTitle(doc, 'PASAL 5 Jaminan dan Garansi');
+    paragraph(doc, 'Mutu/kualitas pelaksanaan pekerjaan sesuai dengan standar spesifikasi yang telah ditetapkan dan disetujui oleh PIHAK KEDUA. Gambar 3D yang diberikan ke klien adalah ilustrasi bukan 100% akurasi dari hasil pekerjaan.');
+    paragraph(doc, 'PIHAK PERTAMA/pekerja PIHAK PERTAMA ikut menjamin keamanan dan ketertiban lingkungan di sekitarnya.');
+    paragraph(doc, 'Garansi Pekerjaan untuk kerusakan pekerjaan tersebut adalah 3 (tiga) bulan. Kerusakan yang disebabkan faktor alam, kecelakaan lainnya, atau kelalaian PIHAK KEDUA yang bukan disebabkan oleh PIHAK PERTAMA tidak termasuk dalam garansi.');
+    paragraph(doc, `Material, perlengkapan, dan/atau bagian pekerjaan yang belum dilunasi sepenuhnya tetap menjadi hak milik PIHAK PERTAMA dan tidak diperkenankan untuk dipindahkan, digunakan, atau diklaim oleh PIHAK KEDUA sebelum pembayaran diselesaikan.${notes ? ` Catatan: ${notes}` : ''}`);
 
-    clause(doc, 'PASAL 6 — FORCE MAJEURE', 'Force majeure adalah keadaan di luar kemampuan PARA PIHAK, termasuk bencana alam, kebakaran, huru-hara, perang, pandemi, atau kebijakan pemerintah yang menghalangi pekerjaan. Pihak terdampak wajib memberitahukan secara tertulis paling lambat 7 (tujuh) hari kalender, kemudian PARA PIHAK bermusyawarah mengenai penyesuaian waktu dan kewajiban. Pembersihan area kerja dan serah terima pekerjaan hanya dilaksanakan setelah seluruh kewajiban pembayaran dilunasi PIHAK KEDUA. Pekerjaan yang belum dapat diselesaikan akibat belum terpenuhinya kewajiban pembayaran bukan merupakan kegagalan atau kelalaian PIHAK PERTAMA; pekerjaan dilanjutkan setelah pembayaran diterima.');
+    clauseTitle(doc, 'PASAL 6 Force Majeure');
+    paragraph(doc, 'Force majeure adalah keadaan di luar kemampuan para pihak seperti bencana alam, kebakaran, huru-hara, perang, pandemi, atau kebijakan pemerintah yang menghalangi pelaksanaan pekerjaan.');
+    paragraph(doc, 'Dalam hal terjadi force majeure, pihak yang terdampak wajib memberitahukan secara tertulis paling lambat 7 (tujuh) hari kalender sejak terjadinya keadaan tersebut.');
+    paragraph(doc, 'Kedua pihak akan bermusyawarah untuk mencari penyelesaian terbaik, termasuk perpanjangan waktu pekerjaan.');
+    paragraph(doc, 'Pembersihan area kerja dan serah terima pekerjaan dilaksanakan setelah seluruh kewajiban pembayaran dinyatakan lunas oleh PIHAK KEDUA.');
+    paragraph(doc, 'Apabila terdapat pekerjaan yang belum dapat diselesaikan akibat belum terpenuhinya kewajiban pembayaran, maka kondisi tersebut bukan merupakan kegagalan pekerjaan dan tidak dianggap sebagai kegagalan atau kelalaian PIHAK PERTAMA; penyelesaian akan dilakukan setelah pembayaran diterima sepenuhnya.');
 
-    clause(doc, 'PASAL 7 — PEKERJAAN TAMBAH/KURANG', 'Pekerjaan tambah atau kurang hanya dilaksanakan setelah persetujuan tertulis PARA PIHAK. Nilainya dihitung berdasarkan volume, harga satuan, spesifikasi, dan kesepakatan baru. Perbedaan kondisi lapangan diselesaikan secara adil dan proporsional melalui musyawarah.');
+    clauseTitle(doc, 'PASAL 7 Pekerjaan Tambah/Kurang');
+    paragraph(doc, 'Pekerjaan tambah atau kurang hanya dapat dilaksanakan setelah ada persetujuan tertulis dari PIHAK KEDUA.');
+    paragraph(doc, 'Nilai pekerjaan tambah atau kurang akan dihitung berdasarkan harga satuan dan kesepakatan baru kedua belah pihak.');
+    paragraph(doc, 'Apabila dalam pelaksanaan pekerjaan terjadi perbedaan volume atau spesifikasi antara gambar kerja, perencanaan, dan kondisi nyata di lapangan, maka kedua belah pihak sepakat untuk memberikan toleransi secara wajar serta menyelesaikan perbedaan tersebut melalui musyawarah dengan prinsip adil, proporsional, dan tidak merugikan salah satu pihak.');
 
-    clause(doc, 'PASAL 8 — DOMISILI HUKUM DAN PENYELESAIAN PERSELISIHAN', 'Perselisihan terlebih dahulu diselesaikan secara musyawarah untuk mufakat. Apabila tidak tercapai, PARA PIHAK memilih domisili hukum tetap di Pengadilan Negeri Surabaya. Kewajiban pembayaran yang belum terselesaikan dituangkan dalam dokumen tertulis yang disepakati PARA PIHAK.');
+    clauseTitle(doc, 'PASAL 8 Domisili Hukum dan Penyelesaian Perselisihan');
+    paragraph(doc, 'Apabila terjadi perselisihan antara PIHAK PERTAMA dan PIHAK KEDUA, maka terlebih dahulu akan diselesaikan secara musyawarah untuk mufakat.');
+    paragraph(doc, 'Apabila penyelesaian secara musyawarah tidak tercapai, maka para pihak sepakat memilih domisili hukum tetap di Pengadilan Negeri Surabaya.');
+    paragraph(doc, 'Apabila terjadi permasalahan mengenai pembayaran yang tidak mendapat kesepakatan atau belum dapat dibayarkan, maka akan dibuatkan Surat Pengakuan Hutang yang ditandatangani dan disepakati bersama oleh kedua belah pihak.');
 
-    clause(doc, 'PASAL 9 — PENUTUP', 'Perjanjian ini dibuat dan ditandatangani PARA PIHAK dalam 2 (dua) rangkap, masing-masing bermeterai secukupnya dan berkekuatan hukum yang sama. Lampiran lingkup pekerjaan, RAB terpilih, dan kesepakatan tertulis lainnya merupakan bagian tidak terpisahkan dari perjanjian ini.');
+    clauseTitle(doc, 'PASAL 9 Penutup');
+    paragraph(doc, 'Surat Perjanjian ini dibuat dan ditandatangani bersama oleh PARA PIHAK pada hari dan tanggal tersebut.');
+    paragraph(doc, 'Surat Perjanjian ini dibuat dalam rangkap 2 (dua), masing-masing diberi materai secukupnya dan mempunyai kekuatan hukum yang sama.');
 
     signatureBlocks(doc, parties, issueDate);
 
@@ -263,7 +340,7 @@ function renderSpkClientPdf(contract) {
     for (let index = range.start; index < range.start + range.count; index += 1) {
       doc.switchToPage(index);
       if (contract.status === 'DRAFT') drawDraftWatermark(doc);
-      doc.font('Helvetica').fontSize(7).fillColor('#666666').text(
+      doc.font(FONT.normal).fontSize(9).fillColor('#666666').text(
         `SPK Client • ${number} • Halaman ${index + 1} dari ${range.count}`,
         doc.page.margins.left,
         doc.page.height - 38,

@@ -8,15 +8,30 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { renderSpkClientPdf, safeSpkPdfFilename } = require('./spkClientPdfService');
 
-function extractPdfText(pdf, name) {
+function withPdfFile(pdf, name, callback) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spk-pdf-test-'));
   const pdfPath = path.join(dir, `${name}.pdf`);
   fs.writeFileSync(pdfPath, pdf);
   try {
-    return execFileSync('pdftotext', [pdfPath, '-'], { encoding: 'utf8' });
+    return callback(pdfPath);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function extractPdfText(pdf, name) {
+  const text = withPdfFile(pdf, name, (pdfPath) => (
+    execFileSync('pdftotext', ['-layout', pdfPath, '-'], { encoding: 'utf8' })
+  ));
+  return text.replace(/[ \t]+/g, ' ').replace(/\r?\n/g, '\n');
+}
+
+function inspectPdf(pdf) {
+  const source = pdf.toString('latin1');
+  return {
+    isA4: /\/MediaBox\s*\[0 0 595\.28(?:\d*) 841\.89(?:\d*)\]/.test(source),
+    usesTimes: /\/BaseFont\s*\/Times-(?:Roman|Bold|Italic|BoldItalic)/.test(source),
+  };
 }
 
 const issuedContract = {
@@ -32,6 +47,11 @@ const issuedContract = {
   workDurationDays: 15,
   startDate: new Date('2026-10-10T00:00:00.000Z'),
   endDate: new Date('2026-10-25T00:00:00.000Z'),
+  bankData: {
+    bankName: 'BCA',
+    accountNumber: '1032133333',
+    accountName: 'Ben Irawan Limantara',
+  },
   notes: 'Garansi pekerjaan tiga bulan.',
   partyData: {
     firstParty: {
@@ -61,7 +81,10 @@ const issuedContract = {
       },
     },
   },
-  terms: [{ label: 'DP', percent: 50, amount: 12500000, dueDescription: 'Saat kontrak ditandatangani', order: 0 }],
+  terms: [
+    { label: 'DP', percent: 50, amount: 12500000, dueDescription: 'Saat kontrak ditandatangani', order: 0 },
+    { label: 'Termin I', percent: 45, amount: 11250000, dueDescription: 'Progress pekerjaan 70%', order: 1 },
+  ],
 };
 
 test('renders issued CLIENT PDF from snapshot with official number', async () => {
@@ -119,18 +142,54 @@ test('issued PDF retains clause protections and document snapshot after live mut
   assert.match(text, /Snapshot Project/);
   assert.doesNotMatch(text, /Live Project/);
   assert.match(text, /3 \(tiga\) bulan/);
+  assert.match(text, /kelalaian PIHAK KEDUA yang bukan\s+disebabkan oleh PIHAK PERTAMA/);
   assert.match(text, /hak milik PIHAK PERTAMA/);
-  assert.match(text, /menghentikan sementara pekerjaan/);
-  assert.match(text, /Rekening resmi PIHAK PERTAMA: BCA/);
+  assert.match(text, /menghentikan\s+pekerjaan sementara/);
+  assert.match(text, /Rekening\s+resmi PIHAK PERTAMA: BCA/);
   assert.match(text, /bukan merupakan kegagalan/);
   assert.match(text, /Snapshot notes/);
 });
 test('PDF says bank details are unavailable instead of inventing credentials', async () => {
   const text = extractPdfText(await renderSpkClientPdf({ ...issuedContract, bankData: {} }), 'no-bank');
-  assert.match(text, /Detail rekening pembayaran resmi PIHAK PERTAMA belum tersedia/);
+  assert.match(text, /Detail\s+rekening pembayaran resmi PIHAK PERTAMA belum tersedia/);
   assert.doesNotMatch(text, /1032133333/);
 });
 
+test('matches the DOCX contract wording, page geometry, and portable Times family', async () => {
+  const pdf = await renderSpkClientPdf(issuedContract);
+  const text = extractPdfText(pdf, 'fidelity');
+  const { isA4, usesTimes } = inspectPdf(pdf);
+  assert.match(text, /SURAT PERJANJIAN KONTRAK KERJASAMA/);
+  assert.match(text, /Perihal\s*:\s*Perjanjian Kerjasama/);
+  assert.match(text, /Kepada Yth\./);
+  assert.match(text, /PASAL 1\s+LINGKUP PEKERJAAN/);
+  assert.match(text, /PASAL 2\s+NILAI KONTRAK/);
+  assert.match(text, /PASAL 3\s+Cara Pembayaran/);
+  assert.match(text, /BCA\s+1032133333/);
+  assert.match(text, /Termin I/);
+  assert.match(text, /PASAL 4\s+Jangka Waktu Pelaksanaan/);
+  assert.match(text, /Hari Minggu dan hari libur nasional tidak dihitung sebagai hari kerja/);
+  assert.match(text, /PASAL 5\s+Jaminan dan Garansi/);
+  assert.match(text, /3 \(tiga\) bulan/);
+  assert.match(text, /PASAL 6\s+Force Majeure/);
+  assert.match(text, /PASAL 7\s+Pekerjaan Tambah\/Kurang/);
+  assert.match(text, /PASAL 8\s+Domisili Hukum dan Penyelesaian Perselisihan/);
+  assert.match(text, /PASAL 9\s+Penutup/);
+  assert.match(text, /rangkap 2 \(dua\)/);
+  assert.match(text, /DANIEL SNAPSHOT/);
+  assert.match(text, /JIMMY CHRISTIAN S\./);
+  assert.equal(isA4, true);
+  assert.equal(usesTimes, true);
+});
+
+test('keeps header logo and footer on every page', async () => {
+  const text = extractPdfText(await renderSpkClientPdf(issuedContract), 'header-footer');
+  const pageCount = Number(text.match(/Halaman \d+ dari (\d+)/)?.[1]);
+  assert.ok(pageCount >= 2);
+  assert.ok((text.match(/PT\. DIVES JAYA PERKASA/g) || []).length >= pageCount);
+  assert.ok((text.match(/0818-813-134/g) || []).length >= pageCount);
+  assert.equal((text.match(/Halaman \d+ dari \d+/g) || []).length, pageCount);
+});
 test('creates a safe PDF filename', () => {
   assert.equal(
     safeSpkPdfFilename({ ...issuedContract, spkNumber: '020/SPK:Client?*', snapshot: { projectName: '../Canopy Stamford' } }),
