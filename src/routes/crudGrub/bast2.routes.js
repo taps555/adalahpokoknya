@@ -61,19 +61,48 @@ router.post("/projects/:projectId/bast2", async (req, res) => {
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
+      include: { client: true },
     });
     if (!project) return res.status(404).json({ error: "Project tidak ditemukan." });
+
+    // Cek ketersediaan SPK Client yang terbit dengan spkNumber
+    const clientSpks = await prisma.spkContract.findMany({
+      where: {
+        projectId,
+        type: "CLIENT",
+        spkNumber: { not: null },
+        status: { not: "DIBATALKAN" },
+      },
+    });
+
+    if (!clientSpks || clientSpks.length === 0) {
+      return res.status(400).json({
+        error:
+          "BAST 2 tidak dapat dibuat karena project ini belum memiliki SPK Client yang diterbitkan (Nomor SPK belum ada). Silakan terbitkan SPK Client terlebih dahulu di menu SPK Client.",
+      });
+    }
+
+    const validSpkNumbers = clientSpks.map((c) => c.spkNumber);
+    const chosenSpkNumber =
+      spkNumber || (clientSpks.length === 1 ? clientSpks[0].spkNumber : null);
+
+    if (!chosenSpkNumber || !validSpkNumbers.includes(chosenSpkNumber)) {
+      return res.status(400).json({
+        error:
+          "Nomor SPK tidak valid atau belum dipilih dari daftar SPK Client yang terbit.",
+      });
+    }
 
     const newBast = await prisma.bast2.create({
       data: {
         projectId,
         complaintReportId,
         bastNumber: bastNumber || "-",
-        spkNumber: spkNumber || "-",
+        spkNumber: chosenSpkNumber,
         handoverDate: handoverDate ? new Date(handoverDate) : new Date(),
-        pihakPertamaName: pihakPertamaName || "-",
-        pihakKeduaName: pihakKeduaName || "-",
-        statusText: statusText || "-",
+        pihakPertamaName: pihakPertamaName || (project.client ? project.client.name : "-"),
+        pihakKeduaName: pihakKeduaName || "JIMMY CHRISTIAN, S.Ds.",
+        statusText: statusText || "SELESAI DIKERJAKAN 100% dan DITERIMA DENGAN BAIK",
       },
     });
 
@@ -83,7 +112,7 @@ router.post("/projects/:projectId/bast2", async (req, res) => {
     });
   } catch (error) {
     console.error("Error Create BAST 2:", error);
-    res.status(500).json({ error: "Terjadi kesalahan server saat menyimpan BAST 2." });
+    res.status(500).json({ error: error.message || "Terjadi kesalahan server saat menyimpan BAST 2." });
   }
 });
 

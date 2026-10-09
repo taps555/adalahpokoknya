@@ -46,18 +46,25 @@ function fillSolid(cell, argb) {
 const medium = { style: "medium" };
 const thin = { style: "thin" };
 
-function filterGroupsByDiscipline(groups, disc) {
-  if (disc === 'GENERAL') return groups;
+function filterGroupsByDiscipline(groups, disc, targetSubCategoryId = null) {
+  if (disc === 'GENERAL' && !targetSubCategoryId) return groups;
   return groups.map(g => {
-    const items = g.items.filter(i => {
-      const code = i.workCategory?.code || i.discipline || 'GENERAL';
-      return code === 'GENERAL' || code === disc;
-    });
-    const children = (g.children || []).map(c => {
-      const cItems = c.items.filter(i => {
+    const filterItem = (i) => {
+      if (disc !== 'GENERAL') {
         const code = i.workCategory?.code || i.discipline || 'GENERAL';
-        return code === 'GENERAL' || code === disc;
-      });
+        if (code !== 'GENERAL' && code !== disc) return false;
+      }
+      if (targetSubCategoryId) {
+        if (i.workSubCategoryId !== targetSubCategoryId && i.workSubCategory?.id !== targetSubCategoryId) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const items = g.items.filter(filterItem);
+    const children = (g.children || []).map(c => {
+      const cItems = c.items.filter(filterItem);
       if (cItems.length === 0) return null;
       return { ...c, items: cItems };
     }).filter(Boolean);
@@ -221,8 +228,7 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
   r = hr + 3;
   let colorIndex = 0;
 
-  const writeItem = (it, num, hasChildren) => {
-    const isChild = !!it.bvItem?.parentBvItemId;
+  const writeItem = (it, num, hasChildren, isChild = false) => {
     const weight = weightOf(it);
     const pWeight = periodWeightOf(it);
 
@@ -276,18 +282,19 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
 
     const allItemsInGroup = [...group.items, ...(group.children || []).flatMap((sub) => sub.items)];
     const parentIds = new Set(allItemsInGroup.map((it) => it.bvItem?.parentBvItemId).filter(Boolean));
+    const itemIdsInGroup = new Set(allItemsInGroup.map((it) => it.bvItem?.id).filter(Boolean));
 
     let n = 1;
     let groupTotal = 0;
 
     for (let i = 0; i < group.items.length; i++) {
       const it = group.items[i];
-      const isChild = !!it.bvItem?.parentBvItemId;
+      const isChild = !!(it.bvItem?.parentBvItemId && itemIdsInGroup.has(it.bvItem.parentBvItemId));
       const hasChildren = parentIds.has(it.bvItem?.id);
-      writeItem(it, isChild ? "" : n++, hasChildren);
+      writeItem(it, isChild ? "" : n++, hasChildren, isChild);
       if (!hasChildren) groupTotal += Number(it.rabTotalPrice);
       const nextItem = group.items[i + 1];
-      if (isChild && (!nextItem || !nextItem.bvItem?.parentBvItemId)) r++; 
+      if (isChild && (!nextItem || !nextItem.bvItem?.parentBvItemId || !itemIdsInGroup.has(nextItem.bvItem.parentBvItemId))) r++; 
     }
 
     for (const sub of group.children || []) {
@@ -297,12 +304,12 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
       r++;
       for (let i = 0; i < sub.items.length; i++) {
         const it = sub.items[i];
-        const isChild = !!it.bvItem?.parentBvItemId;
+        const isChild = !!(it.bvItem?.parentBvItemId && itemIdsInGroup.has(it.bvItem.parentBvItemId));
         const hasChildren = parentIds.has(it.bvItem?.id);
-        writeItem(it, isChild ? "" : n++, hasChildren);
+        writeItem(it, isChild ? "" : n++, hasChildren, isChild);
         if (!hasChildren) groupTotal += Number(it.rabTotalPrice);
         const nextItem = sub.items[i + 1];
-        if (isChild && (!nextItem || !nextItem.bvItem?.parentBvItemId)) r++; 
+        if (isChild && (!nextItem || !nextItem.bvItem?.parentBvItemId || !itemIdsInGroup.has(nextItem.bvItem.parentBvItemId))) r++; 
       }
     }
     r++;
@@ -377,7 +384,16 @@ function drawTable(ws, title, groups, project, periods, startRow, themeColor = "
   return r; // return next available row
 }
 
-async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode = 'week', targetDiscipline = 'ALL') {
+async function buildTimeScheduleSheet(
+  ws,
+  projectId,
+  project,
+  prisma,
+  viewMode = 'week',
+  targetDiscipline = 'ALL',
+  targetSubCategoryId = null,
+  targetSubCategoryCode = null
+) {
   const allGroupsRaw = await prisma.rabGroup.findMany({
     where: { projectId, parentId: null },
     include: {
@@ -387,6 +403,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
           timeSchedule: true,
           bvItem: { select: { id: true, parentBvItemId: true } },
           workCategory: true,
+          workSubCategory: true,
         },
       },
       children: {
@@ -397,6 +414,7 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
               timeSchedule: true,
               bvItem: { select: { id: true, parentBvItemId: true } },
               workCategory: true,
+              workSubCategory: true,
             },
           },
         },
@@ -404,6 +422,26 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
     },
     orderBy: { order: "asc" },
   });
+
+  const ungroupedItems = await prisma.rabItem.findMany({
+    where: { projectId, groupId: null },
+    include: {
+      timeSchedule: true,
+      bvItem: { select: { id: true, parentBvItemId: true } },
+      workCategory: true,
+      workSubCategory: true,
+    },
+    orderBy: { order: "asc" },
+  });
+
+  if (ungroupedItems.length > 0) {
+    allGroupsRaw.push({
+      id: "ungrouped",
+      name: "Tanpa Group",
+      items: ungroupedItems,
+      children: [],
+    });
+  }
 
   // Calculate global periods across all items
   const allItems = [];
@@ -451,7 +489,14 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
   // Draw Tables
   let nextRow = 2;
 
-  if (targetDiscipline === 'ALL' || targetDiscipline === 'GENERAL') {
+  if (targetSubCategoryId) {
+    const subGroups = filterGroupsByDiscipline(allGroupsRaw, targetDiscipline, targetSubCategoryId);
+    const title = targetSubCategoryCode
+      ? `PROJECT TIME SCHEDULE - ${targetDiscipline} (${targetSubCategoryCode})`
+      : `PROJECT TIME SCHEDULE - ${targetDiscipline}`;
+    nextRow = drawTable(ws, title, subGroups, project, periods, nextRow, "FFCCE5FF");
+    nextRow += 5;
+  } else if (targetDiscipline === 'ALL' || targetDiscipline === 'GENERAL') {
     const generalGroups = filterGroupsByDiscipline(allGroupsRaw, 'GENERAL');
     if (generalGroups.length > 0 || targetDiscipline === 'GENERAL') {
       nextRow = drawTable(ws, "PROJECT TIME SCHEDULE - GENERAL", generalGroups, project, periods, nextRow, "FFD9D9D9");
@@ -459,11 +504,12 @@ async function buildTimeScheduleSheet(ws, projectId, project, prisma, viewMode =
     }
   }
 
-  if (targetDiscipline !== 'GENERAL') {
+  if (!targetSubCategoryId && targetDiscipline !== 'GENERAL') {
     if (targetDiscipline === 'ALL') {
       const activeCategories = (project.workCategories || [])
         .filter(c => c.isActive && c.workCategory?.isActive)
-        .map(c => c.workCategory);
+        .map(c => c.workCategory)
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
       for (const cat of activeCategories) {
         const code = cat.code.toUpperCase();
