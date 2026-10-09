@@ -17,56 +17,20 @@ const redactSellingResponse = (req, res, next) => {
   next();
 };
 const protectSelling = (req, res, next) => {
-  const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
-  // Harga jual (RAB) kini selalu dihitung dari RAP + Overhead, sehingga tidak ada
-  // satu pun peran yang boleh menulis harga jual secara manual.
+  if (req.user?.role === "SUPER_ADMIN") return next();
+  const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) =>
+    Object.prototype.hasOwnProperty.call(req.body || {}, key),
+  );
   if (isSellingWrite) {
     return res.status(403).json({
-      error: "Harga jual RAB dihitung otomatis dari RAP + Overhead dan tidak dapat diubah manual.",
+      error: "Harga jual RAB hanya dapat diubah oleh SUPER_ADMIN.",
     });
   }
   next();
 };
 
-const OVERHEAD_ONLY_ERROR = "SUPER_ADMIN hanya boleh mengubah Overhead (%).";
-const FORBIDDEN_SUPER_ADMIN_FIELDS = [
-  "rapUnitPrice",
-  "rapTotalPrice",
-  "rabUnitPrice",
-  "rabTotalPrice",
-  "components",
-  "volume",
-  "groupId",
-  "workCategoryId",
-  "workSubCategoryId",
-  "isByOwner",
-  "isStip",
-];
-
 const protectRapWrite = (req, res, next) => {
-  if (req.user?.role === "SUPER_ADMIN") {
-    const body = req.body || {};
-    const keys = Object.keys(body);
-    // SUPER_ADMIN hanya mengatur margin lewat Overhead. RAP berasal dari AHSP
-    // daerah/perencana dan tidak boleh ditimpa, begitu pula override harga jual.
-    const onlyOverhead = keys.length === 1 && keys[0] === "overheadPercent";
-    if (!onlyOverhead) {
-      const touchedForbidden = keys.filter((key) =>
-        FORBIDDEN_SUPER_ADMIN_FIELDS.includes(key),
-      );
-      const message = touchedForbidden.length
-        ? `SUPER_ADMIN tidak boleh mengubah ${touchedForbidden.join(", ")}. Hanya Overhead (%) yang dapat diubah.`
-        : OVERHEAD_ONLY_ERROR;
-      return res.status(403).json({ error: message });
-    }
-    const value = Number(body.overheadPercent);
-    if (!Number.isFinite(value) || value < 0) {
-      return res.status(400).json({ error: "Overhead (%) harus berupa angka valid (>= 0)." });
-    }
-    req.body.overheadPercent = value;
-    return next();
-  }
-  if (!["PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
+  if (!["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
     return res.status(403).json({ error: "Tidak memiliki akses mengubah RAP." });
   }
   next();
@@ -312,7 +276,7 @@ router.delete("/rab-items/:id", async (req, res) => {
 //atas no revisi
 
 /** PUT /rab-items/:id/switch-job — ganti sumber JobType master, tarik rincian AHSP */
-router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
     const { id } = req.params;
     const { newJobTypeId, customOverhead, ahspDiscipline, workCategoryId, workSubCategoryId } = req.body;
@@ -470,7 +434,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("PROJECT_MAN
 router.post(
   "/rab-items/bulk-delete",
   verifyToken,
-  authorizeRoles("PROJECT_MANAGER", "PERENCANA"),
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"),
   async (req, res) => {
     try {
       const { ids } = req.body;
@@ -513,14 +477,6 @@ router.post(
 router.put("/rab-items/bulk-price", async (req, res) => {
   try {
     const { ids, rapUnitPrice, overheadPercent } = req.body;
-
-    // SUPER_ADMIN hanya boleh mengatur Overhead (%) — RAP tetap wewenang
-    // perencana. Cegah tembus lewat endpoint bulk ini.
-    if (req.user?.role === "SUPER_ADMIN" && rapUnitPrice !== undefined && rapUnitPrice !== null) {
-      return res.status(403).json({
-        error: "SUPER_ADMIN tidak boleh mengubah RAP Satuan. Hanya Overhead (%) yang dapat diubah.",
-      });
-    }
 
     if (!Array.isArray(ids) || ids.length === 0)
       return res
@@ -621,7 +577,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   }
 });
 
-router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
   try {
     const { ids, newJobTypeId, customOverhead, ahspDiscipline, workCategoryId, workSubCategoryId } = req.body;
 
@@ -785,7 +741,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("PROJECT_MA
 router.put(
   "/projects/:projectId/rab-items/bulk-price-by-name",
   verifyToken,
-  authorizeRoles("PROJECT_MANAGER", "PERENCANA"),
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;

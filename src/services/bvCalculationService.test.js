@@ -716,6 +716,21 @@ test("project create/edit paths never require or auto-infer SIPIL/INTERIOR", () 
   assert.match(projectForm, /Pilih minimal satu kategori pekerjaan/);
 });
 
+test("SUPER_ADMIN has the same Project-BV-RAB mutation access as planning roles", () => {
+  const rabRoute = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/rab.routes.js"), "utf8");
+  assert.doesNotMatch(rabRoute, /SUPER_ADMIN hanya boleh mengubah Overhead/);
+  assert.doesNotMatch(rabRoute, /req\.user\?\.role === "SUPER_ADMIN" && rapUnitPrice/);
+  assert.doesNotMatch(rabRoute, /authorizeRoles\("PROJECT_MANAGER", "PERENCANA"\)/);
+  assert.match(rabRoute, /"SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"/);
+});
+
+test('SUPER_ADMIN is included in every RAB mutation authorization path', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../routes/crudGrub/rab.routes.js'), 'utf8');
+  assert.match(source, /authorizeRoles\("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"\)/g);
+  assert.doesNotMatch(source, /SUPER_ADMIN hanya boleh mengubah Overhead/);
+  assert.match(source, /Harga jual RAB hanya dapat diubah oleh SUPER_ADMIN/);
+});
+
 test("dynamic category write paths clear legacy discipline", () => {
   const routeSource = fs.readFileSync(path.join(__dirname, "../routes/crudGrub/bv.routes.js"), "utf8");
   const uploadSource = fs.readFileSync(path.join(__dirname, "../routes/upload.routes.js"), "utf8");
