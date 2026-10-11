@@ -95,28 +95,11 @@ router.get('/projects/:projectId/spk-contracts/rab-source', async (req, res) => 
     const { projectId } = req.params;
     const items = await prisma.rabItem.findMany({
       where: { projectId, isHeaderOnly: false },
-      select: {
-        id: true, name: true, paymentUnit: true, volume: true,
-        rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true,
-        workCategoryId: true,
-        workCategory: { select: { id: true, code: true, name: true } },
-        workSubCategoryId: true,
-        workSubCategory: { select: { id: true, code: true, name: true } },
-      },
+      select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true, workCategoryId: true },
       orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
     });
     const total = items.reduce((sum, item) => sum + getSpkItemTotal(item), 0);
-    res.json({
-      sourceType: 'RAB',
-      projectId,
-      totalContractValue: Math.round(total),
-      totalContractValueWords: terbilangRupiah(total),
-      items: items.map((item) => ({
-        ...item,
-        categoryLabel: item.workCategory?.name || null,
-        subCategoryLabel: item.workSubCategory?.name || null,
-      })),
-    });
+    res.json({ sourceType: 'RAB', projectId, totalContractValue: Math.round(total), totalContractValueWords: terbilangRupiah(total), items });
   } catch (error) {
     console.error('SPK RAB source error:', error);
     res.status(500).json({ error: 'Gagal mengambil sumber nilai RAB.' });
