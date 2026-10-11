@@ -95,14 +95,99 @@ router.get('/projects/:projectId/spk-contracts/rab-source', async (req, res) => 
     const { projectId } = req.params;
     const items = await prisma.rabItem.findMany({
       where: { projectId, isHeaderOnly: false },
-      select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true, workCategoryId: true },
+      select: {
+        id: true, name: true, paymentUnit: true, volume: true,
+        rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true,
+        workCategoryId: true,
+        workCategory: { select: { id: true, code: true, name: true } },
+        workSubCategoryId: true,
+        workSubCategory: { select: { id: true, code: true, name: true } },
+      },
       orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
     });
     const total = items.reduce((sum, item) => sum + getSpkItemTotal(item), 0);
-    res.json({ sourceType: 'RAB', projectId, totalContractValue: Math.round(total), totalContractValueWords: terbilangRupiah(total), items });
+    res.json({
+      sourceType: 'RAB',
+      projectId,
+      totalContractValue: Math.round(total),
+      totalContractValueWords: terbilangRupiah(total),
+      items: items.map((item) => ({
+        ...item,
+        categoryLabel: item.workCategory?.name || null,
+        subCategoryLabel: item.workSubCategory?.name || null,
+      })),
+    });
   } catch (error) {
     console.error('SPK RAB source error:', error);
     res.status(500).json({ error: 'Gagal mengambil sumber nilai RAB.' });
+  }
+});
+
+// Sumber SPK SUBCON: item dari PO Jasa yang sudah APPROVED dua tingkat.
+// Subcon dibuat setelah PO Jasa disetujui, bukan dari RAB mentah.
+router.get('/projects/:projectId/spk-contracts/po-jasa-source', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const orders = await prisma.purchaseOrder.findMany({
+      where: { projectId, kategoriPO: 'JASA', status: 'APPROVED' },
+      include: {
+        jasa: { select: { id: true, nama: true, code: true } },
+        items: {
+          include: {
+            rabItem: {
+              select: {
+                id: true,
+                workCategoryId: true,
+                workCategory: { select: { id: true, code: true, name: true } },
+                workSubCategoryId: true,
+                workSubCategory: { select: { id: true, code: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { tanggal: 'asc' },
+    });
+
+    const items = [];
+    for (const order of orders) {
+      for (const item of order.items || []) {
+        const rab = item.rabItem || null;
+        const unitPrice = Number(item.unitPrice || 0);
+        const qty = Number(item.qty || 0);
+        items.push({
+          id: item.id,
+          rabItemId: item.rabItemId || null,
+          poId: order.id,
+          poNumber: order.poNumber || null,
+          contractorName: order.jasa?.nama || order.attn || null,
+          name: item.description || '-',
+          paymentUnit: item.unit || '-',
+          volume: qty,
+          rapUnitPrice: unitPrice,
+          rapTotalPrice: Number(item.total || qty * unitPrice),
+          rabUnitPrice: unitPrice,
+          rabTotalPrice: Number(item.total || qty * unitPrice),
+          workCategoryId: rab?.workCategoryId || null,
+          workSubCategoryId: rab?.workSubCategoryId || null,
+          categoryLabel: rab?.workCategory?.name || null,
+          subCategoryLabel: rab?.workSubCategory?.name || null,
+        });
+      }
+    }
+
+    const total = items.reduce((sum, item) => sum + Number(item.rapTotalPrice || 0), 0);
+    res.json({
+      sourceType: 'PO_JASA',
+      projectId,
+      poCount: orders.length,
+      totalContractValue: Math.round(total),
+      totalContractValueWords: terbilangRupiah(total),
+      items,
+    });
+  } catch (error) {
+    console.error('SPK PO Jasa source error:', error);
+    res.status(500).json({ error: 'Gagal mengambil sumber PO Jasa yang sudah disetujui.' });
   }
 });
 
@@ -128,13 +213,45 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
     });
 
     const itemIds = Array.isArray(req.body.rabItemIds) ? [...new Set(req.body.rabItemIds.filter(Boolean))] : [];
-    const items = await prisma.rabItem.findMany({
-      where: { projectId, id: { in: itemIds.length ? itemIds : ['__none__'] }, isHeaderOnly: false },
-      select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true },
-      orderBy: { order: 'asc' },
-    });
-    if (items.length !== itemIds.length) return res.status(400).json({ error: 'Sebagian item RAB tidak ditemukan.' });
-    if (!items.length) return res.status(400).json({ error: 'Pilih minimal satu item RAB sebagai sumber kontrak.' });
+    const poJasaItemIds = Array.isArray(req.body.poJasaItemIds) ? [...new Set(req.body.poJasaItemIds.filter(Boolean))] : [];
+    let items = [];
+    let sourceType = 'RAB';
+
+    if (type === 'SUBCON' && poJasaItemIds.length) {
+      // Alur subcon: sumbernya item PO Jasa yang sudah APPROVED, bukan RAB mentah.
+      const poItems = await prisma.purchaseOrderItem.findMany({
+        where: {
+          id: { in: poJasaItemIds },
+          purchaseOrder: { projectId, kategoriPO: 'JASA', status: 'APPROVED' },
+        },
+        select: {
+          id: true, description: true, unit: true, qty: true, unitPrice: true, total: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (poItems.length !== poJasaItemIds.length) {
+        return res.status(400).json({ error: 'Sebagian item PO Jasa belum APPROVED atau tidak ditemukan.' });
+      }
+      items = poItems.map((item) => ({
+        id: item.id,
+        name: item.description || '-',
+        paymentUnit: item.unit || '-',
+        volume: Number(item.qty || 0),
+        rapUnitPrice: Number(item.unitPrice || 0),
+        rapTotalPrice: Number(item.total || 0),
+        rabUnitPrice: Number(item.unitPrice || 0),
+        rabTotalPrice: Number(item.total || 0),
+      }));
+      sourceType = 'PO_JASA';
+    } else {
+      items = await prisma.rabItem.findMany({
+        where: { projectId, id: { in: itemIds.length ? itemIds : ['__none__'] }, isHeaderOnly: false },
+        select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true },
+        orderBy: { order: 'asc' },
+      });
+      if (items.length !== itemIds.length) return res.status(400).json({ error: 'Sebagian item RAB tidak ditemukan.' });
+    }
+    if (!items.length) return res.status(400).json({ error: 'Pilih minimal satu item sebagai sumber kontrak.' });
 
     const snapshot = buildSpkSnapshot(project, { id: projectId }, items, type);
     const totalContractValue = snapshot.contractValue;
@@ -151,10 +268,10 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
         type,
         status: 'DRAFT',
         sourceType: 'RAB',
-        sourceId: projectId,
+        sourceId: sourceType === 'PO_JASA' ? `PO_JASA:${projectId}` : projectId,
         contractValue: totalContractValue,
         contractValueWords: terbilangRupiah(totalContractValue),
-        snapshot: { ...snapshot, party: partySnapshot, parties: partySnapshot, partyData: partySnapshot },
+        snapshot: { ...snapshot, sourceType, party: partySnapshot, parties: partySnapshot, partyData: partySnapshot },
         partyData: partySnapshot,
         workDurationDays: schedule?.workDurationDays ?? (req.body.workDurationDays ? Number(req.body.workDurationDays) : null),
         startDate: schedule?.startDate ?? (req.body.startDate ? parseDate(req.body.startDate) : null),
@@ -189,13 +306,39 @@ router.patch('/spk-contracts/:id', async (req, res) => {
     const schedule = validateScheduleForType(type, req.body, existing);
 
     const itemIds = Array.isArray(req.body.rabItemIds) ? [...new Set(req.body.rabItemIds.filter(Boolean))] : [];
-    const items = await prisma.rabItem.findMany({
-      where: { projectId: existing.projectId, id: { in: itemIds.length ? itemIds : ['__none__'] }, isHeaderOnly: false },
-      select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true },
-      orderBy: { order: 'asc' },
-    });
-    if (items.length !== itemIds.length) return res.status(400).json({ error: 'Sebagian item RAB tidak ditemukan.' });
-    if (!items.length) return res.status(400).json({ error: 'Pilih minimal satu item RAB sebagai sumber kontrak.' });
+    const poJasaItemIds = Array.isArray(req.body.poJasaItemIds) ? [...new Set(req.body.poJasaItemIds.filter(Boolean))] : [];
+    let items = [];
+    if (type === 'SUBCON' && poJasaItemIds.length) {
+      const poItems = await prisma.purchaseOrderItem.findMany({
+        where: {
+          id: { in: poJasaItemIds },
+          purchaseOrder: { projectId: existing.projectId, kategoriPO: 'JASA', status: 'APPROVED' },
+        },
+        select: { id: true, description: true, unit: true, qty: true, unitPrice: true, total: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (poItems.length !== poJasaItemIds.length) {
+        return res.status(400).json({ error: 'Sebagian item PO Jasa belum APPROVED atau tidak ditemukan.' });
+      }
+      items = poItems.map((item) => ({
+        id: item.id,
+        name: item.description || '-',
+        paymentUnit: item.unit || '-',
+        volume: Number(item.qty || 0),
+        rapUnitPrice: Number(item.unitPrice || 0),
+        rapTotalPrice: Number(item.total || 0),
+        rabUnitPrice: Number(item.unitPrice || 0),
+        rabTotalPrice: Number(item.total || 0),
+      }));
+    } else {
+      items = await prisma.rabItem.findMany({
+        where: { projectId: existing.projectId, id: { in: itemIds.length ? itemIds : ['__none__'] }, isHeaderOnly: false },
+        select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true },
+        orderBy: { order: 'asc' },
+      });
+      if (items.length !== itemIds.length) return res.status(400).json({ error: 'Sebagian item RAB tidak ditemukan.' });
+    }
+    if (!items.length) return res.status(400).json({ error: 'Pilih minimal satu item sebagai sumber kontrak.' });
 
     const update = buildSpkDraftUpdate({
       existing,
