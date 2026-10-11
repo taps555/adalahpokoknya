@@ -811,8 +811,15 @@ router.put(
         const savedItems = [];
         for (const item of items) {
           const rapSatuan = Number(newUnitPrice);
-          const overhead = Number(item.overheadPercent || 0);
-          const rabSatuan = rapSatuan + rapSatuan * (overhead / 100);
+          const existingOh = {
+            operationalPercent: Number(
+              item.operationalPercent ?? item.overheadPercent ?? item.overhead ?? 0,
+            ),
+            wastePercent: Number(item.wastePercent ?? 0),
+            profitPercent: Number(item.profitPercent ?? 0),
+          };
+          const pricing = calculateRabOh(rapSatuan, Number(item.volume || 0), existingOh);
+          const rabSatuan = pricing.rabUnitPrice;
           const vol = Number(item.volume || 0);
           const saved = await tx.rabItem.update({
             where: { id: item.id },
