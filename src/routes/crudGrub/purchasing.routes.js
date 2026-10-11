@@ -234,6 +234,193 @@ const enrichPengajuanWithKeterangan = async (pengajuan) => {
 };
 
 /**
+ * GET /api/pengajuan-bayar/budget-monitoring?projectId=xxx
+ * Ringkasan monitoring budget RAP (Material vs Jasa) vs Pemesanan PO aktif
+ * Beserta deteksi titik-titik over budget
+ */
+router.get("/pengajuan-bayar/budget-monitoring", async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) {
+      return res.status(400).json({ error: "projectId wajib diisi" });
+    }
+
+    // 1. Ambil data RAP Proyek (RabItem + Components)
+    const rabItems = await prisma.rabItem.findMany({
+      where: { projectId },
+      include: { components: true, workCategory: true },
+    });
+
+    let rapMaterial = 0;
+    let rapJasa = 0;
+
+    for (const it of rabItems) {
+      const vol = Number(it.volume || 0);
+      if (it.components && it.components.length > 0) {
+        for (const comp of it.components) {
+          const compLineTotal =
+            Number(comp.coefficient || 0) * Number(comp.unitPrice || 0) * vol;
+          if (comp.section === "UPAH") {
+            rapJasa += compLineTotal;
+          } else {
+            // BAHAN dan ALAT dijadikan satu ke Material sesuai permintaan
+            rapMaterial += compLineTotal;
+          }
+        }
+      } else {
+        const itemTotal = Number(
+          it.rapTotalPrice || vol * Number(it.rapUnitPrice || 0),
+        );
+        if (it.category && /upah|jasa/i.test(it.category)) {
+          rapJasa += itemTotal;
+        } else {
+          rapMaterial += itemTotal;
+        }
+      }
+    }
+
+    const totalRap = rapMaterial + rapJasa;
+
+    // 2. Ambil PO Aktif (APPROVED, MENUNGGU_ATASAN, BELUM_APPROVE)
+    const pos = await prisma.purchaseOrder.findMany({
+      where: {
+        projectId,
+        status: { in: ["APPROVED", "MENUNGGU_ATASAN", "BELUM_APPROVE"] },
+      },
+      include: {
+        items: {
+          include: {
+            materialRequest: {
+              select: {
+                pricePerUnit: true,
+                estimatedVolume: true,
+                itemName: true,
+              },
+            },
+            rabItem: {
+              select: { rapUnitPrice: true, volume: true, name: true },
+            },
+          },
+        },
+        supplier: { select: { id: true, name: true } },
+        jasa: { select: { id: true, nama: true } },
+      },
+    });
+
+    let orderedMaterial = 0;
+    let orderedJasa = 0;
+    let orderedApproved = 0;
+    let orderedPending = 0;
+
+    const overItems = [];
+    const overPoIdSet = new Set();
+
+    for (const po of pos) {
+      const poTotal = Number(po.grandTotal || po.subTotal || 0);
+      const isJasa = po.kategoriPO === "JASA" || Boolean(po.jasaId);
+
+      if (isJasa) {
+        orderedJasa += poTotal;
+      } else {
+        orderedMaterial += poTotal;
+      }
+
+      if (po.status === "APPROVED") {
+        orderedApproved += poTotal;
+      } else {
+        orderedPending += poTotal;
+      }
+
+      // Deteksi over budget pada level item
+      for (const it of po.items) {
+        const rapPrice = Number(
+          it.materialRequest?.pricePerUnit || it.rabItem?.rapUnitPrice || 0,
+        );
+        const rapVol = Number(
+          it.materialRequest?.estimatedVolume || it.rabItem?.volume || 0,
+        );
+        const poPrice = Number(it.unitPrice || 0);
+        const poQty = Number(it.qty || 0);
+
+        const isOverHarga = rapPrice > 0 && poPrice > rapPrice;
+        const isOverVol = rapVol > 0 && poQty > rapVol;
+
+        if (isOverHarga || isOverVol) {
+          overPoIdSet.add(po.id);
+          const diffHarga = isOverHarga ? poPrice - rapPrice : 0;
+          const diffVol = isOverVol ? poQty - rapVol : 0;
+          const nominalOver =
+            diffHarga * poQty + (isOverVol && !isOverHarga ? diffVol * poPrice : 0);
+
+          overItems.push({
+            poId: po.id,
+            poNumber: po.poNumber || `PO-${po.id.slice(0, 8)}`,
+            kategoriPO: po.kategoriPO,
+            supplierOrJasa: isJasa
+              ? po.jasa?.nama || "-"
+              : po.supplier?.name || "-",
+            description: it.description,
+            qty: poQty,
+            unit: it.unit,
+            unitPrice: poPrice,
+            rapUnitPrice: rapPrice,
+            rapVol,
+            diffHarga,
+            diffVol,
+            nominalOver: Math.max(0, nominalOver),
+            isOverHarga,
+            isOverVol,
+          });
+        }
+      }
+    }
+
+    const totalOrdered = orderedMaterial + orderedJasa;
+
+    // 3. Hitung variance
+    const materialDiff = orderedMaterial - rapMaterial;
+    const jasaDiff = orderedJasa - rapJasa;
+    const totalDiff = totalOrdered - totalRap;
+
+    // Sort overItems dari nominal over terbesar
+    overItems.sort((a, b) => b.nominalOver - a.nominalOver);
+
+    res.json({
+      rap: {
+        material: rapMaterial,
+        jasa: rapJasa,
+        total: totalRap,
+      },
+      ordered: {
+        material: orderedMaterial,
+        jasa: orderedJasa,
+        total: totalOrdered,
+        approved: orderedApproved,
+        pending: orderedPending,
+      },
+      variance: {
+        materialDiff,
+        materialIsOver: materialDiff > 0,
+        materialPercent:
+          rapMaterial > 0 ? (orderedMaterial / rapMaterial) * 100 : 0,
+        jasaDiff,
+        jasaIsOver: jasaDiff > 0,
+        jasaPercent: rapJasa > 0 ? (orderedJasa / rapJasa) * 100 : 0,
+        totalDiff,
+        totalIsOver: totalDiff > 0,
+        totalPercent:
+          totalRap > 0 ? (totalOrdered / totalRap) * 100 : 0,
+      },
+      overPoIds: Array.from(overPoIdSet),
+      overItems,
+    });
+  } catch (error) {
+    console.error("Get Budget Monitoring Error:", error);
+    res.status(500).json({ error: "Gagal mengambil data monitoring budget" });
+  }
+});
+
+/**
  * GET /api/pengajuan-bayar
  */
 router.get("/pengajuan-bayar", async (req, res) => {
@@ -678,6 +865,47 @@ router.put(
 );
 
 /**
+ * Sinkronkan status approval pembayaranSupplier saat Atasan menyetujui pengajuan bayar
+ */
+const syncPembayaranToApprovedAtasan = async (pengajuanId, poId, user) => {
+  try {
+    const list = await prisma.pembayaranSupplier.findMany({
+      where: {
+        OR: [
+          ...(pengajuanId ? [{ pengajuanId }] : []),
+          ...(poId ? [{ poId }] : []),
+        ],
+      },
+    });
+
+    for (const item of list) {
+      const rawPh = item.paymentHistory;
+      let meta = {};
+      let entries = [];
+      if (Array.isArray(rawPh)) {
+        entries = rawPh;
+      } else if (rawPh && typeof rawPh === "object") {
+        meta = { ...rawPh };
+        entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+      }
+
+      meta.entries = entries;
+      meta.approvalStatus = "APPROVED_ATASAN";
+      meta.atasanApprovedAt = new Date();
+      meta.atasanApprovedBy = user?.name || user?.username || user?.userId || "Atasan";
+      meta.rejectReason = null;
+
+      await prisma.pembayaranSupplier.update({
+        where: { id: item.id },
+        data: { paymentHistory: meta },
+      });
+    }
+  } catch (err) {
+    console.error("Sync pembayaran to approved atasan error:", err);
+  }
+};
+
+/**
  * PUT /api/pengajuan-bayar/:id/approve
  * TINGKAT 2 — Atasan (PROJECT_MANAGER) menyetujui final.
  * APPROVED_FINANCE -> APPROVED
@@ -764,6 +992,13 @@ router.put(
               keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
               status: poForPayment.kategoriPO === "JASA" ? "BELUM_BAYAR" : "PENDING",
               noPembayaran: poForPayment.kategoriPO === "JASA" ? null : undefined,
+              paymentHistory: {
+                entries: [],
+                approvalStatus: "APPROVED_ATASAN",
+                isPostedKasBank: false,
+                atasanApprovedAt: new Date(),
+                atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+              },
             },
           });
 
@@ -780,6 +1015,9 @@ router.put(
           }
         }
       }
+
+      // Sinkronkan status pembayaranSupplier yang sudah ada ke APPROVED_ATASAN
+      await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
     }
 
       res.json({ message: "Pengajuan bayar di-approve", data: pengajuan });
@@ -893,9 +1131,484 @@ router.put(
   },
 );
 
+/**
+ * PUT /api/pengajuan-bayar/:id/item-decision
+ * Keputusan Approval / Reject di tingkat item (Opsi B)
+ */
+router.put(
+  "/pengajuan-bayar/:id/item-decision",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { decisions = [], generalRejectReason = "" } = req.body;
+      const existing = await prisma.pengajuanPembayaran.findUnique({
+        where: { id: req.params.id },
+        include: {
+          purchaseOrder: {
+            include: { items: true, supplier: true, jasa: true },
+          },
+        },
+      });
+
+      if (!existing) {
+        return res
+          .status(404)
+          .json({ error: "Pengajuan pembayaran tidak ditemukan" });
+      }
+
+      if (existing.status === "APPROVED") {
+        return res
+          .status(400)
+          .json({ error: "Pengajuan ini sudah disetujui sebelumnya." });
+      }
+
+      const po = existing.purchaseOrder;
+      const decisionMap = {};
+      decisions.forEach((d) => {
+        if (d.itemId) decisionMap[d.itemId] = d;
+      });
+
+      const approvedItems = [];
+      const rejectedItems = [];
+
+      const poItems = po?.items || [];
+      for (const it of poItems) {
+        const dec = decisionMap[it.id];
+        if (dec && dec.status === "REJECTED") {
+          rejectedItems.push({
+            id: it.id,
+            description: it.description,
+            qty: it.qty,
+            unit: it.unit,
+            unitPrice: it.unitPrice,
+            total: it.total,
+            status: "REJECTED",
+            rejectReason: dec.rejectReason || "Ditolak oleh atasan",
+          });
+        } else {
+          approvedItems.push({
+            id: it.id,
+            description: it.description,
+            qty: it.qty,
+            unit: it.unit,
+            unitPrice: it.unitPrice,
+            total: it.total,
+            status: "APPROVED",
+          });
+        }
+      }
+
+      // KASUS 1: Semua item di-reject
+      if (approvedItems.length === 0) {
+        const reason =
+          generalRejectReason || "Semua item ditolak oleh atasan.";
+        const updatedPengajuan = await prisma.pengajuanPembayaran.update({
+          where: { id: req.params.id },
+          data: {
+            status: "REJECTED",
+            rejectReason: reason,
+            items: rejectedItems,
+          },
+        });
+
+        if (existing.poId) {
+          await prisma.purchaseOrder.update({
+            where: { id: existing.poId },
+            data: {
+              status: "REJECTED",
+              rejectedById: req.user?.userId || null,
+              rejectedAt: new Date(),
+              rejectReason: reason,
+            },
+          });
+        }
+
+        return res.json({
+          message: "Seluruh item ditolak. Pengajuan ditandai ditolak.",
+          data: updatedPengajuan,
+          approvedCount: 0,
+          rejectedCount: rejectedItems.length,
+        });
+      }
+
+      // KASUS 2: Sebagian atau seluruh item di-approve
+      const approvedTotal = approvedItems.reduce(
+        (sum, it) => sum + Number(it.total || 0),
+        0,
+      );
+
+      // Update pengajuan pembayaran
+      const updatedPengajuan = await prisma.pengajuanPembayaran.update({
+        where: { id: req.params.id },
+        data: {
+          status: "APPROVED",
+          approvedById: req.user?.userId || null,
+          approvedAt: new Date(),
+          totalTagihan: approvedTotal,
+          rejectReason:
+            rejectedItems.length > 0
+              ? `${rejectedItems.length} item ditolak`
+              : null,
+          items: [...approvedItems, ...rejectedItems],
+        },
+      });
+
+      // Update PO
+      if (existing.poId) {
+        await prisma.purchaseOrder.update({
+          where: { id: existing.poId },
+          data: {
+            status: "APPROVED",
+            approvedById: req.user?.userId || null,
+            approvedAt: new Date(),
+            subTotal: approvedTotal,
+            grandTotal: approvedTotal,
+            rejectReason: null,
+            rejectedAt: null,
+            rejectedById: null,
+          },
+        });
+
+        // Catat alasan reject pada baris PurchaseOrderItem yang ditolak
+        for (const rej of rejectedItems) {
+          await prisma.purchaseOrderItem.update({
+            where: { id: rej.id },
+            data: {
+              keteranganHarga: rej.rejectReason
+                ? `[Ditolak: ${rej.rejectReason}]`
+                : "[Ditolak Atasan]",
+            },
+          });
+        }
+
+        // Siapkan draft PembayaranSupplier default
+        const sudahAda = await prisma.pembayaranSupplier.findFirst({
+          where: { poId: existing.poId },
+        });
+
+        const cara = String(po?.caraPembayaran || "").toLowerCase();
+        let metodeDefault = "TRANSFER";
+        if (cara.includes("cash")) metodeDefault = "CASH";
+        else if (cara.includes("cek")) metodeDefault = "CEK";
+        else if (cara.includes("giro")) metodeDefault = "GIRO";
+        else if (
+          cara.includes("tempo") ||
+          cara.includes("cicil") ||
+          cara.includes("termin") ||
+          cara.includes("kredit")
+        ) {
+          metodeDefault = "TEMPO";
+        }
+
+        if (!sudahAda) {
+          const createdPembayaran = await prisma.pembayaranSupplier.create({
+            data: {
+              supplierId: po?.supplierId || null,
+              jasaId: po?.jasaId || null,
+              poId: existing.poId,
+              pengajuanId: updatedPengajuan.id,
+              tanggal: new Date(),
+              totalTagihan: approvedTotal,
+              jumlahBayar: 0,
+              totalTerbayar: 0,
+              sisaBayar: approvedTotal,
+              metodeBayar: metodeDefault,
+              keterangan: `Draft pembayaran PO ${po?.poNumber || po?.id}${rejectedItems.length > 0 ? " (Sebagian disetujui)" : ""}`,
+              status: po?.kategoriPO === "JASA" ? "BELUM_BAYAR" : "PENDING",
+              noPembayaran: po?.kategoriPO === "JASA" ? null : undefined,
+              paymentHistory: {
+                entries: [],
+                approvalStatus: "APPROVED_ATASAN",
+                isPostedKasBank: false,
+                atasanApprovedAt: new Date(),
+                atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+              },
+            },
+          });
+
+          if (po?.kategoriPO !== "JASA") {
+            const noPembayaran = await buildNoPembayaran({
+              pembayaranId: createdPembayaran.id,
+              tanggal: createdPembayaran.tanggal,
+            });
+
+            await prisma.pembayaranSupplier.update({
+              where: { id: createdPembayaran.id },
+              data: { noPembayaran },
+            });
+          }
+        } else {
+          // Update total tagihan yang sudah ada jika nominal berubah
+          await prisma.pembayaranSupplier.update({
+            where: { id: sudahAda.id },
+            data: {
+              totalTagihan: approvedTotal,
+              sisaBayar: Math.max(
+                0,
+                approvedTotal - Number(sudahAda.totalTerbayar || 0),
+              ),
+              keterangan: `Draft pembayaran PO ${po?.poNumber || po?.id}${rejectedItems.length > 0 ? " (Sebagian disetujui)" : ""}`,
+            },
+          });
+        }
+
+        // Sinkronkan approval pembayaranSupplier terkait
+        await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
+      }
+
+      res.json({
+        message: `Keputusan item berhasil diproses (${approvedItems.length} disetujui, ${rejectedItems.length} ditolak)`,
+        data: updatedPengajuan,
+        approvedCount: approvedItems.length,
+        rejectedCount: rejectedItems.length,
+      });
+    } catch (error) {
+      console.error("Item Decision Error:", error);
+      res
+        .status(500)
+        .json({ error: "Gagal memproses keputusan item pengajuan" });
+    }
+  },
+);
+
+/**
+ * POST /api/pengajuan-bayar/bulk-approve
+ * Menyetujui beberapa pengajuan sekaligus
+ */
+router.post(
+  "/pengajuan-bayar/bulk-approve",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { ids = [] } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Pilih minimal 1 pengajuan untuk disetujui" });
+      }
+
+      let successCount = 0;
+      for (const id of ids) {
+        const existing = await prisma.pengajuanPembayaran.findUnique({
+          where: { id },
+          include: { purchaseOrder: { include: { items: true } } },
+        });
+        if (!existing || existing.status === "APPROVED") continue;
+
+        const po = existing.purchaseOrder;
+        const totalTagihan = Number(
+          existing.totalTagihan || po?.grandTotal || po?.subTotal || 0,
+        );
+
+        await prisma.pengajuanPembayaran.update({
+          where: { id },
+          data: {
+            status: "APPROVED",
+            approvedById: req.user?.userId || null,
+            approvedAt: new Date(),
+            rejectReason: null,
+          },
+        });
+
+        if (existing.poId) {
+          await prisma.purchaseOrder.update({
+            where: { id: existing.poId },
+            data: {
+              status: "APPROVED",
+              approvedById: req.user?.userId || null,
+              approvedAt: new Date(),
+              rejectReason: null,
+              rejectedAt: null,
+              rejectedById: null,
+            },
+          });
+
+          // Siapkan draft pembayaran jika belum ada
+          const sudahAda = await prisma.pembayaranSupplier.findFirst({
+            where: { poId: existing.poId },
+          });
+          if (!sudahAda && po) {
+            const cara = String(po.caraPembayaran || "").toLowerCase();
+            let metodeDefault = "TRANSFER";
+            if (cara.includes("cash")) metodeDefault = "CASH";
+            else if (cara.includes("cek")) metodeDefault = "CEK";
+            else if (cara.includes("giro")) metodeDefault = "GIRO";
+            else if (
+              cara.includes("tempo") ||
+              cara.includes("cicil") ||
+              cara.includes("termin") ||
+              cara.includes("kredit")
+            ) {
+              metodeDefault = "TEMPO";
+            }
+
+            const createdPembayaran = await prisma.pembayaranSupplier.create({
+              data: {
+                supplierId: po.supplierId || null,
+                jasaId: po.jasaId || null,
+                poId: po.id,
+                pengajuanId: existing.id,
+                tanggal: new Date(),
+                totalTagihan,
+                jumlahBayar: 0,
+                totalTerbayar: 0,
+                sisaBayar: totalTagihan,
+                metodeBayar: metodeDefault,
+                keterangan: `Draft pembayaran PO ${po.poNumber || po.id}`,
+                status: po.kategoriPO === "JASA" ? "BELUM_BAYAR" : "PENDING",
+                noPembayaran: po.kategoriPO === "JASA" ? null : undefined,
+                paymentHistory: {
+                  entries: [],
+                  approvalStatus: "APPROVED_ATASAN",
+                  isPostedKasBank: false,
+                  atasanApprovedAt: new Date(),
+                  atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+                },
+              },
+            });
+
+            if (po.kategoriPO !== "JASA") {
+              const noPembayaran = await buildNoPembayaran({
+                pembayaranId: createdPembayaran.id,
+                tanggal: createdPembayaran.tanggal,
+              });
+
+              await prisma.pembayaranSupplier.update({
+                where: { id: createdPembayaran.id },
+                data: { noPembayaran },
+              });
+            }
+          }
+
+          // Sinkronkan approval pembayaranSupplier terkait
+          await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
+        }
+        successCount++;
+      }
+
+      res.json({
+        message: `${successCount} pengajuan berhasil disetujui`,
+        successCount,
+      });
+    } catch (error) {
+      console.error("Bulk Approve Error:", error);
+      res
+        .status(500)
+        .json({ error: "Gagal menyetujui pengajuan secara massal" });
+    }
+  },
+);
+
+/**
+ * POST /api/pengajuan-bayar/bulk-reject
+ * Menolak beberapa pengajuan sekaligus
+ */
+router.post(
+  "/pengajuan-bayar/bulk-reject",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { ids = [], reason = "Ditolak oleh atasan" } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Pilih minimal 1 pengajuan untuk ditolak" });
+      }
+
+      let successCount = 0;
+      for (const id of ids) {
+        const existing = await prisma.pengajuanPembayaran.findUnique({
+          where: { id },
+        });
+        if (!existing || existing.status === "APPROVED") continue;
+
+        await prisma.pengajuanPembayaran.update({
+          where: { id },
+          data: {
+            status: "REJECTED",
+            rejectReason: reason,
+          },
+        });
+
+        if (existing.poId) {
+          await prisma.purchaseOrder.update({
+            where: { id: existing.poId },
+            data: {
+              status: "MENUNGGU_ATASAN",
+              rejectReason: reason,
+              rejectedAt: new Date(),
+              rejectedById: req.user?.userId || null,
+            },
+          });
+        }
+        successCount++;
+      }
+
+      res.json({
+        message: `${successCount} pengajuan berhasil ditolak`,
+        successCount,
+      });
+    } catch (error) {
+      console.error("Bulk Reject Error:", error);
+      res.status(500).json({ error: "Gagal menolak pengajuan secara massal" });
+    }
+  },
+);
+
 // =====================================================================
 // 3. PEMBAYARAN SUPPLIER
 // =====================================================================
+
+const enrichPembayaranApproval = (pembayaran) => {
+  if (!pembayaran) return null;
+  const rawPh = pembayaran.paymentHistory;
+  let phMeta = {};
+  let historyEntries = [];
+
+  if (Array.isArray(rawPh)) {
+    historyEntries = rawPh;
+  } else if (rawPh && typeof rawPh === "object") {
+    phMeta = rawPh;
+    historyEntries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+  }
+
+  const hasBB = pembayaran.bukuBesarTransaksi && pembayaran.bukuBesarTransaksi.length > 0;
+  const isOldPaid = pembayaran.status === "LUNAS" || pembayaran.status === "PAID" || Boolean(hasBB);
+
+  const isPosted = phMeta.isPostedKasBank !== undefined
+    ? Boolean(phMeta.isPostedKasBank)
+    : Boolean(isOldPaid);
+
+  let approvalStatus = phMeta.approvalStatus;
+  if (!approvalStatus) {
+    if (isPosted) {
+      approvalStatus = "APPROVED_ATASAN";
+    } else if (pembayaran.pengajuan?.status === "APPROVED") {
+      approvalStatus = "APPROVED_ATASAN";
+    } else if (pembayaran.pengajuan?.status === "APPROVED_FINANCE") {
+      approvalStatus = "APPROVED_FINANCE";
+    } else {
+      approvalStatus = "MENUNGGU_FINANCE";
+    }
+  }
+
+  return {
+    ...pembayaran,
+    paymentHistory: historyEntries,
+    approvalStatus,
+    isPostedKasBank: isPosted,
+    financeApprovedAt: phMeta.financeApprovedAt || pembayaran.pengajuan?.verifiedAt || null,
+    atasanApprovedAt: phMeta.atasanApprovedAt || pembayaran.pengajuan?.approvedAt || null,
+    financeApprovedBy: phMeta.financeApprovedBy || pembayaran.pengajuan?.verifiedBy?.name || null,
+    atasanApprovedBy: phMeta.atasanApprovedBy || pembayaran.pengajuan?.approvedBy?.name || null,
+    postedKasBankAt: phMeta.postedKasBankAt || null,
+    postedBy: phMeta.postedBy || null,
+    rejectReason: phMeta.rejectReason || null,
+  };
+};
 
 /**
  * GET /api/pembayaran-supplier
@@ -906,9 +1619,20 @@ router.get("/pembayaran-supplier", async (req, res) => {
       include: {
         supplier: { select: { name: true, id: true, type: true } },
         jasa: { select: { id: true, nama: true } },
-        pengajuan: { select: { noPengajuan: true, id: true } },
+        pengajuan: {
+          select: {
+            noPengajuan: true,
+            id: true,
+            status: true,
+            verifiedAt: true,
+            approvedAt: true,
+            verifiedBy: { select: { name: true } },
+            approvedBy: { select: { name: true } },
+          },
+        },
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
+        bukuBesarTransaksi: { select: { id: true } },
         purchaseOrder: {
           include: {
             items: {
@@ -933,7 +1657,8 @@ router.get("/pembayaran-supplier", async (req, res) => {
       },
       orderBy: { createdAt: "desc" },
     });
-    res.json(pembayaran);
+    const enriched = pembayaran.map(enrichPembayaranApproval);
+    res.json(enriched);
 
   } catch (error) {
     console.error("Get Pembayaran Supplier Error:", error);
@@ -951,9 +1676,20 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       include: {
         supplier: true,
         jasa: true,
-        pengajuan: true,
+        pengajuan: {
+          select: {
+            noPengajuan: true,
+            id: true,
+            status: true,
+            verifiedAt: true,
+            approvedAt: true,
+            verifiedBy: { select: { name: true } },
+            approvedBy: { select: { name: true } },
+          },
+        },
         rekeningBank: { include: { tipeRekening: true } },
         tipeRekening: true,
+        bukuBesarTransaksi: { select: { id: true } },
         purchaseOrder: {
           include: {
             supplier: true,
@@ -983,7 +1719,7 @@ router.get("/pembayaran-supplier/:id", async (req, res) => {
       return res
         .status(404)
         .json({ error: "Pembayaran tidak ditemukan" });
-    res.json(pembayaran);
+    res.json(enrichPembayaranApproval(pembayaran));
   } catch (error) {
     console.error("Get Pembayaran Supplier Detail Error:", error);
     res.status(500).json({ error: "Gagal mengambil detail pembayaran" });
@@ -1092,9 +1828,9 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       autoStatus = status;
     }
 
-    const paymentHistory = [];
+    const paymentHistoryEntries = [];
     if (jumlahBayarInput > 0) {
-      paymentHistory.push({
+      paymentHistoryEntries.push({
         id: `PMT-${Date.now()}`,
         tanggal: (tanggalBayarInput || tanggalForm).toISOString(),
         jumlah: jumlahBayarInput,
@@ -1109,6 +1845,17 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         keterangan: keterangan || null,
       });
     }
+
+    const initialPaymentHistory = {
+      entries: paymentHistoryEntries,
+      approvalStatus: "MENUNGGU_FINANCE",
+      isPostedKasBank: false,
+      financeApprovedAt: null,
+      financeApprovedBy: null,
+      atasanApprovedAt: null,
+      atasanApprovedBy: null,
+      postedKasBankAt: null,
+    };
 
     const created = await prisma.pembayaranSupplier.create({
       data: {
@@ -1127,7 +1874,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
         tipeAkunKasBank: resolvedTipeAkunKasBank,
         tipeRekeningId: tipeRekeningId || null,
         keterangan,
-        paymentHistory,
+        paymentHistory: initialPaymentHistory,
         buktiBayarUrl,
         status: autoStatus,
         tanggalBayar: jumlahBayarInput > 0 ? (tanggalBayarInput || tanggalForm) : null,
@@ -1173,8 +1920,8 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       },
     });
 
-    // Jika langsung ada pembayaran, langsung posting ke buku besar
-    if (jumlahBayarInput > 0) {
+    // Posting ke buku besar HANYA jika diminta secara eksplisit (default: tunggu approval Atasan & tombol Kirim ke Kas/Bank)
+    if (req.body.isDirectPosting === true && jumlahBayarInput > 0) {
       try {
         const { createTransaksiBukuBesar } = require("./glBank.routes.js");
         const rekening = rekeningBankId
@@ -1217,7 +1964,7 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
 
     res.json({
       message: "Pembayaran supplier berhasil dibuat",
-      data: pembayaran,
+      data: enrichPembayaranApproval(pembayaran),
     });
   } catch (error) {
     console.error("Create Pembayaran Supplier Error:", error);
@@ -1348,12 +2095,19 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     const resolvedTipeAkunKasBank =
       tipeAkunKasBank || existing.tipeAkunKasBank || (rekeningBankId || existing.rekeningBankId ? "BANK" : "KAS");
 
-    const paymentHistory = Array.isArray(existing.paymentHistory)
-      ? [...existing.paymentHistory]
-      : [];
+    let existingEntries = [];
+    let existingMeta = {};
+    if (Array.isArray(existing.paymentHistory)) {
+      existingEntries = [...existing.paymentHistory];
+    } else if (existing.paymentHistory && typeof existing.paymentHistory === "object") {
+      existingMeta = { ...existing.paymentHistory };
+      existingEntries = Array.isArray(existing.paymentHistory.entries)
+        ? [...existing.paymentHistory.entries]
+        : [];
+    }
 
     if (nominalJurnal > 0) {
-      paymentHistory.push({
+      existingEntries.push({
         id: `PMT-${Date.now()}`,
         tanggal: (tanggalBayarFinal || new Date()).toISOString(),
         jumlah: nominalJurnal,
@@ -1368,6 +2122,15 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         keterangan: keterangan || null,
       });
     }
+
+    const updatedPaymentHistory = {
+      ...existingMeta,
+      entries: existingEntries,
+      approvalStatus: existingMeta.isPostedKasBank
+        ? (existingMeta.approvalStatus || "APPROVED_ATASAN")
+        : (existingMeta.approvalStatus || "MENUNGGU_FINANCE"),
+      isPostedKasBank: Boolean(existingMeta.isPostedKasBank),
+    };
 
     const pembayaran = await prisma.pembayaranSupplier.update({
       where: { id: req.params.id },
@@ -1389,7 +2152,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
         tipeAkunKasBank: resolvedTipeAkunKasBank,
         tipeRekeningId: tipeRekeningId || existing.tipeRekeningId || null,
         keterangan,
-        paymentHistory,
+        paymentHistory: updatedPaymentHistory,
         buktiBayarUrl,
         status: autoStatus,
       },
@@ -1423,7 +2186,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       },
     });
 
-    if (nominalJurnal > 0) {
+    // Posting otomatis HANYA jika diminta langsung (default: ditunda sampai Atasan approve & tombol Kirim ke Kas/Bank ditekan)
+    if (req.body.isDirectPosting === true && nominalJurnal > 0) {
       const { createTransaksiBukuBesar } = require("./glBank.routes.js");
       try {
         const rekening = rekeningBankId
@@ -1476,7 +2240,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       }
     }
 
-    res.json({ message: "Pembayaran diupdate", data: pembayaran });
+    res.json({ message: "Pembayaran diupdate", data: enrichPembayaranApproval(pembayaran) });
   } catch (error) {
     console.error("Update Pembayaran Supplier Error:", error);
     if (error.code === "P2025") {
@@ -1487,6 +2251,482 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     res.status(500).json({ error: "Gagal update pembayaran" });
   }
 });
+
+/**
+ * PUT /api/pembayaran-supplier/:id/approve-finance
+ * Tingkat 1: Finance memeriksa dan menyetujui tagihan pembayaran.
+ */
+router.put(
+  "/pembayaran-supplier/:id/approve-finance",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  async (req, res) => {
+    try {
+      const existing = await prisma.pembayaranSupplier.findUnique({
+        where: { id: req.params.id },
+        include: { pengajuan: true, bukuBesarTransaksi: true },
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+      }
+
+      const rawPh = existing.paymentHistory;
+      let meta = {};
+      let entries = [];
+      if (Array.isArray(rawPh)) {
+        entries = rawPh;
+      } else if (rawPh && typeof rawPh === "object") {
+        meta = { ...rawPh };
+        entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+      }
+
+      meta.entries = entries;
+      meta.approvalStatus = "APPROVED_FINANCE";
+      meta.financeApprovedAt = new Date();
+      meta.financeApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
+      meta.rejectReason = null;
+
+      const updated = await prisma.pembayaranSupplier.update({
+        where: { id: req.params.id },
+        data: { paymentHistory: meta },
+        include: {
+          supplier: true,
+          jasa: true,
+          rekeningBank: { include: { tipeRekening: true } },
+          tipeRekening: true,
+          bukuBesarTransaksi: true,
+          purchaseOrder: true,
+          pengajuan: true,
+        },
+      });
+
+      // Jika linked ke pengajuan, sinkronkan statusnya
+      if (existing.pengajuanId) {
+        await prisma.pengajuanPembayaran.update({
+          where: { id: existing.pengajuanId },
+          data: {
+            status: "APPROVED_FINANCE",
+            verifiedById: req.user?.userId || null,
+            verifiedAt: new Date(),
+          },
+        }).catch(() => {});
+      }
+
+      res.json({
+        message: "Pembayaran berhasil disetujui oleh Finance (Menunggu Approval Atasan)",
+        data: enrichPembayaranApproval(updated),
+      });
+    } catch (error) {
+      console.error("Approve Finance Error:", error);
+      res.status(500).json({ error: "Gagal approve pembayaran oleh Finance" });
+    }
+  }
+);
+
+/**
+ * PUT /api/pembayaran-supplier/:id/approve-atasan
+ * Tingkat 2: Atasan menyetujui pembayaran.
+ */
+router.put(
+  "/pembayaran-supplier/:id/approve-atasan",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const existing = await prisma.pembayaranSupplier.findUnique({
+        where: { id: req.params.id },
+        include: { pengajuan: true, bukuBesarTransaksi: true },
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+      }
+
+      const rawPh = existing.paymentHistory;
+      let meta = {};
+      let entries = [];
+      if (Array.isArray(rawPh)) {
+        entries = rawPh;
+      } else if (rawPh && typeof rawPh === "object") {
+        meta = { ...rawPh };
+        entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+      }
+
+      meta.entries = entries;
+      meta.approvalStatus = "APPROVED_ATASAN";
+      meta.atasanApprovedAt = new Date();
+      meta.atasanApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
+      meta.rejectReason = null;
+
+      const updated = await prisma.pembayaranSupplier.update({
+        where: { id: req.params.id },
+        data: { paymentHistory: meta },
+        include: {
+          supplier: true,
+          jasa: true,
+          rekeningBank: { include: { tipeRekening: true } },
+          tipeRekening: true,
+          bukuBesarTransaksi: true,
+          purchaseOrder: true,
+          pengajuan: true,
+        },
+      });
+
+      res.json({
+        message: "Pembayaran berhasil disetujui Atasan (Siap Kirim ke Kas/Bank)",
+        data: enrichPembayaranApproval(updated),
+      });
+    } catch (error) {
+      console.error("Approve Atasan Error:", error);
+      res.status(500).json({ error: "Gagal approve pembayaran oleh Atasan" });
+    }
+  }
+);
+
+/**
+ * POST /api/pembayaran-supplier/:id/kirim-kas-bank
+ * Aksi Kirim ke Buku Kas/Bank oleh Finance setelah disetujui Atasan.
+ */
+router.post(
+  "/pembayaran-supplier/:id/kirim-kas-bank",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  async (req, res) => {
+    try {
+      const existing = await prisma.pembayaranSupplier.findUnique({
+        where: { id: req.params.id },
+        include: {
+          supplier: true,
+          jasa: true,
+          rekeningBank: { include: { tipeRekening: true } },
+          tipeRekening: true,
+          bukuBesarTransaksi: true,
+          purchaseOrder: {
+            include: {
+              items: { include: { materialRequest: true, rabItem: true } },
+              project: { select: { id: true, name: true } },
+            },
+          },
+          pengajuan: true,
+        },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+      }
+
+      const enriched = enrichPembayaranApproval(existing);
+      if (enriched.approvalStatus !== "APPROVED_ATASAN" && req.user?.role !== "SUPER_ADMIN") {
+        return res.status(400).json({
+          error: "Pembayaran belum disetujui oleh Atasan. Harus menunggu approval Atasan di menu Permintaan Bayar.",
+        });
+      }
+
+      if (enriched.isPostedKasBank) {
+        return res.status(400).json({
+          error: "Pembayaran ini sudah pernah dikirim/diposting ke Buku Kas/Bank.",
+        });
+      }
+
+      const rawPh = existing.paymentHistory;
+      let meta = {};
+      let entries = [];
+      if (Array.isArray(rawPh)) {
+        entries = rawPh;
+      } else if (rawPh && typeof rawPh === "object") {
+        meta = { ...rawPh };
+        entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+      }
+
+      const nominalPosting = Number(
+        req.body.nominal ??
+        existing.jumlahBayar ??
+        existing.totalTerbayar ??
+        existing.totalTagihan ??
+        0
+      );
+
+      if (nominalPosting <= 0) {
+        return res.status(400).json({ error: "Nominal bayar harus > 0 untuk dikirim ke Kas/Bank" });
+      }
+
+      const tanggalBayarFinal = req.body.tanggalBayar ? new Date(req.body.tanggalBayar) : (existing.tanggalBayar || new Date());
+      const rekeningBankIdFinal = req.body.rekeningBankId || existing.rekeningBankId || null;
+      const tipeRekeningIdFinal = req.body.tipeRekeningId || existing.tipeRekeningId || null;
+      const resolvedTipeAkunKasBank = req.body.tipeAkunKasBank || existing.tipeAkunKasBank || (rekeningBankIdFinal ? "BANK" : "KAS");
+
+      // Generate nomor pembayaran jika belum ada
+      let noPembayaranFinal = existing.noPembayaran;
+      if (!noPembayaranFinal) {
+        noPembayaranFinal = await buildNoPembayaran({
+          pembayaranId: existing.id,
+          tanggal: tanggalBayarFinal,
+        });
+      }
+
+      // 1. Posting ke Buku Besar Kas/Bank
+      const { createTransaksiBukuBesar } = require("./glBank.routes.js");
+      const rekening = rekeningBankIdFinal
+        ? await prisma.masterRekeningBank.findUnique({ where: { id: rekeningBankIdFinal } })
+        : existing.rekeningBank;
+      const namaAkun = (rekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : null)
+        || (resolvedTipeAkunKasBank === "BANK" ? "Bank" : "Kas Kecil");
+
+      const po = existing.purchaseOrder;
+      const { ketVolume: ketVol, ketHarga: ketHrg } = await getKeteranganVolumeHarga(po);
+
+      const isJasaFlow = (po?.kategoriPO === "JASA") || Boolean(existing.jasaId);
+      const tipeLabel =
+        isJasaFlow
+          ? (Number(existing.sisaBayar || 0) <= 0 ? "Pelunasan Jasa" : "Pembayaran Jasa")
+          : existing.metodeBayar === "TEMPO"
+            ? (Number(existing.sisaBayar || 0) <= 0 ? "Pelunasan Tempo" : "Pembayaran Tempo (Cicilan)")
+            : "Pembayaran Supplier";
+
+      let validCreatedById = null;
+      const candidateUserId = req.user?.userId || req.user?.id;
+      if (candidateUserId) {
+        const u = await prisma.user.findUnique({
+          where: { id: candidateUserId },
+          select: { id: true },
+        }).catch(() => null);
+        if (u) validCreatedById = u.id;
+      }
+
+      const bukuBesarRes = await createTransaksiBukuBesar({
+        tanggal: tanggalBayarFinal,
+        tipeAkun: resolvedTipeAkunKasBank === "BANK" || rekening ? "BANK" : "KAS",
+        namaAkun,
+        jenis: "KELUAR",
+        nominal: nominalPosting,
+        noReferensi: noPembayaranFinal || req.params.id,
+        pihak: existing.supplier?.name || existing.jasa?.nama || "Supplier/Jasa",
+        keterangan: `${tipeLabel}${req.body.keterangan || existing.keterangan ? ` - ${req.body.keterangan || existing.keterangan}` : ""}`,
+        keteranganVolume: ketVol,
+        keteranganHarga: ketHrg,
+        tipeRekeningId: tipeRekeningIdFinal || rekening?.tipeRekeningId || null,
+        poId: po?.id || existing.poId,
+        pengajuanId: existing.pengajuanId,
+        pembayaranId: existing.id,
+        createdById: validCreatedById,
+      });
+
+      // 2. Tandai metadata pembayaran
+      meta.entries = entries;
+      meta.approvalStatus = "APPROVED_ATASAN";
+      meta.isPostedKasBank = true;
+      meta.postedKasBankAt = new Date();
+      meta.postedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
+      meta.bukuBesarId = bukuBesarRes?.id || null;
+
+      const totalTagihan = Number(existing.totalTagihan || 0);
+      const totalTerbayarBaru = Math.max(Number(existing.totalTerbayar || 0), nominalPosting);
+      const sisaBayarBaru = Math.max(0, totalTagihan - totalTerbayarBaru);
+
+      let finalStatus = existing.status;
+      if (isJasaFlow) {
+        finalStatus = sisaBayarBaru <= 0 ? "LUNAS" : "BON";
+      } else {
+        finalStatus = sisaBayarBaru <= 0 ? "PAID" : "PARTIAL";
+      }
+
+      const updated = await prisma.pembayaranSupplier.update({
+        where: { id: req.params.id },
+        data: {
+          noPembayaran: noPembayaranFinal,
+          paymentHistory: meta,
+          tanggalBayar: tanggalBayarFinal,
+          rekeningBankId: rekeningBankIdFinal,
+          tipeRekeningId: tipeRekeningIdFinal,
+          tipeAkunKasBank: resolvedTipeAkunKasBank,
+          totalTerbayar: totalTerbayarBaru,
+          sisaBayar: sisaBayarBaru,
+          status: finalStatus,
+        },
+        include: {
+          supplier: true,
+          jasa: true,
+          rekeningBank: { include: { tipeRekening: true } },
+          tipeRekening: true,
+          bukuBesarTransaksi: true,
+          purchaseOrder: true,
+          pengajuan: true,
+        },
+      });
+
+      res.json({
+        message: "Pembayaran berhasil dikirim dan diposting ke Buku Kas/Bank",
+        data: enrichPembayaranApproval(updated),
+      });
+    } catch (error) {
+      console.error("Kirim Kas/Bank Error:", error);
+      res.status(500).json({ error: error.message || "Gagal mengirim ke Buku Kas/Bank" });
+    }
+  }
+);
+
+/**
+ * PUT /api/pembayaran-supplier/:id/reject
+ * Menolak pembayaran supplier / jasa
+ */
+router.put(
+  "/pembayaran-supplier/:id/reject",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { reason = "Ditolak" } = req.body;
+      const existing = await prisma.pembayaranSupplier.findUnique({
+        where: { id: req.params.id },
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+      }
+
+      const rawPh = existing.paymentHistory;
+      let meta = {};
+      let entries = [];
+      if (Array.isArray(rawPh)) {
+        entries = rawPh;
+      } else if (rawPh && typeof rawPh === "object") {
+        meta = { ...rawPh };
+        entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+      }
+
+      meta.entries = entries;
+      meta.approvalStatus = "REJECTED";
+      meta.rejectReason = reason;
+      meta.rejectedAt = new Date();
+      meta.rejectedBy = req.user?.name || req.user?.username || req.user?.userId || "User";
+
+      const updated = await prisma.pembayaranSupplier.update({
+        where: { id: req.params.id },
+        data: { paymentHistory: meta },
+      });
+
+      res.json({
+        message: "Pembayaran berhasil ditolak",
+        data: enrichPembayaranApproval(updated),
+      });
+    } catch (error) {
+      console.error("Reject Pembayaran Error:", error);
+      res.status(500).json({ error: "Gagal menolak pembayaran" });
+    }
+  }
+);
+
+/**
+ * POST /api/pembayaran-supplier/bulk-approve-atasan
+ * Atasan menyetujui beberapa permintaan bayar sekaligus di menu Permintaan Bayar
+ */
+router.post(
+  "/pembayaran-supplier/bulk-approve-atasan",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { ids = [] } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "Pilih minimal 1 pembayaran untuk disetujui" });
+      }
+
+      let successCount = 0;
+      for (const id of ids) {
+        const existing = await prisma.pembayaranSupplier.findUnique({
+          where: { id },
+        });
+        if (!existing) continue;
+
+        const rawPh = existing.paymentHistory;
+        let meta = {};
+        let entries = [];
+        if (Array.isArray(rawPh)) {
+          entries = rawPh;
+        } else if (rawPh && typeof rawPh === "object") {
+          meta = { ...rawPh };
+          entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+        }
+
+        meta.entries = entries;
+        meta.approvalStatus = "APPROVED_ATASAN";
+        meta.atasanApprovedAt = new Date();
+        meta.atasanApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
+        meta.rejectReason = null;
+
+        await prisma.pembayaranSupplier.update({
+          where: { id },
+          data: { paymentHistory: meta },
+        });
+
+        successCount++;
+      }
+
+      res.json({
+        message: `${successCount} permintaan bayar berhasil disetujui Atasan`,
+        successCount,
+      });
+    } catch (error) {
+      console.error("Bulk Approve Atasan Error:", error);
+      res.status(500).json({ error: "Gagal menyetujui pembayaran secara massal" });
+    }
+  }
+);
+
+/**
+ * POST /api/pembayaran-supplier/bulk-reject
+ * Menolak beberapa pembayaran sekaligus
+ */
+router.post(
+  "/pembayaran-supplier/bulk-reject",
+  verifyToken,
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  async (req, res) => {
+    try {
+      const { ids = [], reason = "Ditolak oleh Atasan" } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "Pilih minimal 1 pembayaran untuk ditolak" });
+      }
+
+      let successCount = 0;
+      for (const id of ids) {
+        const existing = await prisma.pembayaranSupplier.findUnique({
+          where: { id },
+        });
+        if (!existing) continue;
+
+        const rawPh = existing.paymentHistory;
+        let meta = {};
+        let entries = [];
+        if (Array.isArray(rawPh)) {
+          entries = rawPh;
+        } else if (rawPh && typeof rawPh === "object") {
+          meta = { ...rawPh };
+          entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+        }
+
+        meta.entries = entries;
+        meta.approvalStatus = "REJECTED";
+        meta.rejectReason = reason;
+        meta.rejectedAt = new Date();
+        meta.rejectedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
+
+        await prisma.pembayaranSupplier.update({
+          where: { id },
+          data: { paymentHistory: meta },
+        });
+
+        successCount++;
+      }
+
+      res.json({
+        message: `${successCount} pembayaran berhasil ditolak`,
+        successCount,
+      });
+    } catch (error) {
+      console.error("Bulk Reject Error:", error);
+      res.status(500).json({ error: "Gagal menolak pembayaran secara massal" });
+    }
+  }
+);
 
 
 // =====================================================================
