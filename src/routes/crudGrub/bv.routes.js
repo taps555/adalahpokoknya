@@ -903,6 +903,9 @@ async function pastikanIndukTerlink(tx, bvItem) {
       workCategoryId: parent.workCategoryId || null,
       workSubCategoryId: null,
       grade: gradeForBv(parent, proj),
+      operationalPercent: 0,
+      wastePercent: 0,
+      profitPercent: 0,
       overheadPercent: 0,
       rapUnitPrice: 0,
       rapTotalPrice: 0,
@@ -1609,7 +1612,10 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
         data: {
           name: bvItem.name,
           paymentUnit: bvItem.paymentUnit || "-",
-          overheadPercent: overheadPct, // <-- Pastikan pakai field overheadPercent
+          operationalPercent: overheadPct,
+          wastePercent: 0,
+          profitPercent: 0,
+          overheadPercent: overheadPct, // total OH; legacy OH masuk operasional
           volume: vol,
           rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,

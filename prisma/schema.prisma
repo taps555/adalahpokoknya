@@ -362,6 +362,11 @@ model RabItem {
   category        String?
   reference       String?
   overheadPercent Decimal       @default(0) @db.Decimal(5, 2)
+  // OH dipecah tiga komponen. overheadPercent tetap = total ketiganya agar
+  // pembaca lama dan data historis tidak berubah.
+  operationalPercent Decimal    @default(0) @db.Decimal(5, 2)
+  wastePercent       Decimal    @default(0) @db.Decimal(5, 2)
+  profitPercent      Decimal    @default(0) @db.Decimal(5, 2)
   discipline      Discipline?
   grade           String?
   timeSchedule    TimeSchedule? // <-- TAMBAH

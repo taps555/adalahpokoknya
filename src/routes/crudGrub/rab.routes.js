@@ -9,6 +9,7 @@ const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhe
 const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
 const { recordChange } = require("../../services/bvRabAuditService");
 const { assertProjectEditable } = require("../../services/bvRabApprovalService");
+const { resolveOhBreakdown, calculateRabOh } = require("../../services/rabOhService");
 
 const redactSellingResponse = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") return next();
@@ -105,6 +106,9 @@ router.put("/rab-items/:id", async (req, res, next) => {
       rapUnitPrice,
       rabUnitPrice,
       overheadPercent,
+      operationalPercent,
+      wastePercent,
+      profitPercent,
       components,
       groupId,
       isByOwner,
@@ -200,23 +204,17 @@ router.put("/rab-items/:id", async (req, res, next) => {
       }
     }
 
-    // 2. RUMUS INTINYA (HITUNG RAB & TOTAL)
-    const overhead =
-      overheadPercent !== undefined
-        ? Number(overheadPercent)
-        : Number(existing.overheadPercent || existing.overhead);
-
-    const nilaiOverhead = rapSatuan * (overhead / 100);
-
-    // FIX: rabUnitPrice boleh dikirim eksplisit dari frontend.
-    // Diperlukan untuk item jasa/jual yang RAP (modal) = 0 tapi harga jual RAB > 0,
-    // mis. Loose Furniture & Instalasi Armature di BV. Tanpa ini harga jual hilang jadi 0.
+    const oh = resolveOhBreakdown(
+      { operationalPercent, wastePercent, profitPercent, overheadPercent },
+      existing,
+    );
+    const pricing = calculateRabOh(rapSatuan, vol, oh);
     const rabSatuan =
       rabUnitPrice !== undefined && rabUnitPrice !== null && rabUnitPrice !== ""
         ? Number(rabUnitPrice)
-        : rapSatuan + nilaiOverhead;
+        : pricing.rabUnitPrice;
 
-    const rapTotal = rapSatuan * vol;
+    const rapTotal = pricing.rapTotalPrice;
     const rabTotal = rabSatuan * vol;
 
     // 3. SIMPAN KE DATABASE
@@ -226,7 +224,10 @@ router.put("/rab-items/:id", async (req, res, next) => {
         data: {
           rapUnitPrice: rapSatuan,
           rapTotalPrice: rapTotal,
-          overheadPercent: overhead,
+          overheadPercent: oh.overheadPercent,
+          operationalPercent: oh.operationalPercent,
+          wastePercent: oh.wastePercent,
+          profitPercent: oh.profitPercent,
           rabUnitPrice: rabSatuan,
           rabTotalPrice: rabTotal,
           ...(componentUpdate ? { components: componentUpdate } : {}),
@@ -362,25 +363,37 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN
 
     // ===== [TAMBAHAN 2]: Logika Prioritas Penentuan Overhead =====
     // Prioritas: 1. Ketikan Pak Jim (customOverhead) -> 2. Bawaan Master AHSP -> 3. Bawaan Existing DB
-    let overhead = 0;
-    if (
-      customOverhead !== undefined &&
-      customOverhead !== null &&
-      customOverhead !== ""
-    ) {
-      overhead = Number(customOverhead);
+    // OH tiga komponen: operasional, waste anggaran, laba.
+    // Prioritas: ketikan manual -> breakdown existing -> bawaan Master AHSP.
+    const existingOh = {
+      operationalPercent: Number(
+        existing.operationalPercent ?? existing.overheadPercent ?? existing.overhead ?? 0,
+      ),
+      wastePercent: Number(existing.wastePercent ?? 0),
+      profitPercent: Number(existing.profitPercent ?? 0),
+    };
+    const hasExistingBreakdown =
+      existingOh.operationalPercent > 0 ||
+      existingOh.wastePercent > 0 ||
+      existingOh.profitPercent > 0;
+
+    let ohInput;
+    if (customOverhead !== undefined && customOverhead !== null && customOverhead !== "") {
+      ohInput = { overheadPercent: Number(customOverhead) };
+    } else if (hasExistingBreakdown) {
+      ohInput = existingOh;
     } else if (calc.jobType.overhead != null) {
-      overhead = normalizeAhspOverhead(calc.jobType.overhead);
+      ohInput = { overheadPercent: normalizeAhspOverhead(calc.jobType.overhead) };
     } else {
-      overhead = Number(existing.overhead || 0);
+      ohInput = existingOh;
     }
 
-    // 4. Hitung Harga Jual (RAB) = Modal Murni + Untung Overhead
-    const nilaiOverhead = rapSatuan * (overhead / 100);
-    const rabSatuan = rapSatuan + nilaiOverhead;
+    const oh = resolveOhBreakdown(ohInput, existingOh);
+    const pricing = calculateRabOh(rapSatuan, vol, oh);
+    const rabSatuan = pricing.rabUnitPrice;
 
-    const rapTotal = rapSatuan * vol;
-    const rabTotal = rabSatuan * vol;
+    const rapTotal = pricing.rapTotalPrice;
+    const rabTotal = pricing.rabTotalPrice;
 
     // ==========================================
     // SIMPAN KE DATABASE
@@ -395,7 +408,10 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN
           workCategoryId: classification.workCategoryId,
           workSubCategoryId: classification.workSubCategoryId,
           grade: calc.jobType.grade,
-          overheadPercent: overhead,
+          overheadPercent: oh.overheadPercent,
+          operationalPercent: oh.operationalPercent,
+          wastePercent: oh.wastePercent,
+          profitPercent: oh.profitPercent,
           rapUnitPrice: rapSatuan,
           rapTotalPrice: rapTotal,
           rabUnitPrice: rabSatuan,
@@ -515,16 +531,23 @@ router.put("/rab-items/bulk-price", async (req, res) => {
           ? Number(rapUnitPrice)
           : Number(existing.rapUnitPrice);
 
-      const overhead =
+      const oh = resolveOhBreakdown(
         overheadPercent !== undefined && overheadPercent !== null
-          ? Number(overheadPercent)
-          : Number(existing.overheadPercent || existing.overhead);
+          ? { overheadPercent: Number(overheadPercent) }
+          : {
+              operationalPercent: Number(
+                existing.operationalPercent ?? existing.overheadPercent ?? existing.overhead ?? 0,
+              ),
+              wastePercent: Number(existing.wastePercent ?? 0),
+              profitPercent: Number(existing.profitPercent ?? 0),
+            },
+      );
 
-      const nilaiOverhead = rapSatuan * (overhead / 100);
-      const rabSatuan = rapSatuan + nilaiOverhead;
+      const pricing = calculateRabOh(rapSatuan, vol, oh);
+      const rabSatuan = pricing.rabUnitPrice;
 
-      const rapTotal = rapSatuan * vol;
-      const rabTotal = rabSatuan * vol;
+      const rapTotal = pricing.rapTotalPrice;
+      const rabTotal = pricing.rabTotalPrice;
 
       // Kalau harga di-override manual & item sebelumnya punya rincian AHSP,
       // hapus rincian biar gak nyangkut/gak sinkron
@@ -536,7 +559,10 @@ router.put("/rab-items/bulk-price", async (req, res) => {
           data: {
             rapUnitPrice: rapSatuan,
             rapTotalPrice: rapTotal,
-            overheadPercent: overhead,
+            overheadPercent: oh.overheadPercent,
+            operationalPercent: oh.operationalPercent,
+            wastePercent: oh.wastePercent,
+            profitPercent: oh.profitPercent,
             rabUnitPrice: rabSatuan,
             rabTotalPrice: rabTotal,
             ...(shouldClearComponents ? { components: { deleteMany: {} } } : {}),
@@ -667,24 +693,38 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMI
         0,
       );
 
-      let overhead = 0;
+      const existingOhBulk = {
+        operationalPercent: Number(
+          existing.operationalPercent ?? existing.overheadPercent ?? existing.overhead ?? 0,
+        ),
+        wastePercent: Number(existing.wastePercent ?? 0),
+        profitPercent: Number(existing.profitPercent ?? 0),
+      };
+      const hasExistingBreakdownBulk =
+        existingOhBulk.operationalPercent > 0 ||
+        existingOhBulk.wastePercent > 0 ||
+        existingOhBulk.profitPercent > 0;
+
+      let ohInputBulk;
       if (
         customOverhead !== undefined &&
         customOverhead !== null &&
         customOverhead !== ""
       ) {
-        overhead = Number(customOverhead);
+        ohInputBulk = { overheadPercent: Number(customOverhead) };
+      } else if (hasExistingBreakdownBulk) {
+        ohInputBulk = existingOhBulk;
       } else if (calc.jobType.overhead != null) {
-        overhead = normalizeAhspOverhead(calc.jobType.overhead);
+        ohInputBulk = { overheadPercent: normalizeAhspOverhead(calc.jobType.overhead) };
       } else {
-        overhead = Number(existing.overhead || 0);
+        ohInputBulk = existingOhBulk;
       }
 
-      const nilaiOverhead = rapSatuan * (overhead / 100);
-      const rabSatuan = rapSatuan + nilaiOverhead;
-
-      const rapTotal = rapSatuan * vol;
-      const rabTotal = rabSatuan * vol;
+      const ohBulk = resolveOhBreakdown(ohInputBulk, existingOhBulk);
+      const pricingBulk = calculateRabOh(rapSatuan, vol, ohBulk);
+      const rabSatuan = pricingBulk.rabUnitPrice;
+      const rapTotal = pricingBulk.rapTotalPrice;
+      const rabTotal = pricingBulk.rabTotalPrice;
 
       const updated = await prisma.$transaction(async (tx) => {
         const saved = await tx.rabItem.update({
@@ -696,7 +736,10 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMI
             workCategoryId: classification.workCategoryId,
             workSubCategoryId: classification.workSubCategoryId,
             grade: calc.jobType.grade,
-            overheadPercent: overhead,
+            overheadPercent: ohBulk.overheadPercent,
+            operationalPercent: ohBulk.operationalPercent,
+            wastePercent: ohBulk.wastePercent,
+            profitPercent: ohBulk.profitPercent,
             rapUnitPrice: rapSatuan,
             rapTotalPrice: rapTotal,
             rabUnitPrice: rabSatuan,
