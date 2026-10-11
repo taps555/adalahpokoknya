@@ -20,7 +20,7 @@ const BV_FIELDS = [
 ];
 const RAB_FIELDS = [
   "id", "projectId", "workCategoryId", "workSubCategoryId", "name", "paymentUnit", "category", "reference",
-  "overheadPercent", "discipline", "grade", "volume", "rapUnitPrice", "rapTotalPrice",
+  "overheadPercent", "operationalPercent", "wastePercent", "profitPercent", "discipline", "grade", "volume", "rapUnitPrice", "rapTotalPrice",
   "rabUnitPrice", "rabTotalPrice", "sourceJobTypeId", "groupId", "isByOwner", "isStip",
   "isHeaderOnly", "order", "parentId", "components",
 ];

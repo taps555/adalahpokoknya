@@ -11,7 +11,8 @@ const AUDIT_FIELDS = Object.freeze({
   ],
   RAB_ITEM: [
     "id", "projectId", "name", "volume", "category", "reference", "discipline", "grade",
-    "workCategoryId", "workSubCategoryId", "sourceJobTypeId", "overheadPercent", "rapUnitPrice", "rapTotalPrice",
+    "workCategoryId", "workSubCategoryId", "sourceJobTypeId", "overheadPercent",
+    "operationalPercent", "wastePercent", "profitPercent", "rapUnitPrice", "rapTotalPrice",
     "rabUnitPrice", "rabTotalPrice", "isByOwner", "isStip", "components",
   ],
 });

@@ -39,6 +39,46 @@ function normalizeAhspOverhead(value) {
   });
 }
 
+/**
+ * OH kini terdiri dari tiga komponen: operasional, waste anggaran, dan laba.
+ * `overheadPercent` tetap menjadi TOTAL ketiganya supaya pembaca lama dan
+ * rumus RAB = RAP x (1 + OH/100) tidak berubah.
+ */
+function normalizeOhBreakdown(input = {}) {
+  const pick = (key) => {
+    const raw = input[key];
+    if (raw === undefined || raw === null || raw === "") return null;
+    return finiteBvPrice(raw, "Overhead", { max: FINITE_LIMITS.overhead });
+  };
+
+  const operational = pick("operationalPercent");
+  const waste = pick("wastePercent");
+  const profit = pick("profitPercent");
+  const hasBreakdown = [operational, waste, profit].some((value) => value !== null);
+
+  if (!hasBreakdown) {
+    const legacy = pick("overheadPercent") ?? 0;
+    return {
+      operationalPercent: legacy,
+      wastePercent: 0,
+      profitPercent: 0,
+      overheadPercent: legacy,
+      hasBreakdown: false,
+    };
+  }
+
+  const operationalPercent = operational ?? 0;
+  const wastePercent = waste ?? 0;
+  const profitPercent = profit ?? 0;
+  return {
+    operationalPercent,
+    wastePercent,
+    profitPercent,
+    overheadPercent: operationalPercent + wastePercent + profitPercent,
+    hasBreakdown: true,
+  };
+}
+
 async function computeAhspPricing({
   sourceJobTypeId,
   customComponents,
@@ -111,4 +151,4 @@ async function computeAhspPricing({
   return { jobType, componentRows, rapUnitPrice, overheadPct, rabUnitPrice };
 }
 
-module.exports = { computeAhspPricing, normalizeAhspOverhead };
+module.exports = { computeAhspPricing, normalizeAhspOverhead, normalizeOhBreakdown };

@@ -23,7 +23,11 @@ const bv = require("./routes/crudGrub/bv.routes");
 const workCategoryRouter = require("./routes/workCategories");
 
 const app = express();
-app.use(cors());
+const corsOptions = {
+  origin: true,
+  credentials: true
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
