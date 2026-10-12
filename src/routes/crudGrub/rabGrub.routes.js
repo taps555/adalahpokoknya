@@ -23,7 +23,13 @@ router.use(
   ["/projects/:projectId/rab-groups", "/rab-groups"],
   verifyToken,
 );
-router.use((req, res, next) => req.method === "GET" ? redactSellingResponse(req, res, next) : next());
+// Redaksi harga jual hanya untuk rute milik router ini. Tanpa daftar path,
+// middleware ini ikut membungkus router lain yang dipasang setelahnya
+// (mis. spk.routes) sehingga field harga jual hilang dari respons mereka.
+router.use(
+  ["/projects/:projectId/rab-groups", "/rab-groups"],
+  (req, res, next) => (req.method === "GET" ? redactSellingResponse(req, res, next) : next()),
+);
 
 /**
  * POST /projects/:projectId/rab-groups

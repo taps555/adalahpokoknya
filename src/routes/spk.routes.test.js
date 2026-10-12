@@ -228,3 +228,124 @@ test('POST spk-contracts tolerates decimal floating point from frontend and uses
   }
 });
 
+
+test('rab-source mengirim rabTotalPrice & rabUnitPrice agar nilai klien sepakat dengan server', async () => {
+  // Prisma mengembalikan Decimal sebagai objek Prisma.Decimal, bukan number/string.
+  const { Prisma } = require('@prisma/client');
+  const D = (value) => new Prisma.Decimal(String(value));
+  const mockPrisma = {
+    rabItem: {
+      findMany: async () => [
+        { id: 'it-1', name: 'Penggalian', paymentUnit: 'm2', volume: D(15), rapUnitPrice: D(180059), rapTotalPrice: D(2700885), rabUnitPrice: D(225073.75), rabTotalPrice: D(3376106.25), workCategoryId: 'wc-1' },
+        { id: 'it-2', name: 'Lampu', paymentUnit: 'm2', volume: D(25), rapUnitPrice: D(414000), rapTotalPrice: D(10350000), rabUnitPrice: D(517500), rabTotalPrice: D(12937500), workCategoryId: 'wc-2' },
+      ],
+    },
+  };
+  const loaded = loadRouterWithPrisma(mockPrisma);
+  const token = jwt.sign({ userId: 'user-1' }, process.env.JWT_SECRET || 'rahasia_super_aman_123');
+  try {
+    await withServer(loaded.router, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/projects/proj-1/spk-contracts/rab-source`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 200);
+      const json = await response.json();
+      for (const item of json.items) {
+        assert.ok(item.rabTotalPrice !== undefined && item.rabTotalPrice !== '', `rabTotalPrice hilang untuk ${item.name}`);
+        assert.ok(item.rabUnitPrice !== undefined && item.rabUnitPrice !== '', `rabUnitPrice hilang untuk ${item.name}`);
+      }
+      // Nilai kontrak = jumlah rabTotalPrice (harga jual), bukan rapTotalPrice (modal).
+      assert.equal(json.totalContractValue, Math.round(3376106.25 + 12937500));
+    });
+  } finally {
+    loaded.restore();
+  }
+});
+
+test('po-jasa-source menandai item yang sudah dipakai SPK subcon aktif dan menolak pemakaian ulang', async () => {
+  const lockedItemId = 'po-item-locked';
+  const freeItemId = 'po-item-free';
+  const activeContract = {
+    id: 'spk-active-1', type: 'SUBCON', status: 'TERBIT', spkNumber: '001/SPK/10/12/DJP/2026',
+    snapshot: { workScope: [{ poJasaItemId: lockedItemId, name: 'Pekerja (tes)' }] },
+  };
+  const mockPrisma = {
+    purchaseOrder: {
+      findMany: async () => [{
+        id: 'po-1', poNumber: 'POJ-004', attn: null, jasa: { id: 'j-1', nama: 'Subcon A', code: 'SC' },
+        items: [
+          { id: lockedItemId, rabItemId: null, description: 'Pekerja (tes)', unit: 'OH', qty: 10, unitPrice: 130000, total: 1300000, rabItem: null },
+          { id: freeItemId, rabItemId: null, description: 'Mandor (tes)', unit: 'OH', qty: 2, unitPrice: 250000, total: 500000, rabItem: null },
+        ],
+      }],
+    },
+    spkContract: {
+      findMany: async ({ where }) => (where?.status ? [activeContract] : []),
+      findUnique: async () => ({
+        id: 'draft-1', projectId: 'proj-1', type: 'SUBCON', status: 'DRAFT',
+        partyData: {}, snapshot: {}, contractValue: 1000000, retentionPercent: 0,
+        workDurationDays: 10, startDate: new Date('2026-10-12'), endDate: new Date('2026-10-21'),
+      }),
+      create: async ({ data }) => ({ id: 'new-1', ...data, createdAt: new Date(), terms: data.terms.create.map((t, i) => ({ id: `t${i}`, ...t })) }),
+    },
+    project: {
+      findUnique: async () => ({ id: 'proj-1', name: 'Project Tes', location: 'Surabaya', client: { id: 'c-1', name: 'Pak Budi' } }),
+    },
+    purchaseOrderItem: {
+      findMany: async ({ where }) => [
+        { id: lockedItemId, description: 'Pekerja (tes)', unit: 'OH', qty: 10, unitPrice: 130000, total: 1300000 },
+        { id: freeItemId, description: 'Mandor (tes)', unit: 'OH', qty: 2, unitPrice: 250000, total: 500000 },
+      ].filter((item) => where.id.in.includes(item.id)),
+    },
+  };
+
+  const loaded = loadRouterWithPrisma(mockPrisma);
+  const token = jwt.sign({ userId: 'user-1' }, process.env.JWT_SECRET || 'rahasia_super_aman_123');
+  try {
+    await withServer(loaded.router, async (baseUrl) => {
+      // 1. Item terkunci tetap muncul, ditandai, tidak ikut terpilih.
+      const sourceRes = await fetch(`${baseUrl}/api/projects/proj-1/spk-contracts/po-jasa-source`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(sourceRes.status, 200);
+      const source = await sourceRes.json();
+      const lockedItem = source.items.find((item) => item.id === lockedItemId);
+      const freeItem = source.items.find((item) => item.id === freeItemId);
+      assert.equal(lockedItem.locked, true, 'item terpakai harus ditandai locked');
+      assert.equal(lockedItem.lockedBySpkNumber, '001/SPK/10/12/DJP/2026');
+      assert.equal(freeItem.locked, false, 'item bebas tidak boleh terkunci');
+
+      // 2. Pemakaian ulang item terkunci ditolak.
+      const reuse = await fetch(`${baseUrl}/api/projects/proj-1/spk-contracts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          type: 'SUBCON', poJasaItemIds: [lockedItemId], contractValue: 1300000,
+          firstParty: { name: 'Direktur', position: 'Direktur', nik: '1', address: 'Surabaya' },
+          secondParty: { name: 'Subcon A', position: 'Penyedia Jasa', nik: '2', address: 'Palu' },
+          workDurationDays: 10, startDate: '2026-10-12', endDate: '2026-10-21',
+          terms: [{ label: 'Lunas', percent: 100, amount: 1300000 }],
+        }),
+      });
+      assert.equal(reuse.status, 400, 'item terkunci harus ditolak');
+      const reuseBody = await reuse.json();
+      assert.match(reuseBody.error, /sudah dibuatkan SPK Subcon/);
+
+      // 3. Item bebas tetap bisa dibuatkan SPK.
+      const fresh = await fetch(`${baseUrl}/api/projects/proj-1/spk-contracts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          type: 'SUBCON', poJasaItemIds: [freeItemId], contractValue: 500000,
+          firstParty: { name: 'Direktur', position: 'Direktur', nik: '1', address: 'Surabaya' },
+          secondParty: { name: 'Subcon A', position: 'Penyedia Jasa', nik: '2', address: 'Palu' },
+          workDurationDays: 10, startDate: '2026-10-12', endDate: '2026-10-21',
+          terms: [{ label: 'Lunas', percent: 100, amount: 500000 }],
+        }),
+      });
+      assert.equal(fresh.status, 201, 'item bebas harus lolos');
+    });
+  } finally {
+    loaded.restore();
+  }
+});
