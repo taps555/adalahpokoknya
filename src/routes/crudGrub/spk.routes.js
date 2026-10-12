@@ -15,6 +15,7 @@ const {
   buildSpkDocumentSnapshot,
 } = require('../../services/spkService');
 const { renderSpkClientPdf, safeSpkPdfFilename } = require('../../services/spkClientPdfService');
+const { renderSpkSubconPdf, safeSpkSubconPdfFilename } = require('../../services/spkSubconPdfService');
 const { terbilangRupiah } = require('../../lib/terbilang');
 
 const router = express.Router();
@@ -42,14 +43,13 @@ function clientScheduleInput(body, existing = {}) {
 }
 
 function validateScheduleForType(type, body, existing = {}) {
-  if (type !== 'CLIENT') return null;
+  if (!['CLIENT', 'SUBCON'].includes(type)) return null;
   return validateClientSchedule(clientScheduleInput(body, existing));
 }
 
 function serializeContract(contract) {
-  const partyData = contract.type === 'CLIENT'
-    ? normalizeStoredSpkParties(contract.type, contract.partyData, contract.snapshot)
-    : contract.partyData;
+  // Kedua tipe memakai bentuk dua pihak; kontrak lama tetap terbaca lewat mapper.
+  const partyData = normalizeStoredSpkParties(contract.type, contract.partyData, contract.snapshot);
   return {
     ...contract,
     partyData,
@@ -186,7 +186,7 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
     const schedule = validateScheduleForType(type, req.body);
 
     const partyInput = req.body.partyData || req.body.parties || {};
-    const partyName = String(req.body.partyName || partyInput.contractorName || partyInput.name || '').trim();
+    const partyName = String(req.body.partyName || partyInput.contractorName || partyInput.name || partyInput.secondParty?.name || '').trim();
     const partySnapshot = buildSpkParties(type, {
       project,
       firstParty: req.body.firstParty || partyInput.firstParty,
@@ -250,6 +250,8 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
         projectId,
         type,
         status: 'DRAFT',
+        // Kolom Prisma hanya menerima enum RAB/DESIGN_QUOTATION.
+        // Asal PO Jasa tetap dibekukan di snapshot.sourceType + sourceId.
         sourceType: 'RAB',
         sourceId: sourceType === 'PO_JASA' ? `PO_JASA:${projectId}` : projectId,
         contractValue: totalContractValue,
@@ -291,6 +293,7 @@ router.patch('/spk-contracts/:id', async (req, res) => {
     const itemIds = Array.isArray(req.body.rabItemIds) ? [...new Set(req.body.rabItemIds.filter(Boolean))] : [];
     const poJasaItemIds = Array.isArray(req.body.poJasaItemIds) ? [...new Set(req.body.poJasaItemIds.filter(Boolean))] : [];
     let items = [];
+    let sourceType = 'RAB';
     if (type === 'SUBCON' && poJasaItemIds.length) {
       const poItems = await prisma.purchaseOrderItem.findMany({
         where: {
@@ -313,6 +316,7 @@ router.patch('/spk-contracts/:id', async (req, res) => {
         rabUnitPrice: Number(item.unitPrice || 0),
         rabTotalPrice: Number(item.total || 0),
       }));
+      sourceType = 'PO_JASA';
     } else {
       items = await prisma.rabItem.findMany({
         where: { projectId: existing.projectId, id: { in: itemIds.length ? itemIds : ['__none__'] }, isHeaderOnly: false },
@@ -328,13 +332,15 @@ router.patch('/spk-contracts/:id', async (req, res) => {
       project,
       items,
       type,
-      partyName: req.body.partyName ?? req.body.partyData?.contractorName ?? req.body.partyData?.name ?? existing.partyData?.name,
+      partyName: req.body.partyName ?? req.body.partyData?.contractorName ?? req.body.partyData?.secondParty?.name ?? req.body.partyData?.name ?? existing.partyData?.contractorName ?? existing.partyData?.secondParty?.name ?? existing.partyData?.name,
       parties: req.body.parties || req.body.partyData,
       firstParty: req.body.firstParty || req.body.partyData?.firstParty,
       secondParty: req.body.secondParty || req.body.partyData?.secondParty,
       terms: req.body.terms || [],
       retentionPercent: req.body.retentionPercent ?? existing.retentionPercent ?? 0,
     });
+    // Jenis sumber ikut tersimpan agar PDF tahu ini subcon dari PO Jasa.
+    update.snapshot = { ...update.snapshot, sourceType };
 
     const updated = await prisma.$transaction(async (tx) => {
       await tx.spkTerm.deleteMany({ where: { contractId: existing.id } });
@@ -345,6 +351,7 @@ router.patch('/spk-contracts/:id', async (req, res) => {
           contractValue: update.contractValue,
           contractValueWords: terbilangRupiah(update.contractValue),
           snapshot: update.snapshot,
+          sourceId: sourceType === 'PO_JASA' ? `PO_JASA:${existing.projectId}` : existing.projectId,
           partyData: update.party,
           workDurationDays: schedule?.workDurationDays ?? (req.body.workDurationDays !== undefined ? (req.body.workDurationDays ? Number(req.body.workDurationDays) : null) : existing.workDurationDays),
           startDate: schedule?.startDate ?? (req.body.startDate !== undefined ? (req.body.startDate ? parseDate(req.body.startDate) : null) : existing.startDate),
@@ -373,12 +380,14 @@ router.get('/spk-contracts/:id/pdf/:mode(view|download)', async (req, res) => {
       include: { terms: { orderBy: { order: 'asc' } } },
     });
     if (!contract) return res.status(404).json({ error: 'SPK tidak ditemukan.' });
-    if (contract.type !== 'CLIENT') {
-      return res.status(400).json({ error: 'PDF saat ini hanya tersedia untuk SPK CLIENT.' });
-    }
 
-    const pdf = await renderSpkClientPdf(contract);
-    const filename = safeSpkPdfFilename(contract);
+    const isSubcon = contract.type === 'SUBCON';
+    const pdf = isSubcon
+      ? await renderSpkSubconPdf(contract)
+      : await renderSpkClientPdf(contract);
+    const filename = isSubcon
+      ? safeSpkSubconPdfFilename(contract)
+      : safeSpkPdfFilename(contract);
     const disposition = req.params.mode === 'download' ? 'attachment' : 'inline';
     res.set({
       'Content-Type': 'application/pdf',
