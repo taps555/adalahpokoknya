@@ -21,6 +21,33 @@ const { terbilangRupiah } = require('../../lib/terbilang');
 const router = express.Router();
 const CURRENT_YEAR = new Date().getFullYear();
 
+// SPK subcon yang sudah mengikat item PO Jasa. DRAFT tidak mengunci supaya
+// draft yang belum jadi tidak menyandera item; pembatalan membebaskan lagi.
+const LOCKING_SPK_STATUSES = ['TERBIT', 'DITANDATANGANI'];
+
+// Item PO Jasa yang sudah dipakai SPK subcon aktif -> nomor SPK pemakainya.
+async function findLockedPoJasaItems(projectId, excludeContractId = null) {
+  const contracts = await prisma.spkContract.findMany({
+    where: {
+      projectId,
+      type: 'SUBCON',
+      status: { in: LOCKING_SPK_STATUSES },
+      ...(excludeContractId ? { id: { not: excludeContractId } } : {}),
+    },
+    select: { id: true, spkNumber: true, status: true, snapshot: true },
+  });
+  const locked = new Map();
+  for (const contract of contracts) {
+    for (const scope of contract.snapshot?.workScope || []) {
+      const itemId = scope?.poJasaItemId || scope?.rabItemId;
+      if (itemId && !locked.has(itemId)) {
+        locked.set(itemId, { spkNumber: contract.spkNumber, status: contract.status, contractId: contract.id });
+      }
+    }
+  }
+  return locked;
+}
+
 function parseType(value) {
   const type = String(value || '').trim().toUpperCase();
   if (!['CLIENT', 'SUBCON'].includes(type)) throw new Error('Tipe SPK harus CLIENT atau SUBCON.');
@@ -98,8 +125,16 @@ router.get('/projects/:projectId/spk-contracts/rab-source', async (req, res) => 
       select: { id: true, name: true, paymentUnit: true, volume: true, rapUnitPrice: true, rapTotalPrice: true, rabUnitPrice: true, rabTotalPrice: true, workCategoryId: true },
       orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
     });
-    const total = items.reduce((sum, item) => sum + getSpkItemTotal(item), 0);
-    res.json({ sourceType: 'RAB', projectId, totalContractValue: Math.round(total), totalContractValueWords: terbilangRupiah(total), items });
+    // Konversi Decimal Prisma ke string agar JSON serialization tidak menghasilkan undefined.
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      rapUnitPrice: String(item.rapUnitPrice ?? ''),
+      rapTotalPrice: String(item.rapTotalPrice ?? ''),
+      rabUnitPrice: String(item.rabUnitPrice ?? ''),
+      rabTotalPrice: String(item.rabTotalPrice ?? ''),
+    }));
+    const total = normalizedItems.reduce((sum, item) => sum + getSpkItemTotal(item), 0);
+    res.json({ sourceType: 'RAB', projectId, totalContractValue: Math.round(total), totalContractValueWords: terbilangRupiah(total), items: normalizedItems });
   } catch (error) {
     console.error('SPK RAB source error:', error);
     res.status(500).json({ error: 'Gagal mengambil sumber nilai RAB.' });
@@ -132,12 +167,14 @@ router.get('/projects/:projectId/spk-contracts/po-jasa-source', async (req, res)
       orderBy: { tanggal: 'asc' },
     });
 
+    const lockedItems = await findLockedPoJasaItems(projectId);
     const items = [];
     for (const order of orders) {
       for (const item of order.items || []) {
         const rab = item.rabItem || null;
         const unitPrice = Number(item.unitPrice || 0);
         const qty = Number(item.qty || 0);
+        const lock = lockedItems.get(item.id) || null;
         items.push({
           id: item.id,
           rabItemId: item.rabItemId || null,
@@ -155,6 +192,10 @@ router.get('/projects/:projectId/spk-contracts/po-jasa-source', async (req, res)
           workSubCategoryId: rab?.workSubCategoryId || null,
           categoryLabel: rab?.workCategory?.name || null,
           subCategoryLabel: rab?.workSubCategory?.name || null,
+          // Item yang sudah dipakai SPK aktif tetap tampil, tapi tidak bisa dipilih.
+          lockedBySpkNumber: lock?.spkNumber || null,
+          lockedByStatus: lock?.status || null,
+          locked: Boolean(lock),
         });
       }
     }
@@ -215,8 +256,18 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
       if (poItems.length !== poJasaItemIds.length) {
         return res.status(400).json({ error: 'Sebagian item PO Jasa belum APPROVED atau tidak ditemukan.' });
       }
+      // Item yang sudah dipakai SPK subcon aktif tidak boleh dibuatkan SPK lagi.
+      const lockedItems = await findLockedPoJasaItems(projectId);
+      const blocked = poItems.filter((item) => lockedItems.has(item.id));
+      if (blocked.length) {
+        const first = lockedItems.get(blocked[0].id);
+        return res.status(400).json({
+          error: `Item "${blocked[0].description}" sudah dibuatkan SPK Subcon${first.spkNumber ? ` ${first.spkNumber}` : ''}. Batalkan SPK tersebut dulu bila ingin memakainya lagi.`,
+        });
+      }
       items = poItems.map((item) => ({
         id: item.id,
+        poJasaItemId: item.id,
         name: item.description || '-',
         paymentUnit: item.unit || '-',
         volume: Number(item.qty || 0),
@@ -306,8 +357,17 @@ router.patch('/spk-contracts/:id', async (req, res) => {
       if (poItems.length !== poJasaItemIds.length) {
         return res.status(400).json({ error: 'Sebagian item PO Jasa belum APPROVED atau tidak ditemukan.' });
       }
+      const lockedItems = await findLockedPoJasaItems(existing.projectId, existing.id);
+      const blocked = poItems.filter((item) => lockedItems.has(item.id));
+      if (blocked.length) {
+        const first = lockedItems.get(blocked[0].id);
+        return res.status(400).json({
+          error: `Item "${blocked[0].description}" sudah dibuatkan SPK Subcon${first.spkNumber ? ` ${first.spkNumber}` : ''}. Batalkan SPK tersebut dulu bila ingin memakainya lagi.`,
+        });
+      }
       items = poItems.map((item) => ({
         id: item.id,
+        poJasaItemId: item.id,
         name: item.description || '-',
         paymentUnit: item.unit || '-',
         volume: Number(item.qty || 0),

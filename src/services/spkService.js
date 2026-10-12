@@ -250,9 +250,11 @@ function normalizeSpkTerms(terms, totalContractValue, retentionPercent = 0, requ
 }
 
 function getSpkItemTotal(item = {}) {
-  const rabTotal = Number(item.rabTotalPrice || 0);
+  // Nilai kontrak memakai harga jual RAB. Prisma Decimal datang sebagai objek,
+  // jadi selalu lewat Number() dan jangan mengandalkan perbandingan objek.
+  const rabTotal = Number(item.rabTotalPrice);
   if (Number.isFinite(rabTotal) && rabTotal > 0) return rabTotal;
-  const rapTotal = Number(item.rapTotalPrice || 0);
+  const rapTotal = Number(item.rapTotalPrice);
   return Number.isFinite(rapTotal) ? rapTotal : 0;
 }
 
@@ -270,6 +272,9 @@ function buildSpkSnapshot(project, source, items, type) {
     sourceType: 'RAB',
     contractValue: Math.round(total),
     workScope: items.map((item) => ({
+      // Item PO Jasa membawa id barisnya di poJasaItemId; id RAB tetap di rabItemId.
+      // Keduanya disimpan agar penguncian item subcon bisa dilacak utuh.
+      ...(item.poJasaItemId ? { poJasaItemId: item.poJasaItemId } : {}),
       rabItemId: item.id,
       name: item.name,
       unit: item.paymentUnit,
