@@ -20,6 +20,8 @@ function normalizeParty(party = {}, defaults = {}) {
     position: String(party.position ?? defaults.position ?? '').trim(),
     companyName: String(party.companyName ?? defaults.companyName ?? '').trim(),
     address: String(party.address ?? defaults.address ?? '').trim(),
+    nik: String(party.nik ?? party.idNumber ?? defaults.nik ?? '').trim(),
+    phone: String(party.phone ?? defaults.phone ?? '').trim(),
     signatureUrl: party.signatureUrl || defaults.signatureUrl || null,
   };
 }
@@ -47,19 +49,72 @@ function buildSpkParties(type, data = {}) {
     return { firstParty, secondParty };
   }
 
-  const partyName = String(data.partyName || data.legacyPartyName || data.partyData?.name || '').trim();
-  if (!partyName) throw new Error('Nama pihak/kontraktor wajib diisi.');
-  return {
-    sourceType: type,
-    sourceId: project.id,
-    name: partyName,
-    address: String(data.partyData?.address ?? project.location ?? '').trim(),
-  };
+  const partyInput = data.partyData || {};
+  const hasStructuredParties = Boolean(
+    data.firstParty || data.secondParty || partyInput.firstParty || partyInput.secondParty,
+  );
+  const legacyName = String(data.partyName || data.legacyPartyName || partyInput.contractorName || partyInput.name || '').trim();
+  if (!hasStructuredParties) {
+    if (!legacyName) throw new Error('Nama pihak/kontraktor wajib diisi.');
+    return {
+      sourceType: type,
+      sourceId: project.id,
+      name: legacyName,
+      address: String(partyInput.address ?? project.location ?? '').trim(),
+    };
+  }
+
+  const firstParty = normalizeParty(data.firstParty || partyInput.firstParty, {
+    position: 'Direktur',
+    companyName: 'PT. Dives Jaya Perkasa',
+    address: 'Jl. Bulak Rukem Timur I No. 160, Surabaya',
+  });
+  const secondParty = normalizeParty(data.secondParty || partyInput.secondParty || {
+    name: legacyName,
+    position: 'Penyedia Jasa',
+    address: partyInput.address || project.location || '',
+    nik: partyInput.nik || partyInput.contractorNik,
+    phone: partyInput.phone || partyInput.contractorPhone,
+  });
+  if (!firstParty.name || !firstParty.position) {
+    throw new Error('Nama dan jabatan Pihak Pertama wajib diisi.');
+  }
+  if (!secondParty.name || !secondParty.position) {
+    throw new Error('Nama dan jabatan Pihak Kedua wajib diisi.');
+  }
+  return { firstParty, secondParty };
 }
 
 function normalizeStoredSpkParties(type, partyData = {}, snapshot = {}) {
   const stored = snapshot.partyData || snapshot.parties || partyData || snapshot.party || {};
-  if (type !== 'CLIENT') return stored;
+  if (type !== 'CLIENT') {
+    // Subcon menyimpan firstParty (PT Dives) dan secondParty (subcon).
+    if (stored.firstParty || stored.secondParty) {
+      const defaults = {
+        firstParty: { position: 'Direktur', companyName: 'PT. Dives Jaya Perkasa', address: 'Jl. Bulak Rukem Timur I No. 160, Surabaya' },
+        secondParty: { position: 'Penyedia Jasa', address: snapshot.projectLocation || '' },
+      };
+      return {
+        firstParty: normalizeParty(stored.firstParty, defaults.firstParty),
+        secondParty: normalizeParty(stored.secondParty, defaults.secondParty),
+      };
+    }
+    // Kontrak subcon lama hanya menyimpan satu objek pihak.
+    return {
+      firstParty: normalizeParty({}, {
+        position: 'Direktur',
+        companyName: 'PT. Dives Jaya Perkasa',
+        address: 'Jl. Bulak Rukem Timur I No. 160, Surabaya',
+      }),
+      secondParty: normalizeParty({
+        name: stored.contractorName || stored.name,
+        position: 'Penyedia Jasa',
+        address: stored.address || snapshot.projectLocation,
+        nik: stored.nik || stored.contractorNik,
+        phone: stored.phone || stored.contractorPhone,
+      }, { position: 'Penyedia Jasa' }),
+    };
+  }
   if (stored.firstParty || stored.secondParty) {
     return {
       firstParty: normalizeParty(stored.firstParty),
