@@ -250,7 +250,9 @@ router.post('/projects/:projectId/spk-contracts', async (req, res) => {
         projectId,
         type,
         status: 'DRAFT',
-        sourceType,
+        // Kolom Prisma hanya menerima enum RAB/DESIGN_QUOTATION.
+        // Asal PO Jasa tetap dibekukan di snapshot.sourceType + sourceId.
+        sourceType: 'RAB',
         sourceId: sourceType === 'PO_JASA' ? `PO_JASA:${projectId}` : projectId,
         contractValue: totalContractValue,
         contractValueWords: terbilangRupiah(totalContractValue),
@@ -349,6 +351,7 @@ router.patch('/spk-contracts/:id', async (req, res) => {
           contractValue: update.contractValue,
           contractValueWords: terbilangRupiah(update.contractValue),
           snapshot: update.snapshot,
+          sourceId: sourceType === 'PO_JASA' ? `PO_JASA:${existing.projectId}` : existing.projectId,
           partyData: update.party,
           workDurationDays: schedule?.workDurationDays ?? (req.body.workDurationDays !== undefined ? (req.body.workDurationDays ? Number(req.body.workDurationDays) : null) : existing.workDurationDays),
           startDate: schedule?.startDate ?? (req.body.startDate !== undefined ? (req.body.startDate ? parseDate(req.body.startDate) : null) : existing.startDate),
