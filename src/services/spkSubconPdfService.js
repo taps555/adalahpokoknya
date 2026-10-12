@@ -206,10 +206,10 @@ function tokenize(text, { bold, italic }) {
   const words = [];
   let pendingSpace = false;
   String(text)
-    .split(/(\\[^]+\\*)/)
+    .split(/(\*\*[^*]+\*\*)/)
     .filter(Boolean)
     .forEach((part) => {
-      const isBold = part.startsWith("*") && part.endsWith("*");
+      const isBold = part.startsWith('**') && part.endsWith('**');
       const content = isBold ? part.slice(2, -2) : part;
       const font = serifFont({ bold: bold || isBold, italic });
       for (const chunk of content.match(/[ \t\r\n]+|[^ \t\r\n]+/g) || []) {
