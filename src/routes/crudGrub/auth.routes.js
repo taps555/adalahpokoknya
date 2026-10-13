@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const prisma = require("../../lib/prisma"); // Sesuaikan path-nya dengan struktur Anda
+const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
 const SECRET_KEY = process.env.JWT_SECRET || "rahasia_super_aman_123";
@@ -34,7 +35,7 @@ router.post("/register", async (req, res) => {
 
     res.json({
       message: "Akun berhasil dibuat!",
-      data: { username: newUser.username, role: newUser.role },
+      data: { id: newUser.id, username: newUser.username, role: newUser.role },
     });
   } catch (error) {
     console.error("Register Error:", error);
@@ -72,7 +73,7 @@ router.post("/login", async (req, res) => {
     res.json({
       message: "Login berhasil!",
       token: token,
-      user: { name: user.name, role: user.role },
+      user: { id: user.id, name: user.name, role: user.role },
     });
   } catch (error) {
     console.error("Login Error:", error);
@@ -80,6 +81,27 @@ router.post("/login", async (req, res) => {
   }
 });
 
-//eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJjbXRpY2YybTUwMDAwamt1eHU0Nm1pb25nIiwicm9sZSI6IlNVUEVSX0FETUlOIiwibmFtZSI6InJhZGl0IiwiaWF0IjoxNzg4MzIyMzExLCJleHAiOjE3ODgzNjU1MTF9.xaCeBYEyPquTYlrMPeXWSvkCbMUnKd5scrGPSDJ4JJQ
+/**
+ * GET /api/auth/users
+ * Mengambil daftar seluruh akun pengguna aktif untuk pilihan Assignee
+ */
+router.get("/users", verifyToken, async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        role: true,
+      },
+      orderBy: { name: "asc" },
+    });
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error("Get Users Error:", error);
+    res.status(500).json({ error: "Gagal memuat daftar pengguna." });
+  }
+});
 
 module.exports = router;
+

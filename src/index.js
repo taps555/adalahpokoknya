@@ -95,7 +95,7 @@ app.use("/api", require("./routes/crudGrub/supplier.route"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
 app.use("/api", require("./routes/crudGrub/spk.routes"));
 app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
-app.use("/api", require("./routes/crudGrub/kanban.routes"));
+app.use("/api", require("./routes/crudGrub/task.routes"));
 app.use("/api", require("./routes/crudGrub/purchasing.routes"));
 app.use("/api/gl-bank", require("./routes/crudGrub/glBank.routes"));
 
