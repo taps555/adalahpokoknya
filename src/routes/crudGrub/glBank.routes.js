@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const prisma = require("../../lib/prisma");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
+const ExcelJS = require("exceljs");
 
 const normalizeText = (v) => String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
 
@@ -1028,6 +1029,862 @@ router.delete("/transaksi/:id", verifyToken, async (req, res) => {
   } catch (e) {
     console.error("DELETE /gl-bank/transaksi/:id error:", e);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================
+// TRANSFER ANTAR BANK
+// ============================================================
+
+/**
+ * POST /api/gl-bank/transfer-bank
+ * Body: { rekeningAsalId, rekeningTujuanId, tanggal, nominal, keterangan }
+ */
+router.post("/transfer-bank", verifyToken, async (req, res) => {
+  try {
+    const { rekeningAsalId, rekeningTujuanId, tanggal, nominal, keterangan } = req.body;
+
+    if (!rekeningAsalId || !rekeningTujuanId) {
+      return res.status(400).json({ error: "Rekening asal dan rekening tujuan wajib dipilih." });
+    }
+    if (rekeningAsalId === rekeningTujuanId) {
+      return res.status(400).json({ error: "Rekening asal dan rekening tujuan tidak boleh sama." });
+    }
+    const nom = Number(nominal);
+    if (!nom || nom <= 0) {
+      return res.status(400).json({ error: "Nominal transfer harus lebih besar dari 0." });
+    }
+
+    const [rekAsal, rekTujuan] = await Promise.all([
+      prisma.masterRekeningBank.findUnique({
+        where: { id: String(rekeningAsalId) },
+        include: { tipeRekening: true },
+      }),
+      prisma.masterRekeningBank.findUnique({
+        where: { id: String(rekeningTujuanId) },
+        include: { tipeRekening: true },
+      }),
+    ]);
+
+    if (!rekAsal) return res.status(404).json({ error: "Rekening asal tidak ditemukan." });
+    if (!rekTujuan) return res.status(404).json({ error: "Rekening tujuan tidak ditemukan." });
+
+    const tgl = tanggal ? new Date(tanggal) : new Date();
+    const yyyy = tgl.getFullYear();
+    const mm = String(tgl.getMonth() + 1).padStart(2, "0");
+    const dd = String(tgl.getDate()).padStart(2, "0");
+
+    const startOfDay = new Date(tgl);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(tgl);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const countToday = await prisma.bukuBesarTransaksi.count({
+      where: {
+        sumberTransaksi: "TRANSFER_BANK",
+        tanggal: { gte: startOfDay, lte: endOfDay },
+        jenis: "KELUAR",
+      },
+    });
+    const seq = String(countToday + 1).padStart(3, "0");
+    const noReferensi = `TRF/${yyyy}${mm}${dd}/${seq}`;
+
+    const namaAkunAsal = [rekAsal.namaRekening, rekAsal.nomorRekening].filter(Boolean).join(" - ");
+    const namaAkunTujuan = [rekTujuan.namaRekening, rekTujuan.nomorRekening].filter(Boolean).join(" - ");
+
+    const [trxKeluar, trxMasuk] = await prisma.$transaction([
+      prisma.bukuBesarTransaksi.create({
+        data: {
+          tanggal: tgl,
+          tipeAkun: "BANK",
+          namaAkun: namaAkunAsal,
+          jenis: "KELUAR",
+          nominal: nom,
+          noReferensi,
+          pihak: [rekTujuan.namaBank, rekTujuan.namaRekening].filter(Boolean).join(" - "),
+          keterangan: keterangan
+            ? `Transfer ke ${rekTujuan.namaBank || "Bank"} (${rekTujuan.nomorRekening || "-"}) - ${keterangan}`
+            : `Transfer ke ${rekTujuan.namaBank || "Bank"} (${rekTujuan.nomorRekening || "-"}) a.n. ${rekTujuan.namaRekening}`,
+          projectId: null,
+          rekeningBankId: rekAsal.id,
+          tipeRekeningId: rekAsal.tipeRekeningId || null,
+          sumberTransaksi: "TRANSFER_BANK",
+          createdById: req.user?.id || null,
+          saldoBerjalan: 0,
+        },
+      }),
+      prisma.bukuBesarTransaksi.create({
+        data: {
+          tanggal: tgl,
+          tipeAkun: "BANK",
+          namaAkun: namaAkunTujuan,
+          jenis: "MASUK",
+          nominal: nom,
+          noReferensi,
+          pihak: [rekAsal.namaBank, rekAsal.namaRekening].filter(Boolean).join(" - "),
+          keterangan: keterangan
+            ? `Transfer dari ${rekAsal.namaBank || "Bank"} (${rekAsal.nomorRekening || "-"}) - ${keterangan}`
+            : `Transfer dari ${rekAsal.namaBank || "Bank"} (${rekAsal.nomorRekening || "-"}) a.n. ${rekAsal.namaRekening}`,
+          projectId: null,
+          rekeningBankId: rekTujuan.id,
+          tipeRekeningId: rekTujuan.tipeRekeningId || null,
+          sumberTransaksi: "TRANSFER_BANK",
+          createdById: req.user?.id || null,
+          saldoBerjalan: 0,
+        },
+      }),
+    ]);
+
+    await recalcSaldo("BANK", namaAkunAsal);
+    await recalcSaldo("BANK", namaAkunTujuan);
+
+    res.status(201).json({
+      message: "Transfer antar bank berhasil diposting.",
+      noReferensi,
+      trxKeluar,
+      trxMasuk,
+    });
+  } catch (e) {
+    console.error("POST /gl-bank/transfer-bank error:", e);
+    res.status(500).json({ error: e.message || "Gagal melakukan transfer antar bank." });
+  }
+});
+
+/**
+ * GET /api/gl-bank/transfer-bank
+ * Mengambil riwayat transfer antar bank
+ */
+router.get("/transfer-bank", verifyToken, async (req, res) => {
+  try {
+    const { dari, sampai, search } = req.query;
+    const where = { sumberTransaksi: "TRANSFER_BANK" };
+
+    if (dari || sampai) {
+      where.tanggal = {};
+      if (dari) where.tanggal.gte = new Date(dari);
+      if (sampai) where.tanggal.lte = new Date(sampai);
+    }
+    if (search) {
+      where.OR = [
+        { noReferensi: { contains: search, mode: "insensitive" } },
+        { keterangan: { contains: search, mode: "insensitive" } },
+        { namaAkun: { contains: search, mode: "insensitive" } },
+      ];
+    }
+
+    const rows = await prisma.bukuBesarTransaksi.findMany({
+      where,
+      orderBy: [{ tanggal: "desc" }, { createdAt: "desc" }],
+      include: {
+        createdBy: { select: { id: true, name: true } },
+        rekeningBank: {
+          select: { id: true, namaRekening: true, namaBank: true, nomorRekening: true },
+        },
+      },
+      take: 200,
+    });
+
+    const groupMap = new Map();
+    for (const r of rows) {
+      const ref = r.noReferensi || r.id;
+      if (!groupMap.has(ref)) {
+        groupMap.set(ref, {
+          noReferensi: ref,
+          tanggal: r.tanggal,
+          nominal: r.nominal,
+          keterangan: r.keterangan,
+          createdBy: r.createdBy?.name || "-",
+          rekeningAsal: null,
+          rekeningTujuan: null,
+          createdAt: r.createdAt,
+        });
+      }
+      const entry = groupMap.get(ref);
+      if (r.jenis === "KELUAR") {
+        entry.rekeningAsal = r.rekeningBank
+          ? `${r.rekeningBank.namaBank} - ${r.rekeningBank.namaRekening} (${r.rekeningBank.nomorRekening})`
+          : r.namaAkun;
+        entry.nominal = r.nominal;
+      } else if (r.jenis === "MASUK") {
+        entry.rekeningTujuan = r.rekeningBank
+          ? `${r.rekeningBank.namaBank} - ${r.rekeningBank.namaRekening} (${r.rekeningBank.nomorRekening})`
+          : r.namaAkun;
+      }
+    }
+
+    res.json({ data: Array.from(groupMap.values()), raw: rows });
+  } catch (e) {
+    console.error("GET /gl-bank/transfer-bank error:", e);
+    res.status(500).json({ error: e.message || "Gagal mengambil riwayat transfer bank." });
+  }
+});
+
+// ============================================================
+// LAPORAN LABA RUGI PROYEK
+// ============================================================
+
+async function getLabaRugiData({ projectId, dari, sampai }) {
+  const where = {};
+  if (dari || sampai) {
+    where.tanggal = {};
+    if (dari) where.tanggal.gte = new Date(dari);
+    if (sampai) where.tanggal.lte = new Date(sampai);
+  }
+
+  const allRows = await prisma.bukuBesarTransaksi.findMany({
+    where,
+    orderBy: [{ tanggal: "asc" }, { createdAt: "asc" }],
+    include: {
+      project: { select: { id: true, name: true, client: { select: { id: true, name: true } } } },
+      purchaseOrder: {
+        select: {
+          id: true,
+          poNumber: true,
+          kategoriPO: true,
+          projectId: true,
+          project: { select: { id: true, name: true, client: { select: { id: true, name: true } } } },
+          supplier: { select: { id: true, name: true } },
+          jasa: { select: { id: true, nama: true } },
+          items: {
+            select: {
+              id: true,
+              description: true,
+              qty: true,
+              unit: true,
+              unitPrice: true,
+              total: true,
+            },
+          },
+        },
+      },
+      pembayaran: {
+        select: {
+          id: true,
+          noPembayaran: true,
+          purchaseOrder: {
+            select: {
+              id: true,
+              poNumber: true,
+              kategoriPO: true,
+              projectId: true,
+              project: { select: { id: true, name: true, client: { select: { id: true, name: true } } } },
+              supplier: { select: { id: true, name: true } },
+              jasa: { select: { id: true, nama: true } },
+            },
+          },
+        },
+      },
+      invoicePenjualanDesain: { select: { id: true, noInvoice: true } },
+      invoicePenjualanKlien: { select: { id: true, noInvoice: true, termLabel: true } },
+      invoiceOperasional: { select: { id: true, noInvoice: true, jenisBiaya: true } },
+    },
+  });
+
+  const resolveProjectId = (r) =>
+    r.projectId || r.purchaseOrder?.projectId || r.pembayaran?.purchaseOrder?.projectId || null;
+
+  // Filter out bank-to-bank internal transfers
+  const nonTransferRows = allRows.filter((r) => r.sumberTransaksi !== "TRANSFER_BANK");
+
+  if (projectId) {
+    const project = await prisma.project.findUnique({
+      where: { id: String(projectId) },
+      include: { client: { select: { id: true, name: true } } },
+    });
+    if (!project) return null;
+
+    const projectRows = nonTransferRows.filter((r) => resolveProjectId(r) === projectId);
+
+    const pendapatan = {
+      desain: [],
+      klien: [],
+      lainnya: [],
+      subtotalDesain: 0,
+      subtotalKlien: 0,
+      subtotalLainnya: 0,
+      totalPendapatan: 0,
+    };
+
+    const pengeluaran = {
+      materialAlat: [],
+      jasa: [],
+      operasional: [],
+      lainnya: [],
+      subtotalMaterialAlat: 0,
+      subtotalJasa: 0,
+      subtotalOperasional: 0,
+      subtotalLainnya: 0,
+      totalPengeluaran: 0,
+    };
+
+    for (const r of projectRows) {
+      const nom = Number(r.nominal || 0);
+      const ket = String(r.keterangan || "");
+      const noRef = String(r.noReferensi || "");
+
+      if (r.jenis === "MASUK") {
+        const isDesain =
+          (r.invoicePenjualanDesain && r.invoicePenjualanDesain.length > 0) ||
+          noRef.startsWith("INV/DSN") ||
+          /desain|design/i.test(ket);
+
+        const isKlien =
+          (r.invoicePenjualanKlien && r.invoicePenjualanKlien.length > 0) ||
+          noRef.startsWith("INV/KLN") ||
+          /klien|client|termin|spk/i.test(ket);
+
+        if (isDesain) {
+          pendapatan.desain.push(r);
+          pendapatan.subtotalDesain += nom;
+        } else if (isKlien) {
+          pendapatan.klien.push(r);
+          pendapatan.subtotalKlien += nom;
+        } else {
+          pendapatan.lainnya.push(r);
+          pendapatan.subtotalLainnya += nom;
+        }
+        pendapatan.totalPendapatan += nom;
+      } else if (r.jenis === "KELUAR") {
+        const isJasa =
+          r.purchaseOrder?.kategoriPO === "JASA" ||
+          r.pembayaran?.purchaseOrder?.kategoriPO === "JASA" ||
+          /jasa|mandor|borongan|subkon|tukang/i.test(ket);
+
+        const isOperasional =
+          (r.invoiceOperasional && r.invoiceOperasional.length > 0) ||
+          noRef.startsWith("INV/OPS") ||
+          /operasional/i.test(ket) ||
+          r.sumberTransaksi === "OPERASIONAL";
+
+        const isMaterialAlat =
+          r.purchaseOrder ||
+          r.poId ||
+          r.pembayaran?.purchaseOrder ||
+          /material|bahan|alat|sewa/i.test(ket);
+
+        if (isJasa) {
+          pengeluaran.jasa.push(r);
+          pengeluaran.subtotalJasa += nom;
+        } else if (isOperasional) {
+          pengeluaran.operasional.push(r);
+          pengeluaran.subtotalOperasional += nom;
+        } else if (isMaterialAlat) {
+          pengeluaran.materialAlat.push(r);
+          pengeluaran.subtotalMaterialAlat += nom;
+        } else {
+          pengeluaran.lainnya.push(r);
+          pengeluaran.subtotalLainnya += nom;
+        }
+        pengeluaran.totalPengeluaran += nom;
+      }
+    }
+
+    const labaRugi = pendapatan.totalPendapatan - pengeluaran.totalPengeluaran;
+    const profitMargin =
+      pendapatan.totalPendapatan > 0
+        ? Math.round((labaRugi / pendapatan.totalPendapatan) * 10000) / 100
+        : 0;
+
+    return {
+      project,
+      filter: { dari, sampai },
+      summary: {
+        totalPendapatan: pendapatan.totalPendapatan,
+        totalPengeluaran: pengeluaran.totalPengeluaran,
+        labaRugi,
+        profitMargin,
+      },
+      pendapatan,
+      pengeluaran,
+    };
+  }
+
+  // Ringkasan per proyek untuk semua proyek
+  const allProjects = await prisma.project.findMany({
+    include: { client: { select: { id: true, name: true } } },
+    orderBy: { name: "asc" },
+  });
+
+  const projectMap = new Map();
+  for (const p of allProjects) {
+    projectMap.set(p.id, {
+      id: p.id,
+      name: p.name,
+      client: p.client,
+      totalPendapatan: 0,
+      totalPengeluaran: 0,
+      labaRugi: 0,
+      profitMargin: 0,
+    });
+  }
+
+  let totalSemuaMasuk = 0;
+  let totalSemuaKeluar = 0;
+
+  for (const r of nonTransferRows) {
+    const pId = resolveProjectId(r);
+    if (!pId || !projectMap.has(pId)) continue;
+    const pEntry = projectMap.get(pId);
+    const nom = Number(r.nominal || 0);
+
+    if (r.jenis === "MASUK") {
+      pEntry.totalPendapatan += nom;
+      totalSemuaMasuk += nom;
+    } else if (r.jenis === "KELUAR") {
+      pEntry.totalPengeluaran += nom;
+      totalSemuaKeluar += nom;
+    }
+  }
+
+  const projectList = Array.from(projectMap.values()).map((p) => {
+    const labaRugi = p.totalPendapatan - p.totalPengeluaran;
+    const profitMargin =
+      p.totalPendapatan > 0 ? Math.round((labaRugi / p.totalPendapatan) * 10000) / 100 : 0;
+    return { ...p, labaRugi, profitMargin };
+  });
+
+  const overallLaba = totalSemuaMasuk - totalSemuaKeluar;
+  const overallMargin =
+    totalSemuaMasuk > 0 ? Math.round((overallLaba / totalSemuaMasuk) * 10000) / 100 : 0;
+
+  return {
+    projects: projectList,
+    overall: {
+      totalPendapatan: totalSemuaMasuk,
+      totalPengeluaran: totalSemuaKeluar,
+      labaRugi: overallLaba,
+      profitMargin: overallMargin,
+    },
+    filter: { dari, sampai },
+  };
+}
+
+/**
+ * GET /api/gl-bank/laporan-laba
+ */
+router.get("/laporan-laba", verifyToken, async (req, res) => {
+  try {
+    const { projectId, dari, sampai } = req.query;
+    const data = await getLabaRugiData({ projectId, dari, sampai });
+    if (!data) return res.status(404).json({ error: "Project tidak ditemukan." });
+    res.json(data);
+  } catch (e) {
+    console.error("GET /gl-bank/laporan-laba error:", e);
+    res.status(500).json({ error: e.message || "Gagal mengambil laporan laba rugi." });
+  }
+});
+
+/**
+ * GET /api/gl-bank/laporan-laba/export-excel
+ * Menghasilkan file Excel (.xlsx) 1 Sheet
+ */
+router.get("/laporan-laba/export-excel", verifyToken, async (req, res) => {
+  try {
+    const { projectId, dari, sampai } = req.query;
+    const data = await getLabaRugiData({ projectId, dari, sampai });
+    if (!data) return res.status(404).json({ error: "Data laporan tidak ditemukan." });
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "DIVES Management";
+    workbook.lastModifiedBy = req.user?.name || "Finance DIVES";
+    workbook.created = new Date();
+
+    const fmtTglId = (d) =>
+      d
+        ? new Date(d).toLocaleDateString("id-ID", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+          })
+        : "-";
+
+    const borderThin = {
+      top: { style: "thin", color: { argb: "FFE0E0E0" } },
+      bottom: { style: "thin", color: { argb: "FFE0E0E0" } },
+      left: { style: "thin", color: { argb: "FFE0E0E0" } },
+      right: { style: "thin", color: { argb: "FFE0E0E0" } },
+    };
+
+    const borderDoubleBottom = {
+      top: { style: "thin", color: { argb: "FF333333" } },
+      bottom: { style: "double", color: { argb: "FF111111" } },
+      left: { style: "thin", color: { argb: "FFE0E0E0" } },
+      right: { style: "thin", color: { argb: "FFE0E0E0" } },
+    };
+
+    // JIKA PER PROYEK
+    if (data.project) {
+      const sheetName = "Laba Rugi - " + String(data.project.name || "Proyek").slice(0, 20).replace(/[/\\?*[\]]/g, "");
+      const ws = workbook.addWorksheet(sheetName, {
+        views: [{ showGridLines: true }],
+      });
+
+      // Set column widths
+      ws.columns = [
+        { key: "no", width: 6 },
+        { key: "tgl", width: 14 },
+        { key: "noRef", width: 22 },
+        { key: "pihak", width: 26 },
+        { key: "keterangan", width: 42 },
+        { key: "vol", width: 18 },
+        { key: "nominal", width: 22 },
+      ];
+
+      let currentRow = 1;
+
+      // Header Brand
+      ws.mergeCells(`A${currentRow}:G${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "DIVES CORP / PT DIVES MANAGEMENT";
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 14, bold: true, color: { argb: "FF1A1A1A" } };
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "center", vertical: "middle" };
+      ws.getRow(currentRow).height = 24;
+      currentRow++;
+
+      // Document Title
+      ws.mergeCells(`A${currentRow}:G${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "LAPORAN LABA RUGI PROYEK";
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 12, bold: true, color: { argb: "FF856404" } };
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "center", vertical: "middle" };
+      ws.getRow(currentRow).height = 20;
+      currentRow += 2;
+
+      // Metadata Info Box
+      const meta = [
+        ["Nama Proyek", `: ${data.project.name}`],
+        ["Klien", `: ${data.project.client?.name || "-"}`],
+        ["Periode", `: ${dari && sampai ? `${fmtTglId(dari)} s/d ${fmtTglId(sampai)}` : "Semua Periode Transaksi"}`],
+        ["Tanggal Cetak", `: ${fmtTglId(new Date())}`],
+      ];
+      meta.forEach(([k, v]) => {
+        ws.getCell(`A${currentRow}`).value = k;
+        ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 10, bold: true, color: { argb: "FF555555" } };
+        ws.mergeCells(`B${currentRow}:G${currentRow}`);
+        ws.getCell(`B${currentRow}`).value = v;
+        ws.getCell(`B${currentRow}`).font = { name: "Arial", size: 10, color: { argb: "FF222222" } };
+        currentRow++;
+      });
+      currentRow++;
+
+      // ==========================================
+      // SECTION I: PENDAPATAN (UANG MASUK)
+      // ==========================================
+      ws.mergeCells(`A${currentRow}:G${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "I. PENDAPATAN (TOTAL UANG MASUK PROYEK)";
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 11, bold: true, color: { argb: "FF155724" } };
+      ws.getCell(`A${currentRow}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD4EDDA" } };
+      ws.getRow(currentRow).height = 22;
+      currentRow++;
+
+      const addTableHeader = (colTitles) => {
+        const row = ws.getRow(currentRow);
+        colTitles.forEach((t, i) => {
+          const colLetter = String.fromCharCode(65 + i);
+          const cell = ws.getCell(`${colLetter}${currentRow}`);
+          cell.value = t;
+          cell.font = { name: "Arial", size: 9, bold: true, color: { argb: "FFFFFFFF" } };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2C3E50" } };
+          cell.alignment = { horizontal: i === 6 ? "right" : i === 0 ? "center" : "left", vertical: "middle" };
+          cell.border = borderThin;
+        });
+        row.height = 20;
+        currentRow++;
+      };
+
+      const addSubgroup = (title, items, isIncome = true) => {
+        // Subgroup Header
+        ws.mergeCells(`A${currentRow}:G${currentRow}`);
+        ws.getCell(`A${currentRow}`).value = `▶ ${title} (${items.length} Transaksi)`;
+        ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 9, bold: true, color: { argb: "FF333333" } };
+        ws.getCell(`A${currentRow}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF0F4F8" } };
+        currentRow++;
+
+        if (items.length === 0) {
+          ws.mergeCells(`A${currentRow}:F${currentRow}`);
+          ws.getCell(`A${currentRow}`).value = "Tidak ada transaksi";
+          ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 9, italic: true, color: { argb: "FF888888" } };
+          ws.getCell(`G${currentRow}`).value = 0;
+          ws.getCell(`G${currentRow}`).numFmt = "#,##0";
+          ws.getCell(`G${currentRow}`).alignment = { horizontal: "right" };
+          currentRow++;
+          return;
+        }
+
+        addTableHeader(["No", "Tanggal", "No. Dokumen/Ref", "Pihak Terkait", "Keterangan", "Vol / Satuan", "Nominal (Rp)"]);
+
+        let subtotal = 0;
+        items.forEach((item, idx) => {
+          const row = ws.getRow(currentRow);
+          const nom = Number(item.nominal || 0);
+          subtotal += nom;
+
+          ws.getCell(`A${currentRow}`).value = idx + 1;
+          ws.getCell(`A${currentRow}`).alignment = { horizontal: "center" };
+          ws.getCell(`B${currentRow}`).value = fmtTglId(item.tanggal);
+          ws.getCell(`C${currentRow}`).value = item.noReferensi || "-";
+          ws.getCell(`D${currentRow}`).value = item.pihak || item.purchaseOrder?.supplier?.name || item.project?.name || "-";
+          ws.getCell(`E${currentRow}`).value = item.keterangan || "-";
+          ws.getCell(`F${currentRow}`).value = item.keteranganVolume || item.purchaseOrder?.items?.map(it => `${it.qty} ${it.unit || ''}`).join(", ") || "-";
+          ws.getCell(`G${currentRow}`).value = nom;
+          ws.getCell(`G${currentRow}`).numFmt = "#,##0";
+          ws.getCell(`G${currentRow}`).font = { name: "Arial", size: 9, bold: true };
+
+          for (let c = 1; c <= 7; c++) {
+            ws.getCell(currentRow, c).border = borderThin;
+            ws.getCell(currentRow, c).font = ws.getCell(currentRow, c).font || { name: "Arial", size: 9 };
+          }
+          currentRow++;
+        });
+
+        // Subtotal row
+        ws.mergeCells(`A${currentRow}:F${currentRow}`);
+        ws.getCell(`A${currentRow}`).value = `Subtotal ${title}`;
+        ws.getCell(`A${currentRow}`).alignment = { horizontal: "right" };
+        ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 9, bold: true };
+        ws.getCell(`G${currentRow}`).value = subtotal;
+        ws.getCell(`G${currentRow}`).numFmt = "#,##0";
+        ws.getCell(`G${currentRow}`).font = { name: "Arial", size: 9, bold: true, color: { argb: isIncome ? "FF155724" : "FF721C24" } };
+        for (let c = 1; c <= 7; c++) ws.getCell(currentRow, c).border = borderThin;
+        currentRow += 2;
+      };
+
+      // 1. Penjualan Desain
+      addSubgroup("Penjualan Desain (Design Quotation)", data.pendapatan.desain, true);
+      // 2. Penjualan Klien / Termin
+      addSubgroup("Penjualan Klien / Termin Proyek (SPK Client)", data.pendapatan.klien, true);
+      // 3. Pendapatan Lain-lain jika ada
+      if (data.pendapatan.lainnya.length > 0) {
+        addSubgroup("Pendapatan Proyek Lainnya", data.pendapatan.lainnya, true);
+      }
+
+      // Total Pendapatan Row
+      ws.mergeCells(`A${currentRow}:F${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "TOTAL PENDAPATAN (TOTAL UANG MASUK)";
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 10, bold: true, color: { argb: "FF155724" } };
+      ws.getCell(`G${currentRow}`).value = data.pendapatan.totalPendapatan;
+      ws.getCell(`G${currentRow}`).numFmt = "#,##0";
+      ws.getCell(`G${currentRow}`).font = { name: "Arial", size: 11, bold: true, color: { argb: "FF155724" } };
+      ws.getCell(`G${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+      for (let c = 1; c <= 7; c++) {
+        ws.getCell(currentRow, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD4EDDA" } };
+        ws.getCell(currentRow, c).border = borderDoubleBottom;
+      }
+      ws.getRow(currentRow).height = 22;
+      currentRow += 2;
+
+      // ==========================================
+      // SECTION II: PENGELUARAN / BEBAN BIAYA
+      // ==========================================
+      ws.mergeCells(`A${currentRow}:G${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "II. PENGELUARAN / BEBAN BIAYA PROYEK (TOTAL UANG KELUAR)";
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 11, bold: true, color: { argb: "FF721C24" } };
+      ws.getCell(`A${currentRow}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8D7DA" } };
+      ws.getRow(currentRow).height = 22;
+      currentRow++;
+
+      // 1. PO Material & Alat
+      addSubgroup("PO Material & Pembelian/Sewa Alat", data.pengeluaran.materialAlat, false);
+      // 2. PO Jasa & Mandor
+      addSubgroup("PO Jasa & Mandor (Subkontraktor / Upah)", data.pengeluaran.jasa, false);
+      // 3. Biaya Operasional Proyek
+      addSubgroup("Biaya Operasional Proyek", data.pengeluaran.operasional, false);
+      // 4. Pengeluaran Lainnya
+      if (data.pengeluaran.lainnya.length > 0) {
+        addSubgroup("Pengeluaran Proyek Lainnya", data.pengeluaran.lainnya, false);
+      }
+
+      // Total Pengeluaran Row
+      ws.mergeCells(`A${currentRow}:F${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "TOTAL PENGELUARAN (TOTAL UANG KELUAR)";
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 10, bold: true, color: { argb: "FF721C24" } };
+      ws.getCell(`G${currentRow}`).value = data.pengeluaran.totalPengeluaran;
+      ws.getCell(`G${currentRow}`).numFmt = "#,##0";
+      ws.getCell(`G${currentRow}`).font = { name: "Arial", size: 11, bold: true, color: { argb: "FF721C24" } };
+      ws.getCell(`G${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+      for (let c = 1; c <= 7; c++) {
+        ws.getCell(currentRow, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8D7DA" } };
+        ws.getCell(currentRow, c).border = borderDoubleBottom;
+      }
+      ws.getRow(currentRow).height = 22;
+      currentRow += 2;
+
+      // ==========================================
+      // SECTION III: RINGKASAN AKHIR & LABA/RUGI
+      // ==========================================
+      ws.mergeCells(`A${currentRow}:G${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "III. RINGKASAN EKSEKUTIF LABA / RUGI BERSIH";
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 11, bold: true, color: { argb: "FF1A1A1A" } };
+      ws.getCell(`A${currentRow}`).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE9ECEF" } };
+      ws.getRow(currentRow).height = 20;
+      currentRow++;
+
+      const isProfit = data.summary.labaRugi >= 0;
+
+      // Summary lines
+      const summaryItems = [
+        ["Total Pendapatan (Uang Masuk)", data.summary.totalPendapatan, false, "#,##0"],
+        ["Total Pengeluaran (Uang Keluar)", data.summary.totalPengeluaran, false, "#,##0"],
+        [isProfit ? "LABA BERSIH PROYEK (SURPLUS)" : "RUGI BERSIH PROYEK (DEFISIT)", data.summary.labaRugi, true, "#,##0"],
+        ["PROFIT MARGIN (%)", `${data.summary.profitMargin} %`, true, "@"],
+      ];
+
+      summaryItems.forEach(([lbl, val, isHighlight, numFmt]) => {
+        ws.mergeCells(`A${currentRow}:F${currentRow}`);
+        ws.getCell(`A${currentRow}`).value = lbl;
+        ws.getCell(`A${currentRow}`).font = {
+          name: "Arial",
+          size: isHighlight ? 11 : 10,
+          bold: isHighlight,
+          color: { argb: isHighlight ? (isProfit ? "FF155724" : "FF721C24") : "FF333333" },
+        };
+        ws.getCell(`A${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+
+        ws.getCell(`G${currentRow}`).value = val;
+        ws.getCell(`G${currentRow}`).font = {
+          name: "Arial",
+          size: isHighlight ? 12 : 10,
+          bold: isHighlight,
+          color: { argb: isHighlight ? (isProfit ? "FF155724" : "FF721C24") : "FF222222" },
+        };
+        ws.getCell(`G${currentRow}`).alignment = { horizontal: "right", vertical: "middle" };
+        if (numFmt !== "@") ws.getCell(`G${currentRow}`).numFmt = numFmt;
+
+        for (let c = 1; c <= 7; c++) {
+          ws.getCell(currentRow, c).border = isHighlight ? borderDoubleBottom : borderThin;
+          if (isHighlight) {
+            ws.getCell(currentRow, c).fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: isProfit ? "FFD4EDDA" : "FFF8D7DA" },
+            };
+          }
+        }
+        ws.getRow(currentRow).height = isHighlight ? 24 : 20;
+        currentRow++;
+      });
+      currentRow += 2;
+
+      // Signatures
+      ws.mergeCells(`A${currentRow}:C${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "Dibuat Oleh:";
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "center" };
+      ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 9, bold: true };
+
+      ws.mergeCells(`D${currentRow}:E${currentRow}`);
+      ws.getCell(`D${currentRow}`).value = "Diketahui Oleh:";
+      ws.getCell(`D${currentRow}`).alignment = { horizontal: "center" };
+      ws.getCell(`D${currentRow}`).font = { name: "Arial", size: 9, bold: true };
+
+      ws.mergeCells(`F${currentRow}:G${currentRow}`);
+      ws.getCell(`F${currentRow}`).value = "Disetujui Oleh:";
+      ws.getCell(`F${currentRow}`).alignment = { horizontal: "center" };
+      ws.getCell(`F${currentRow}`).font = { name: "Arial", size: 9, bold: true };
+      currentRow += 4;
+
+      ws.mergeCells(`A${currentRow}:C${currentRow}`);
+      ws.getCell(`A${currentRow}`).value = "( Finance & Kasir )";
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "center" };
+
+      ws.mergeCells(`D${currentRow}:E${currentRow}`);
+      ws.getCell(`D${currentRow}`).value = "( Project Manager )";
+      ws.getCell(`D${currentRow}`).alignment = { horizontal: "center" };
+
+      ws.mergeCells(`F${currentRow}:G${currentRow}`);
+      ws.getCell(`F${currentRow}`).value = "( Direktur Utama )";
+      ws.getCell(`F${currentRow}`).alignment = { horizontal: "center" };
+
+      const safeFilename = `Laporan-Laba-Rugi-${String(data.project.name || "Project").replace(/[^a-zA-Z0-9_-]/g, "_")}.xlsx`;
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"`);
+      await workbook.xlsx.write(res);
+      return res.end();
+    }
+
+    // JIKA REKAP SEMUA PROYEK
+    const ws = workbook.addWorksheet("Rekap Laba Rugi Semua Proyek", {
+      views: [{ showGridLines: true }],
+    });
+
+    ws.columns = [
+      { key: "no", width: 6 },
+      { key: "proyek", width: 32 },
+      { key: "klien", width: 28 },
+      { key: "masuk", width: 24 },
+      { key: "keluar", width: 24 },
+      { key: "laba", width: 24 },
+      { key: "margin", width: 16 },
+    ];
+
+    let currentRow = 1;
+    ws.mergeCells(`A${currentRow}:G${currentRow}`);
+    ws.getCell(`A${currentRow}`).value = "REKAPITULASI LABA RUGI PROYEK - DIVES CORP";
+    ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 14, bold: true };
+    ws.getCell(`A${currentRow}`).alignment = { horizontal: "center", vertical: "middle" };
+    ws.getRow(currentRow).height = 24;
+    currentRow += 2;
+
+    const headers = ["No", "Nama Proyek", "Klien", "Total Uang Masuk (Rp)", "Total Uang Keluar (Rp)", "Laba / (Rugi) Bersih (Rp)", "Margin (%)"];
+    headers.forEach((h, i) => {
+      const colLetter = String.fromCharCode(65 + i);
+      const cell = ws.getCell(`${colLetter}${currentRow}`);
+      cell.value = h;
+      cell.font = { name: "Arial", size: 9, bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2C3E50" } };
+      cell.alignment = { horizontal: i >= 3 ? "right" : i === 0 ? "center" : "left", vertical: "middle" };
+      cell.border = borderThin;
+    });
+    currentRow++;
+
+    (data.projects || []).forEach((p, idx) => {
+      ws.getCell(`A${currentRow}`).value = idx + 1;
+      ws.getCell(`A${currentRow}`).alignment = { horizontal: "center" };
+      ws.getCell(`B${currentRow}`).value = p.name;
+      ws.getCell(`C${currentRow}`).value = p.client?.name || "-";
+      ws.getCell(`D${currentRow}`).value = p.totalPendapatan;
+      ws.getCell(`D${currentRow}`).numFmt = "#,##0";
+      ws.getCell(`E${currentRow}`).value = p.totalPengeluaran;
+      ws.getCell(`E${currentRow}`).numFmt = "#,##0";
+      ws.getCell(`F${currentRow}`).value = p.labaRugi;
+      ws.getCell(`F${currentRow}`).numFmt = "#,##0";
+      ws.getCell(`F${currentRow}`).font = { name: "Arial", size: 9, bold: true, color: { argb: p.labaRugi >= 0 ? "FF155724" : "FF721C24" } };
+      ws.getCell(`G${currentRow}`).value = `${p.profitMargin} %`;
+      ws.getCell(`G${currentRow}`).alignment = { horizontal: "right" };
+
+      for (let c = 1; c <= 7; c++) ws.getCell(currentRow, c).border = borderThin;
+      currentRow++;
+    });
+
+    // Total Overall
+    ws.mergeCells(`A${currentRow}:C${currentRow}`);
+    ws.getCell(`A${currentRow}`).value = "TOTAL KESELURUHAN PROYEK";
+    ws.getCell(`A${currentRow}`).font = { name: "Arial", size: 10, bold: true };
+    ws.getCell(`A${currentRow}`).alignment = { horizontal: "right" };
+    ws.getCell(`D${currentRow}`).value = data.overall.totalPendapatan;
+    ws.getCell(`D${currentRow}`).numFmt = "#,##0";
+    ws.getCell(`D${currentRow}`).font = { name: "Arial", size: 10, bold: true };
+    ws.getCell(`E${currentRow}`).value = data.overall.totalPengeluaran;
+    ws.getCell(`E${currentRow}`).numFmt = "#,##0";
+    ws.getCell(`E${currentRow}`).font = { name: "Arial", size: 10, bold: true };
+    ws.getCell(`F${currentRow}`).value = data.overall.labaRugi;
+    ws.getCell(`F${currentRow}`).numFmt = "#,##0";
+    ws.getCell(`F${currentRow}`).font = { name: "Arial", size: 10, bold: true, color: { argb: data.overall.labaRugi >= 0 ? "FF155724" : "FF721C24" } };
+    ws.getCell(`G${currentRow}`).value = `${data.overall.profitMargin} %`;
+    ws.getCell(`G${currentRow}`).alignment = { horizontal: "right" };
+    ws.getCell(`G${currentRow}`).font = { name: "Arial", size: 10, bold: true };
+
+    for (let c = 1; c <= 7; c++) {
+      ws.getCell(currentRow, c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE9ECEF" } };
+      ws.getCell(currentRow, c).border = borderDoubleBottom;
+    }
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="Rekap-Laba-Rugi-Semua-Proyek.xlsx"`);
+    await workbook.xlsx.write(res);
+    return res.end();
+  } catch (e) {
+    console.error("GET /gl-bank/laporan-laba/export-excel error:", e);
+    res.status(500).json({ error: e.message || "Gagal mengexport excel laporan laba rugi." });
   }
 });
 

@@ -3,6 +3,17 @@ const router = express.Router();
 const prisma = require("../../lib/prisma"); // Sesuaikan path menuju file prisma Anda
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 const supplierService = require("../../services/supplier");
+
+const normalizeMoneyInput = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (!digits) return null;
+  const num = Number(digits);
+  return Number.isFinite(num) ? num : null;
+};
 /**
  * GET /api/finance/suppliers
  * List semua supplier
@@ -476,10 +487,17 @@ router.post("/supplier-items", async (req, res) => {
     const { supplierId, itemName, variantName, unit, price, promoPrice, kategori } =
       req.body;
 
-    if (!supplierId || !itemName || !unit || price === undefined) {
+    const priceValue = normalizeMoneyInput(price);
+    const promoPriceValue = normalizeMoneyInput(promoPrice);
+
+    if (!supplierId || !itemName || !unit || priceValue === null) {
       return res.status(400).json({
         error: "supplierId, itemName, unit, dan price wajib diisi",
       });
+    }
+
+    if (priceValue <= 0) {
+      return res.status(400).json({ error: "Harga item harus lebih dari 0" });
     }
 
     const created = await prisma.supplierItem.create({
@@ -488,8 +506,8 @@ router.post("/supplier-items", async (req, res) => {
         itemName,
         variantName: variantName || null,
         unit,
-        currentPrice: price,
-        currentPromoPrice: promoPrice,
+        currentPrice: priceValue,
+        currentPromoPrice: promoPriceValue,
         kategori: kategori || null,
       },
     });
@@ -497,8 +515,8 @@ router.post("/supplier-items", async (req, res) => {
     await prisma.supplierPriceHistory.create({
       data: {
         supplierItemId: created.id,
-        price,
-        promoPrice,
+        price: priceValue,
+        promoPrice: promoPriceValue,
         effectiveDate: new Date(),
       },
     });
@@ -535,7 +553,9 @@ router.post("/supplier-items/bulk", async (req, res) => {
 
     const results = [];
     for (const it of items) {
-      if (it.price === undefined) continue;
+      const priceValue = normalizeMoneyInput(it.price);
+      const promoPriceValue = normalizeMoneyInput(it.promoPrice);
+      if (priceValue === null || priceValue <= 0) continue;
 
       const created = await prisma.supplierItem.create({
         data: {
@@ -543,16 +563,16 @@ router.post("/supplier-items/bulk", async (req, res) => {
           itemName,
           variantName: it.variantName || null,
           unit,
-          currentPrice: it.price,
-          currentPromoPrice: it.promoPrice || null,
+          currentPrice: priceValue,
+          currentPromoPrice: promoPriceValue,
         },
       });
 
       await prisma.supplierPriceHistory.create({
         data: {
           supplierItemId: created.id,
-          price: it.price,
-          promoPrice: it.promoPrice || null,
+          price: priceValue,
+          promoPrice: promoPriceValue,
           effectiveDate: new Date(),
         },
       });
@@ -571,17 +591,62 @@ router.post("/supplier-items/bulk", async (req, res) => {
 });
 /**
  * PUT /api/finance/supplier-items/:id
- * Update data non-harga (itemName, unit) — harga TIDAK diubah di sini
+ * Update data item supplier (nama, unit, kategori, harga)
  */
 router.put("/supplier-items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { itemName, unit } = req.body;
+    const { itemName, unit, kategori, price, promoPrice } = req.body;
 
-    const updated = await prisma.supplierItem.update({
+    const current = await prisma.supplierItem.findUnique({
       where: { id },
-      data: { itemName, unit },
+      select: { id: true, currentPrice: true, currentPromoPrice: true },
     });
+    if (!current) {
+      return res.status(404).json({ error: "Item supplier tidak ditemukan" });
+    }
+
+    const hasPriceInPayload = price !== undefined;
+    const priceValue = hasPriceInPayload ? normalizeMoneyInput(price) : null;
+    if (hasPriceInPayload && (priceValue === null || priceValue <= 0)) {
+      return res.status(400).json({ error: "Harga item harus lebih dari 0" });
+    }
+    const promoPriceValue = promoPrice !== undefined ? normalizeMoneyInput(promoPrice) : undefined;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const saved = await tx.supplierItem.update({
+        where: { id },
+        data: {
+          ...(itemName !== undefined ? { itemName } : {}),
+          ...(unit !== undefined ? { unit } : {}),
+          ...(kategori !== undefined ? { kategori: kategori || null } : {}),
+          ...(hasPriceInPayload ? { currentPrice: priceValue } : {}),
+          ...(promoPrice !== undefined ? { currentPromoPrice: promoPriceValue } : {}),
+        },
+      });
+
+      const isPriceChanged = hasPriceInPayload && Number(priceValue) !== Number(current.currentPrice || 0);
+      const isPromoChanged =
+        promoPrice !== undefined &&
+        Number(promoPriceValue || 0) !== Number(current.currentPromoPrice || 0);
+
+      if (isPriceChanged || isPromoChanged) {
+        await tx.supplierPriceHistory.create({
+          data: {
+            supplierItemId: id,
+            price: isPriceChanged ? priceValue : Number(current.currentPrice || 0),
+            promoPrice:
+              promoPrice !== undefined
+                ? promoPriceValue
+                : Number(current.currentPromoPrice || 0) || null,
+            effectiveDate: new Date(),
+          },
+        });
+      }
+
+      return saved;
+    });
+
     res.json(updated);
   } catch (error) {
     console.error("Update Supplier Item Error:", error);
@@ -601,22 +666,25 @@ router.patch("/supplier-items/:id/price", async (req, res) => {
     const { id } = req.params;
     const { price, promoPrice, effectiveDate } = req.body;
 
-    if (price === undefined) {
-      return res.status(400).json({ error: "Harga wajib diisi" });
+    const priceValue = normalizeMoneyInput(price);
+    const promoPriceValue = normalizeMoneyInput(promoPrice);
+
+    if (priceValue === null || priceValue <= 0) {
+      return res.status(400).json({ error: "Harga wajib diisi dan harus > 0" });
     }
 
     const [, updated] = await prisma.$transaction([
       prisma.supplierPriceHistory.create({
         data: {
           supplierItemId: id,
-          price,
-          promoPrice,
+          price: priceValue,
+          promoPrice: promoPriceValue,
           effectiveDate: effectiveDate ? new Date(effectiveDate) : new Date(),
         },
       }),
       prisma.supplierItem.update({
         where: { id },
-        data: { currentPrice: price, currentPromoPrice: promoPrice },
+        data: { currentPrice: priceValue, currentPromoPrice: promoPriceValue },
       }),
     ]);
 

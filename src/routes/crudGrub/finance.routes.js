@@ -42,6 +42,19 @@ async function syncStatusPenerimaan(materialRequestId) {
   }
 }
 
+const toQty2 = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+};
+
+const sanitizeMaterialRequestId = (value) => {
+  if (!value || value === "" || value === "null" || value === "undefined") return null;
+  const str = String(value);
+  if (str.startsWith("php_")) return null;
+  return str;
+};
+
 // =====================================================================
 // FASE 1: PERMINTAAN PEMBELIAN (DARI RAB)
 // =====================================================================
@@ -89,6 +102,7 @@ router.get("/material-requests", async (req, res) => {
               mrItemId: item.id,
               poItemId: poItem.id, // 👇 ID ini yang dipake Lapangan buat update
 
+              rapVolume: item.estimatedVolume, // 🔥 Volume RAP asli yang tidak berubah
               estimatedVolume: qtyDiToko, // Di UI baris ini, targetnya adalah qty PO
               orderedVolume: qtyDiToko,
 
@@ -120,6 +134,7 @@ router.get("/material-requests", async (req, res) => {
             id: `${item.id}_sisa`,
             mrItemId: item.id,
             poItemId: null, // Baris sisa ga punya PO, ga bisa diupdate lapangan
+            rapVolume: item.estimatedVolume, // 🔥 Volume RAP asli yang tidak berubah
             estimatedVolume: belumDipesan,
             orderedVolume: 0,
 
@@ -207,6 +222,7 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
               id: `${item.id}_${poItem.id}`,
               mrItemId: item.id,
               poItemId: poItem.id,
+              rapVolume: item.estimatedVolume, // 🔥 Volume RAP asli yang tidak berubah
               estimatedVolume: qtyDiToko,
               orderedVolume: qtyDiToko,
               tanggalOnsite: poItem.tanggalOnsite,
@@ -234,6 +250,7 @@ router.get("/projects/:projectId/material-requests", async (req, res) => {
             id: `${item.id}_sisa`,
             mrItemId: item.id,
             poItemId: null,
+            rapVolume: item.estimatedVolume, // 🔥 Volume RAP asli yang tidak berubah
             estimatedVolume: belumDipesan,
             orderedVolume: 0,
             tanggalOnsite: null,
@@ -392,9 +409,29 @@ router.post("/po", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Minimal 1 item PO harus diisi" });
     }
 
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      materialRequestId: sanitizeMaterialRequestId(item.materialRequestId),
+      qty: toQty2(item.qty),
+    }));
+
+    if (normalizedItems.some((item) => Number(item.qty || 0) <= 0)) {
+      return res.status(400).json({ error: "Qty item PO harus lebih dari 0 (maksimal 2 desimal)." });
+    }
+
+    const mrIds = normalizedItems
+      .map((item) => item.materialRequestId)
+      .filter(Boolean);
+    const duplicateMrIds = mrIds.filter((id, idx) => mrIds.indexOf(id) !== idx);
+    if (duplicateMrIds.length > 0) {
+      return res.status(400).json({
+        error: "Terdapat item MR duplikat dalam satu PO. Pilih tiap item MR hanya sekali.",
+      });
+    }
+
     // Kumpulkan warning kalau ada item yang melebihi estimasi
     const qtyWarnings = [];
-    for (const item of items) {
+    for (const item of normalizedItems) {
       if (!item.materialRequestId) continue;
       const mrItem = await prisma.materialRequestItem.findUnique({
         where: { id: item.materialRequestId },
@@ -407,25 +444,17 @@ router.post("/po", verifyToken, async (req, res) => {
     }
 
     const newPO = await prisma.$transaction(async (tx) => {
-      // 0. Sanitasi materialRequestId — filter ID yang tidak valid
+      // 0. Validasi materialRequestId — hanya ID MR yang benar-benar ada yang dipakai
       const validMrIds = new Set();
-      for (const item of items) {
-        let mrId = item.materialRequestId;
-        if (!mrId || mrId === "" || mrId === "null" || mrId === "undefined" || String(mrId).startsWith("php_")) {
-          item.materialRequestId = null;
-          continue;
-        }
-        // Cek apakah ID benar-benar ada di database
+      for (const item of normalizedItems) {
+        const mrId = item.materialRequestId;
+        if (!mrId) continue;
         const exists = await tx.materialRequestItem.findUnique({ where: { id: mrId }, select: { id: true } });
-        if (!exists) {
-          item.materialRequestId = null; // ID tidak valid, set null
-        } else {
-          validMrIds.add(mrId);
-        }
+        if (exists) validMrIds.add(mrId);
       }
 
       // Hitung ulang subTotal & grandTotal dari items jika tidak valid
-      const calculatedSubTotal = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
+      const calculatedSubTotal = normalizedItems.reduce((sum, item) => sum + Number(item.total || 0), 0);
       const finalSubTotal = Number(subTotal || 0) > 0 ? Number(subTotal || 0) : calculatedSubTotal;
       const finalGrandTotal = Number(grandTotal || 0) > 0 ? Number(grandTotal || 0) : finalSubTotal;
 
@@ -451,27 +480,17 @@ router.post("/po", verifyToken, async (req, res) => {
           taxNominal: Number(taxNominal || 0),
           grandTotal: finalGrandTotal,
           items: {
-            create: items.map((item) => {
-              // 🔥 JURUS PENCUCIAN ID:
-              // Kalau ID dari frontend kosong, string kosong, "null", "undefined",
-              // atau berupa prefix "php_" (ID buatan frontend untuk habis pakai), paksa jadi null!
-              let mrId = item.materialRequestId;
-              if (
-                !mrId ||
-                mrId === "" ||
-                mrId === "null" ||
-                mrId === "undefined" ||
-                String(mrId).startsWith("php_")
-              ) {
-                mrId = null;
-              }
+            create: normalizedItems.map((item) => {
+              const mrId = item.materialRequestId && validMrIds.has(item.materialRequestId)
+                ? item.materialRequestId
+                : null;
 
               return {
                 materialRequestId: mrId, // <-- Pakai ID yang sudah dicuci
                 rabItemId: !item.rabItemId || item.rabItemId === "null" || item.rabItemId === "undefined" || item.rabItemId === "" ? null : item.rabItemId,
                 description: item.description || "Tanpa Deskripsi",
                 description2: item.description2 || null,
-                qty: Number(item.qty || 0),
+                qty: toQty2(item.qty || 0),
                 unit: item.unit || "-",
                 unitPrice: Number(item.unitPrice || 0),
                 disc1Percent: Number(item.disc1Percent || 0),
@@ -502,24 +521,25 @@ router.post("/po", verifyToken, async (req, res) => {
         include: { items: true },
       });
 
-      // 2. SIHIR OTOMATIS: Update Volume & Status di RAB — DINONAKTIFKAN
-      //    PO melebihi est volume hanya warning, tidak boleh mengubah RAB.
-      //    Penerimaan barang (receive) tetap update orderedVolume/receivedVolume.
-      //
-      // for (const item of items) {
-      //   if (!item.materialRequestId) continue;
-      //   const mrItem = await tx.materialRequestItem.findUnique({
-      //     where: { id: item.materialRequestId },
-      //   });
-      //   if (mrItem) {
-      //     const newOrderedVolume =
-      //       (mrItem.orderedVolume || 0) + Number(item.qty);
-      //     await tx.materialRequestItem.update({
-      //       where: { id: item.materialRequestId },
-      //       data: { orderedVolume: newOrderedVolume },
-      //     });
-      //   }
-      // }
+      // 2. Sinkron orderedVolume MR agar item yang sudah dipilih PO
+      //    tidak bisa dipilih lagi saat susun PO berikutnya.
+      //    Over volume tetap diizinkan (hanya warning), jadi tidak dibatasi di sini.
+      for (const item of normalizedItems) {
+        const mrId = item.materialRequestId;
+        if (!mrId || !validMrIds.has(mrId)) continue;
+
+        const mrItem = await tx.materialRequestItem.findUnique({
+          where: { id: mrId },
+          select: { orderedVolume: true },
+        });
+        if (!mrItem) continue;
+
+        const newOrderedVolume = (mrItem.orderedVolume || 0) + Number(item.qty || 0);
+        await tx.materialRequestItem.update({
+          where: { id: mrId },
+          data: { orderedVolume: newOrderedVolume },
+        });
+      }
 
       // 3. Tautkan PO HABIS_PAKAI ke permintaan lapangan (kalau ada)
       if (permintaanHabisPakaiId && (kategoriPO || "MATERIAL") === "HABIS_PAKAI") {
@@ -1167,6 +1187,28 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "Minimal 1 item PO harus diisi" });
     }
 
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      materialRequestId: sanitizeMaterialRequestId(item.materialRequestId),
+      qty: toQty2(item.qty),
+    }));
+
+    if (normalizedItems.some((item) => Number(item.qty || 0) <= 0)) {
+      return res.status(400).json({ error: "Qty item PO harus lebih dari 0 (maksimal 2 desimal)." });
+    }
+
+    const mrIds = normalizedItems
+      .map((item) => item.materialRequestId)
+      .filter(Boolean);
+    const duplicateMrIds = mrIds.filter((id, idx) => mrIds.indexOf(id) !== idx);
+    if (duplicateMrIds.length > 0) {
+      return res.status(400).json({
+        error: "Terdapat item MR duplikat dalam satu PO. Pilih tiap item MR hanya sekali.",
+      });
+    }
+
+    const qtyWarnings = [];
+
     const updatedPO = await prisma.$transaction(async (tx) => {
       const oldPO = await tx.purchaseOrder.findUnique({
         where: { id: req.params.id },
@@ -1175,8 +1217,17 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       if (!oldPO) throw new Error("PO tidak ditemukan");
 
       // 2. ROLLBACK: kurangi volume RAB sesuai item lama
+      // Hanya rollback item MR yang masih ada di payload update;
+      // item MR yang dihapus dari PO sengaja tidak di-rollback agar
+      // tetap tidak muncul lagi di picker PO (sesuai alur bisnis saat ini).
+      const incomingMrIds = new Set(
+        normalizedItems
+          .map((it) => it.materialRequestId)
+          .filter(Boolean),
+      );
+
       for (const oldItem of oldPO.items) {
-        if (!oldItem.materialRequestId) continue;
+        if (!oldItem.materialRequestId || !incomingMrIds.has(oldItem.materialRequestId)) continue;
         const mrItem = await tx.materialRequestItem.findUnique({
           where: { id: oldItem.materialRequestId },
         });
@@ -1189,16 +1240,18 @@ router.put("/po/:id", verifyToken, async (req, res) => {
         });
       }
 
-      for (const item of items) {
+      for (const item of normalizedItems) {
         if (!item.materialRequestId) continue;
         const mrItem = await tx.materialRequestItem.findUnique({
           where: { id: item.materialRequestId },
         });
-        if (!mrItem) continue;
+        if (!mrItem) {
+          throw new Error(`Material request item tidak ditemukan (${item.materialRequestId})`);
+        }
         const sisa = mrItem.estimatedVolume - (mrItem.receivedVolume || 0);
         if (Number(item.qty) > sisa) {
-          throw new Error(
-            `Qty untuk "${mrItem.itemName}" melebihi sisa kebutuhan (${sisa})`,
+          qtyWarnings.push(
+            `"${mrItem.itemName}" melebihi sisa kebutuhan (${Number(item.qty).toFixed(2)} > ${Number(sisa || 0).toFixed(2)})`,
           );
         }
       }
@@ -1233,11 +1286,11 @@ router.put("/po/:id", verifyToken, async (req, res) => {
           rejectedAt: oldPO.status === "REJECTED" ? null : undefined,
           rejectedById: oldPO.status === "REJECTED" ? null : undefined,
           items: {
-            create: items.map((item) => ({
+            create: normalizedItems.map((item) => ({
               materialRequestId: item.materialRequestId,
               description: item.description,
               description2: item.description2 || null,
-              qty: Number(item.qty),
+              qty: toQty2(item.qty),
               unit: item.unit,
               unitPrice: Number(item.unitPrice),
               disc1Percent: Number(item.disc1Percent || 0),
@@ -1252,12 +1305,14 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       });
 
       // 5. REAPPLY: tambah volume RAB sesuai item baru + recalc status
-      for (const item of items) {
+      for (const item of normalizedItems) {
         if (!item.materialRequestId) continue;
         const mrItem = await tx.materialRequestItem.findUnique({
           where: { id: item.materialRequestId },
         });
-        if (!mrItem) continue;
+        if (!mrItem) {
+          throw new Error(`Material request item tidak ditemukan (${item.materialRequestId})`);
+        }
 
         const newOrderedVolume = (mrItem.orderedVolume || 0) + Number(item.qty);
 
@@ -1270,7 +1325,11 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       return po;
     });
 
-    res.json({ message: "PO berhasil diupdate!", data: updatedPO });
+    res.json({
+      message: "PO berhasil diupdate!",
+      data: updatedPO,
+      warnings: qtyWarnings.length ? qtyWarnings : undefined,
+    });
   } catch (error) {
     console.error("Update PO Error:", error);
     if (error.message === "PO tidak ditemukan") {
@@ -1280,6 +1339,9 @@ router.put("/po/:id", verifyToken, async (req, res) => {
       return res.status(409).json({ error: "Nomor PO sudah dipakai" });
     }
     if (error.message?.includes("melebihi sisa kebutuhan")) {
+      return res.status(400).json({ error: error.message });
+    }
+    if (error.message?.includes("Material request item tidak ditemukan")) {
       return res.status(400).json({ error: error.message });
     }
     res.status(500).json({ error: "Gagal update PO." });
