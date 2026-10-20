@@ -11,14 +11,44 @@
 
 DROP TRIGGER IF EXISTS "Project_bv_rab_approval_lock" ON "Project";
 
-CREATE TRIGGER "Project_bv_rab_approval_lock"
-BEFORE UPDATE OF "hspkPeriod", "discipline", "interiorGrade", "sipilGrade"
+DO $$
+DECLARE
+  cols TEXT[];
+  trigger_columns TEXT;
+  when_clause TEXT;
+BEGIN
+  SELECT array_agg(col)
+  INTO cols
+  FROM unnest(ARRAY['hspkPeriod', 'discipline', 'interiorGrade', 'sipilGrade']) AS col
+  WHERE EXISTS (
+    SELECT 1
+    FROM information_schema.columns c
+    WHERE c.table_schema = 'public'
+      AND c.table_name = 'Project'
+      AND c.column_name = col
+  );
+
+  IF cols IS NULL OR array_length(cols, 1) = 0 THEN
+    cols := ARRAY['updatedAt'];
+  END IF;
+
+  SELECT string_agg(format('"%s"', c), ', ')
+  INTO trigger_columns
+  FROM unnest(cols) AS c;
+
+  SELECT string_agg(format('OLD."%1$s" IS DISTINCT FROM NEW."%1$s"', c), ' OR ')
+  INTO when_clause
+  FROM unnest(cols) AS c;
+
+  EXECUTE format(
+    'CREATE TRIGGER "Project_bv_rab_approval_lock"
+BEFORE UPDATE OF %s
 ON "Project"
 FOR EACH ROW
-WHEN (
-  OLD."hspkPeriod"      IS DISTINCT FROM NEW."hspkPeriod"
-  OR OLD."discipline"   IS DISTINCT FROM NEW."discipline"
-  OR OLD."interiorGrade" IS DISTINCT FROM NEW."interiorGrade"
-  OR OLD."sipilGrade"   IS DISTINCT FROM NEW."sipilGrade"
-)
-EXECUTE FUNCTION enforce_bv_rab_approval_lock();
+WHEN (%s)
+EXECUTE FUNCTION enforce_bv_rab_approval_lock();',
+    trigger_columns,
+    when_clause
+  );
+END
+$$;

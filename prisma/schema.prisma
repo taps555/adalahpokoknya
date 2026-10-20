@@ -93,18 +93,29 @@ enum SpkTermKind {
 }
 
 model User {
-  id                  String                 @id @default(cuid())
-  username            String                 @unique // atau email
-  password            String // password yang sudah di-hash
-  name                String // nama lengkap pegawai
-  role                Role                   @default(PERENCANA)
-  approvedPOs         PurchaseOrder[]        @relation("ApprovedByUser")
-  verifiedPOs         PurchaseOrder[]        @relation("VerifiedByUser")
-  rejectedPOs         PurchaseOrder[]        @relation("RejectedByUser")
-  approvedPengajuan   PengajuanPembayaran[]  @relation("ApprovedPengajuanByUser")
-  verifiedPengajuan   PengajuanPembayaran[]  @relation("VerifiedPengajuanByUser")
-  requestedHabisPakai PermintaanHabisPakai[] @relation("RequestedHabisPakai")
-  bukuBesarTransaksi  BukuBesarTransaksi[]   @relation("TransaksiBB")
+  id                             String                   @id @default(cuid())
+  username                       String                   @unique // atau email
+  password                       String // password yang sudah di-hash
+  name                           String // nama lengkap pegawai
+  role                           Role                     @default(PERENCANA)
+  approvedPOs                    PurchaseOrder[]          @relation("ApprovedByUser")
+  verifiedPOs                    PurchaseOrder[]          @relation("VerifiedByUser")
+  rejectedPOs                    PurchaseOrder[]          @relation("RejectedByUser")
+  approvedPengajuan              PengajuanPembayaran[]    @relation("ApprovedPengajuanByUser")
+  verifiedPengajuan              PengajuanPembayaran[]    @relation("VerifiedPengajuanByUser")
+  verifiedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("VerifiedInvoicePenjualanDesainByUser")
+  approvedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("ApprovedInvoicePenjualanDesainByUser")
+  postedInvoicePenjualanDesain   InvoicePenjualanDesain[] @relation("PostedInvoicePenjualanDesainByUser")
+  verifiedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("VerifiedInvoicePenjualanKlienByUser")
+  approvedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("ApprovedInvoicePenjualanKlienByUser")
+  postedInvoicePenjualanKlien    InvoicePenjualanKlien[]  @relation("PostedInvoicePenjualanKlienByUser")
+  verifiedInvoiceOperasional     InvoiceOperasional[]     @relation("VerifiedInvoiceOperasionalByUser")
+  approvedInvoiceOperasional     InvoiceOperasional[]     @relation("ApprovedInvoiceOperasionalByUser")
+  postedInvoiceOperasional       InvoiceOperasional[]     @relation("PostedInvoiceOperasionalByUser")
+  requestedHabisPakai            PermintaanHabisPakai[]   @relation("RequestedHabisPakai")
+  bukuBesarTransaksi             BukuBesarTransaksi[]     @relation("TransaksiBB")
+  createdTasks                   TaskItem[]               @relation("TaskCreator")
+  assignedTasks                  TaskItem[]               @relation("TaskAssignee")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -274,7 +285,8 @@ model Client {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  projects Project[]
+  projects              Project[]
+  invoicePenjualanKlien InvoicePenjualanKlien[]
 
   @@index([name])
 }
@@ -309,7 +321,7 @@ model Project {
 
   complaintReports ComplaintReport[]
 
-  kanbanBoard KanbanBoard?
+  tasks TaskItem[]
 
   // 👇 PAHAT BARIS INI DI SINI 👇
   basts  Bast[]
@@ -320,9 +332,12 @@ model Project {
   pairedWith      Project? @relation("ProjectPair") // <-- TAMBAH
 
   // Relasi ke Purchase Order (Fase 2)
-  purchaseOrders       PurchaseOrder[]
-  permintaanHabisPakai PermintaanHabisPakai[]
-  bukuBesarTransaksi   BukuBesarTransaksi[]
+  purchaseOrders         PurchaseOrder[]
+  permintaanHabisPakai   PermintaanHabisPakai[]
+  invoicePenjualanDesain InvoicePenjualanDesain[] @relation("ProjectInvoicePenjualanDesain")
+  invoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("ProjectInvoicePenjualanKlien")
+  invoiceOperasional     InvoiceOperasional[]     @relation("ProjectInvoiceOperasional")
+  bukuBesarTransaksi     BukuBesarTransaksi[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -349,27 +364,27 @@ model ProjectWorkCategory {
 }
 
 model RabItem {
-  id             String        @id @default(cuid())
-  projectId      String
-  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  workCategoryId String?
-  workCategory   WorkCategory? @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
+  id                String           @id @default(cuid())
+  projectId         String
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workCategoryId    String?
+  workCategory      WorkCategory?    @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
   workSubCategoryId String?
   workSubCategory   WorkSubCategory? @relation(fields: [workSubCategoryId], references: [id], onDelete: Restrict)
 
-  name            String
-  paymentUnit     String
-  category        String?
-  reference       String?
-  overheadPercent Decimal       @default(0) @db.Decimal(5, 2)
+  name               String
+  paymentUnit        String
+  category           String?
+  reference          String?
+  overheadPercent    Decimal       @default(0) @db.Decimal(5, 2)
   // OH dipecah tiga komponen. overheadPercent tetap = total ketiganya agar
   // pembaca lama dan data historis tidak berubah.
-  operationalPercent Decimal    @default(0) @db.Decimal(5, 2)
-  wastePercent       Decimal    @default(0) @db.Decimal(5, 2)
-  profitPercent      Decimal    @default(0) @db.Decimal(5, 2)
-  discipline      Discipline?
-  grade           String?
-  timeSchedule    TimeSchedule? // <-- TAMBAH
+  operationalPercent Decimal       @default(0) @db.Decimal(5, 2)
+  wastePercent       Decimal       @default(0) @db.Decimal(5, 2)
+  profitPercent      Decimal       @default(0) @db.Decimal(5, 2)
+  discipline         Discipline?
+  grade              String?
+  timeSchedule       TimeSchedule? // <-- TAMBAH
 
   volume Decimal @db.Decimal(14, 4)
 
@@ -457,15 +472,15 @@ model DisciplineGrade {
 }
 
 model BvItem {
-  id             String        @id @default(cuid())
-  projectId      String
-  project        Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  workCategoryId String?
-  workCategory   WorkCategory? @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
+  id                String           @id @default(cuid())
+  projectId         String
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workCategoryId    String?
+  workCategory      WorkCategory?    @relation(fields: [workCategoryId], references: [id], onDelete: SetNull)
   workSubCategoryId String?
   workSubCategory   WorkSubCategory? @relation(fields: [workSubCategoryId], references: [id], onDelete: Restrict)
-  groupId        String?
-  group          RabGroup?     @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groupId           String?
+  group             RabGroup?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
 
   parentBvItemId String?
   parentBvItem   BvItem?  @relation("BvItemChildren", fields: [parentBvItemId], references: [id], onDelete: Cascade)
@@ -738,6 +753,8 @@ model DesignQuotation {
   item2dVolume Decimal @db.Decimal(14, 4)
   item2dPrice  Decimal @db.Decimal(18, 2)
 
+  invoicePenjualanDesain InvoicePenjualanDesain[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -745,33 +762,34 @@ model DesignQuotation {
 }
 
 model SpkContract {
-  id                 String        @id @default(cuid())
-  projectId          String
-  project            Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
-  type               SpkType
-  status             SpkStatus     @default(DRAFT)
-  spkNumber          String?       @unique
-  sourceType         SpkSourceType @default(RAB)
-  sourceId           String
-  contractValue      Decimal       @db.Decimal(18, 2)
-  contractValueWords String        @db.Text
-  snapshot           Json
-  partyData          Json
-  workDurationDays   Int?
-  startDate          DateTime?
-  endDate            DateTime?
-  bankData           Json
-  notes              String?       @db.Text
-  retentionPercent   Decimal       @default(0) @db.Decimal(5, 2)
-  retentionAmount    Decimal       @default(0) @db.Decimal(18, 2)
-  issuedAt           DateTime?
-  issuedById         String?
-  signedAt           DateTime?
-  signedDocumentUrl  String?
-  cancellationReason String?       @db.Text
-  terms              SpkTerm[]
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  id                    String                  @id @default(cuid())
+  projectId             String
+  project               Project                 @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  type                  SpkType
+  status                SpkStatus               @default(DRAFT)
+  spkNumber             String?                 @unique
+  sourceType            SpkSourceType           @default(RAB)
+  sourceId              String
+  contractValue         Decimal                 @db.Decimal(18, 2)
+  contractValueWords    String                  @db.Text
+  snapshot              Json
+  partyData             Json
+  workDurationDays      Int?
+  startDate             DateTime?
+  endDate               DateTime?
+  bankData              Json
+  notes                 String?                 @db.Text
+  retentionPercent      Decimal                 @default(0) @db.Decimal(5, 2)
+  retentionAmount       Decimal                 @default(0) @db.Decimal(18, 2)
+  issuedAt              DateTime?
+  issuedById            String?
+  signedAt              DateTime?
+  signedDocumentUrl     String?
+  cancellationReason    String?                 @db.Text
+  terms                 SpkTerm[]
+  invoicePenjualanKlien InvoicePenjualanKlien[]
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   @@index([projectId, status])
   @@index([type, status])
@@ -779,20 +797,21 @@ model SpkContract {
 }
 
 model SpkTerm {
-  id                 String               @id @default(cuid())
-  contractId         String
-  contract           SpkContract          @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  kind               SpkTermKind          @default(PAYMENT)
-  label              String
-  percent            Decimal              @db.Decimal(5, 2)
-  amount             Decimal              @db.Decimal(18, 2)
-  dueDescription     String?
-  milestone          String?
-  order              Int                  @default(0)
-  status             SpkTermPaymentStatus @default(PENDING)
-  financeReferenceId String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
+  id                    String                  @id @default(cuid())
+  contractId            String
+  contract              SpkContract             @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  kind                  SpkTermKind             @default(PAYMENT)
+  label                 String
+  percent               Decimal                 @db.Decimal(5, 2)
+  amount                Decimal                 @db.Decimal(18, 2)
+  dueDescription        String?
+  milestone             String?
+  order                 Int                     @default(0)
+  status                SpkTermPaymentStatus    @default(PENDING)
+  financeReferenceId    String?
+  invoicePenjualanKlien InvoicePenjualanKlien[]
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   @@index([contractId, order])
   @@index([status])
@@ -1482,44 +1501,191 @@ model InvoicePenagihan {
   @@index([poId])
 }
 
-// ==========================================
-// TABEL KANBAN (TRELLO CLONE)
-// ==========================================
+model InvoicePenjualanDesain {
+  id                String              @id @default(cuid())
+  projectId         String
+  project           Project             @relation("ProjectInvoicePenjualanDesain", fields: [projectId], references: [id], onDelete: Cascade)
+  designQuotationId String?
+  designQuotation   DesignQuotation?    @relation(fields: [designQuotationId], references: [id], onDelete: SetNull)
+  tanggal           DateTime
+  noInvoice         String              @unique
+  dpNominal         Float               @default(0)
+  jumlahTagihan     Float               @default(0)
+  jumlahDibayar     Float               @default(0)
+  sisaTagihan       Float               @default(0)
+  statusBayar       InvoiceBayarStatus  @default(UNPAID)
+  approvalStatus    ReturStatus         @default(PENDING)
+  rekeningBankId    String?
+  rekeningBank      MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
+  tipeRekeningId    String?
+  tipeRekening      MasterTipeRekening? @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
+  verifiedById      String?
+  verifiedBy        User?               @relation("VerifiedInvoicePenjualanDesainByUser", fields: [verifiedById], references: [id])
+  verifiedAt        DateTime?
+  approvedById      String?
+  approvedBy        User?               @relation("ApprovedInvoicePenjualanDesainByUser", fields: [approvedById], references: [id])
+  approvedAt        DateTime?
+  postedToGl        Boolean             @default(false)
+  postedAt          DateTime?
+  postedById        String?
+  postedBy          User?               @relation("PostedInvoicePenjualanDesainByUser", fields: [postedById], references: [id])
+  glTransaksiId     String?
+  glTransaksi       BukuBesarTransaksi? @relation("GlInvoicePenjualanDesain", fields: [glTransaksiId], references: [id], onDelete: SetNull)
+  keterangan        String?             @db.Text
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
-model KanbanBoard {
-  id        String       @id @default(cuid())
-  projectId String       @unique
-  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  lists     KanbanList[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  @@index([projectId])
+  @@index([designQuotationId])
+  @@index([approvalStatus])
+  @@index([statusBayar])
+  @@index([rekeningBankId])
+  @@index([tipeRekeningId])
+  @@index([verifiedById])
+  @@index([approvedById])
+  @@index([postedById])
 }
 
-model KanbanList {
-  id      String       @id @default(cuid())
-  boardId String
-  board   KanbanBoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  title   String
-  order   Int          @default(0)
-  tasks   KanbanTask[]
+model InvoicePenjualanKlien {
+  id             String              @id @default(cuid())
+  projectId      String
+  project        Project             @relation("ProjectInvoicePenjualanKlien", fields: [projectId], references: [id], onDelete: Cascade)
+  clientId       String?
+  client         Client?             @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  spkContractId  String?
+  spkContract    SpkContract?        @relation(fields: [spkContractId], references: [id], onDelete: SetNull)
+  spkTermId      String?
+  spkTerm        SpkTerm?            @relation(fields: [spkTermId], references: [id], onDelete: SetNull)
+  termLabel      String?
+  tanggal        DateTime
+  noInvoice      String              @unique
+  dpNominal      Float               @default(0)
+  jumlahTagihan  Float               @default(0)
+  jumlahDibayar  Float               @default(0)
+  sisaTagihan    Float               @default(0)
+  statusBayar    InvoiceBayarStatus  @default(UNPAID)
+  approvalStatus ReturStatus         @default(PENDING)
+  rekeningBankId String?
+  rekeningBank   MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
+  tipeRekeningId String?
+  tipeRekening   MasterTipeRekening? @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
+  verifiedById   String?
+  verifiedBy     User?               @relation("VerifiedInvoicePenjualanKlienByUser", fields: [verifiedById], references: [id])
+  verifiedAt     DateTime?
+  approvedById   String?
+  approvedBy     User?               @relation("ApprovedInvoicePenjualanKlienByUser", fields: [approvedById], references: [id])
+  approvedAt     DateTime?
+  postedToGl     Boolean             @default(false)
+  postedAt       DateTime?
+  postedById     String?
+  postedBy       User?               @relation("PostedInvoicePenjualanKlienByUser", fields: [postedById], references: [id])
+  glTransaksiId  String?
+  glTransaksi    BukuBesarTransaksi? @relation("GlInvoicePenjualanKlien", fields: [glTransaksiId], references: [id], onDelete: SetNull)
+  keterangan     String?             @db.Text
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  @@index([projectId])
+  @@index([clientId])
+  @@index([spkContractId])
+  @@index([spkTermId])
+  @@index([approvalStatus])
+  @@index([statusBayar])
+  @@index([rekeningBankId])
+  @@index([tipeRekeningId])
+  @@index([verifiedById])
+  @@index([approvedById])
+  @@index([postedById])
 }
 
-model KanbanTask {
-  id            String     @id @default(cuid())
-  listId        String
-  list          KanbanList @relation(fields: [listId], references: [id], onDelete: Cascade)
-  title         String
-  description   String?    @db.Text
-  dueDate       DateTime?
-  order         Int        @default(0)
-  googleEventId String? // ID dari Google Calendar
+model InvoiceOperasional {
+  id             String                  @id @default(cuid())
+  projectId      String
+  project        Project                 @relation("ProjectInvoiceOperasional", fields: [projectId], references: [id], onDelete: Cascade)
+  tanggal        DateTime
+  noInvoice      String                  @unique
+  jenisBiaya     String
+  jenisKas       JenisTransaksiBukuBesar @default(KELUAR)
+  dpNominal      Float                   @default(0)
+  jumlahTagihan  Float                   @default(0)
+  jumlahDibayar  Float                   @default(0)
+  sisaTagihan    Float                   @default(0)
+  statusBayar    InvoiceBayarStatus      @default(UNPAID)
+  approvalStatus ReturStatus             @default(PENDING)
+  rekeningBankId String?
+  rekeningBank   MasterRekeningBank?     @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
+  tipeRekeningId String?
+  tipeRekening   MasterTipeRekening?     @relation(fields: [tipeRekeningId], references: [id], onDelete: SetNull)
+  verifiedById   String?
+  verifiedBy     User?                   @relation("VerifiedInvoiceOperasionalByUser", fields: [verifiedById], references: [id])
+  verifiedAt     DateTime?
+  approvedById   String?
+  approvedBy     User?                   @relation("ApprovedInvoiceOperasionalByUser", fields: [approvedById], references: [id])
+  approvedAt     DateTime?
+  postedToGl     Boolean                 @default(false)
+  postedAt       DateTime?
+  postedById     String?
+  postedBy       User?                   @relation("PostedInvoiceOperasionalByUser", fields: [postedById], references: [id])
+  glTransaksiId  String?
+  glTransaksi    BukuBesarTransaksi?     @relation("GlInvoiceOperasional", fields: [glTransaksiId], references: [id], onDelete: SetNull)
+  keterangan     String?                 @db.Text
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([projectId])
+  @@index([approvalStatus])
+  @@index([statusBayar])
+  @@index([rekeningBankId])
+  @@index([tipeRekeningId])
+  @@index([verifiedById])
+  @@index([approvedById])
+  @@index([postedById])
+}
+
+// ==========================================
+// TABEL TASK & NOTES (TRELLO-LIKE)
+// ==========================================
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model TaskItem {
+  id          String       @id @default(cuid())
+  title       String
+  description String?      @db.Text
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  dueDate     DateTime?
+  order       Int          @default(0)
+
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  creatorId String
+  creator   User   @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+
+  assigneeId String?
+  assignee   User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  targetRole Role?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([status, order])
+  @@index([assigneeId])
+  @@index([targetRole])
+  @@index([projectId])
 }
 
 // ==========================================
@@ -1548,9 +1714,12 @@ model MasterTipeRekening {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  rekeningBanks       MasterRekeningBank[]
-  pembayaranSuppliers PembayaranSupplier[]
-  bukuBesarTransaksi  BukuBesarTransaksi[]
+  rekeningBanks            MasterRekeningBank[]
+  pembayaranSuppliers      PembayaranSupplier[]
+  bukuBesarTransaksi       BukuBesarTransaksi[]
+  invoicePenjualanDesains  InvoicePenjualanDesain[]
+  invoicePenjualanKliens   InvoicePenjualanKlien[]
+  invoiceOperasionals      InvoiceOperasional[]
 
   @@index([isActive])
 }
@@ -1568,8 +1737,11 @@ model MasterRekeningBank {
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 
-  pembayaranSuppliers PembayaranSupplier[]
-  bukuBesarTransaksi  BukuBesarTransaksi[]
+  pembayaranSuppliers     PembayaranSupplier[]
+  bukuBesarTransaksi      BukuBesarTransaksi[]
+  invoicePenjualanDesains InvoicePenjualanDesain[]
+  invoicePenjualanKliens  InvoicePenjualanKlien[]
+  invoiceOperasionals     InvoiceOperasional[]
 
   @@index([isActive])
   @@index([isDefault])
@@ -1615,12 +1787,15 @@ model BukuBesarTransaksi {
   sumberTransaksi String?             @default("MANUAL") // MANUAL | PEMBAYARAN_SUPPLIER | SISTEM
 
   // Relasi opsional ke PO / pembayaran / invoice
-  poId          String?
-  purchaseOrder PurchaseOrder?       @relation("TransaksiKePO", fields: [poId], references: [id], onDelete: SetNull)
-  pengajuanId   String?
-  pengajuan     PengajuanPembayaran? @relation("TransaksiKePengajuan", fields: [pengajuanId], references: [id], onDelete: SetNull)
-  pembayaranId  String?
-  pembayaran    PembayaranSupplier?  @relation("TransaksiKePembayaran", fields: [pembayaranId], references: [id], onDelete: SetNull)
+  poId                   String?
+  purchaseOrder          PurchaseOrder?           @relation("TransaksiKePO", fields: [poId], references: [id], onDelete: SetNull)
+  pengajuanId            String?
+  pengajuan              PengajuanPembayaran?     @relation("TransaksiKePengajuan", fields: [pengajuanId], references: [id], onDelete: SetNull)
+  pembayaranId           String?
+  pembayaran             PembayaranSupplier?      @relation("TransaksiKePembayaran", fields: [pembayaranId], references: [id], onDelete: SetNull)
+  invoicePenjualanDesain InvoicePenjualanDesain[] @relation("GlInvoicePenjualanDesain")
+  invoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("GlInvoicePenjualanKlien")
+  invoiceOperasional     InvoiceOperasional[]     @relation("GlInvoiceOperasional")
 
   createdById String?
   createdBy   User?   @relation("TransaksiBB", fields: [createdById], references: [id])

@@ -67,10 +67,34 @@ $$;
 
 -- Project pricing inputs feed generated BV/RAB values.
 DROP TRIGGER IF EXISTS "Project_bv_rab_approval_lock" ON "Project";
-CREATE TRIGGER "Project_bv_rab_approval_lock"
-BEFORE UPDATE OF "hspkPeriod", "discipline", "interiorGrade", "sipilGrade"
+DO $$
+DECLARE
+  trigger_columns TEXT;
+BEGIN
+  SELECT string_agg(format('"%s"', col), ', ')
+  INTO trigger_columns
+  FROM unnest(ARRAY['hspkPeriod', 'discipline', 'interiorGrade', 'sipilGrade']) AS col
+  WHERE EXISTS (
+    SELECT 1
+    FROM information_schema.columns c
+    WHERE c.table_schema = 'public'
+      AND c.table_name = 'Project'
+      AND c.column_name = col
+  );
+
+  IF trigger_columns IS NULL OR trigger_columns = '' THEN
+    trigger_columns := '"updatedAt"';
+  END IF;
+
+  EXECUTE format(
+    'CREATE TRIGGER "Project_bv_rab_approval_lock"
+BEFORE UPDATE OF %s
 ON "Project"
-FOR EACH ROW EXECUTE FUNCTION enforce_bv_rab_approval_lock();
+FOR EACH ROW EXECUTE FUNCTION enforce_bv_rab_approval_lock();',
+    trigger_columns
+  );
+END
+$$;
 
 -- Category configuration affects project-scoped BV/RAB categorization/pricing.
 DROP TRIGGER IF EXISTS "ProjectWorkCategory_approval_lock" ON "ProjectWorkCategory";

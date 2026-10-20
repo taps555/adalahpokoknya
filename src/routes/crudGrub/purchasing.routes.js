@@ -2,6 +2,9 @@
 
 const express = require("express");
 const router = express.Router();
+const path = require("path");
+const fs = require("fs");
+const PDFDocument = require("pdfkit");
 const prisma = require("../../lib/prisma");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 const { buildNoPembayaran } = require("../../lib/paymentNumber");
@@ -845,13 +848,87 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
 router.put(
   "/pengajuan-bayar/:id/verify",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
         where: { id: req.params.id },
       });
-      return res.status(400).json({ error: "Pengajuan bayar tidak perlu verifikasi Finance. Langsung approve atasan." });
+      if (!existing) {
+        return res
+          .status(404)
+          .json({ error: "Pengajuan pembayaran tidak ditemukan" });
+      }
+      if (existing.status === "APPROVED") {
+        return res
+          .status(400)
+          .json({ error: "Pengajuan sudah di-approve atasan, tidak perlu verifikasi lagi." });
+      }
+      if (existing.status === "APPROVED_FINANCE") {
+        return res
+          .status(400)
+          .json({ error: "Pengajuan sudah diverifikasi Finance. Menunggu approval atasan." });
+      }
+      if (existing.status === "REJECTED") {
+        return res
+          .status(400)
+          .json({ error: "Pengajuan sudah ditolak, batalkan reject dulu." });
+      }
+      if (existing.status !== "PENDING") {
+        return res
+          .status(400)
+          .json({ error: `Status pengajuan tidak valid untuk verifikasi (${existing.status})` });
+      }
+
+      const pengajuan = await prisma.pengajuanPembayaran.update({
+        where: { id: req.params.id },
+        data: {
+          status: "APPROVED_FINANCE",
+          verifiedById: req.user?.userId || null,
+          verifiedAt: new Date(),
+          rejectReason: null,
+        },
+      });
+
+      // Sinkronkan status approval di pembayaranSupplier terkait (jika sudah ada)
+      try {
+        const list = await prisma.pembayaranSupplier.findMany({
+          where: {
+            OR: [
+              { pengajuanId: existing.id },
+              ...(existing.poId ? [{ poId: existing.poId }] : []),
+            ],
+          },
+        });
+        for (const item of list) {
+          const rawPh = item.paymentHistory;
+          let meta = {};
+          let entries = [];
+          if (Array.isArray(rawPh)) {
+            entries = rawPh;
+          } else if (rawPh && typeof rawPh === "object") {
+            meta = { ...rawPh };
+            entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
+          }
+          meta.entries = entries;
+          meta.approvalStatus = "APPROVED_FINANCE";
+          meta.financeVerifiedAt = new Date();
+          meta.financeVerifiedBy =
+            req.user?.name || req.user?.username || req.user?.userId || "Finance";
+          meta.rejectReason = null;
+          await prisma.pembayaranSupplier.update({
+            where: { id: item.id },
+            data: { paymentHistory: meta },
+          });
+        }
+      } catch (syncErr) {
+        console.error("Sync pembayaran to APPROVED_FINANCE error:", syncErr);
+      }
+
+      return res.json({
+        message: "Pengajuan bayar diverifikasi Finance",
+        data: pengajuan,
+      });
     } catch (error) {
       console.error("Verify Pengajuan Error:", error);
       if (error.code === "P2025") {
@@ -865,9 +942,10 @@ router.put(
 );
 
 /**
- * Sinkronkan status approval pembayaranSupplier saat Atasan menyetujui pengajuan bayar
+ * Sinkronkan status approval pembayaranSupplier setelah pengajuan bayar disetujui Atasan.
+ * Hasil sinkron = draft PENDING (belum masuk approval Finance sampai user edit nominal bayar).
  */
-const syncPembayaranToApprovedAtasan = async (pengajuanId, poId, user) => {
+const syncPembayaranToPending = async (pengajuanId, poId) => {
   try {
     const list = await prisma.pembayaranSupplier.findMany({
       where: {
@@ -889,10 +967,17 @@ const syncPembayaranToApprovedAtasan = async (pengajuanId, poId, user) => {
         entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
       }
 
+      // Jangan rollback data yang sudah diposting ke kas/bank
+      if (Boolean(meta.isPostedKasBank)) {
+        continue;
+      }
+
       meta.entries = entries;
-      meta.approvalStatus = "APPROVED_ATASAN";
-      meta.atasanApprovedAt = new Date();
-      meta.atasanApprovedBy = user?.name || user?.username || user?.userId || "Atasan";
+      meta.approvalStatus = "PENDING";
+      meta.financeApprovedAt = null;
+      meta.financeApprovedBy = null;
+      meta.atasanApprovedAt = null;
+      meta.atasanApprovedBy = null;
       meta.rejectReason = null;
 
       await prisma.pembayaranSupplier.update({
@@ -901,7 +986,7 @@ const syncPembayaranToApprovedAtasan = async (pengajuanId, poId, user) => {
       });
     }
   } catch (err) {
-    console.error("Sync pembayaran to approved atasan error:", err);
+    console.error("Sync pembayaran to pending error:", err);
   }
 };
 
@@ -914,7 +999,7 @@ const syncPembayaranToApprovedAtasan = async (pengajuanId, poId, user) => {
 router.put(
   "/pengajuan-bayar/:id/approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -931,6 +1016,12 @@ router.put(
         return res
           .status(400)
           .json({ error: "Pengajuan sudah ditolak, batalkan reject dulu." });
+      }
+      if (existing.status !== "APPROVED_FINANCE") {
+        return res.status(400).json({
+          error:
+            "Pengajuan belum diverifikasi Finance. Minta Finance verifikasi di halaman Pembayaran Finance terlebih dahulu.",
+        });
       }
 
     const pengajuan = await prisma.pengajuanPembayaran.update({
@@ -994,10 +1085,12 @@ router.put(
               noPembayaran: poForPayment.kategoriPO === "JASA" ? null : undefined,
               paymentHistory: {
                 entries: [],
-                approvalStatus: "APPROVED_ATASAN",
+                approvalStatus: "PENDING",
                 isPostedKasBank: false,
-                atasanApprovedAt: new Date(),
-                atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+                financeApprovedAt: null,
+                financeApprovedBy: null,
+                atasanApprovedAt: null,
+                atasanApprovedBy: null,
               },
             },
           });
@@ -1016,8 +1109,8 @@ router.put(
         }
       }
 
-      // Sinkronkan status pembayaranSupplier yang sudah ada ke APPROVED_ATASAN
-      await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
+      // Sinkronkan status pembayaranSupplier terkait kembali ke draft PENDING
+      await syncPembayaranToPending(existing.id, existing.poId);
     }
 
       res.json({ message: "Pengajuan bayar di-approve", data: pengajuan });
@@ -1106,12 +1199,15 @@ router.put(
         },
       });
 
-      // Kalau pengajuan ditolak, PO terkait kembali ke MENUNGGU_ATASAN agar bisa diajukan ulang
+      // Kalau pengajuan ditolak, PO terkait ditandai REJECTED agar bisa diedit ulang oleh Purchasing
       if (existing.poId) {
         await prisma.purchaseOrder.update({
           where: { id: existing.poId },
           data: {
-            status: "MENUNGGU_ATASAN",
+            status: "REJECTED",
+            rejectReason: String(reason).trim(),
+            rejectedAt: new Date(),
+            rejectedById: req.user?.userId || null,
             approvedById: null,
             approvedAt: null,
           },
@@ -1138,7 +1234,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/item-decision",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { decisions = [], generalRejectReason = "" } = req.body;
@@ -1319,10 +1415,12 @@ router.put(
               noPembayaran: po?.kategoriPO === "JASA" ? null : undefined,
               paymentHistory: {
                 entries: [],
-                approvalStatus: "APPROVED_ATASAN",
+                approvalStatus: "PENDING",
                 isPostedKasBank: false,
-                atasanApprovedAt: new Date(),
-                atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+                financeApprovedAt: null,
+                financeApprovedBy: null,
+                atasanApprovedAt: null,
+                atasanApprovedBy: null,
               },
             },
           });
@@ -1354,7 +1452,7 @@ router.put(
         }
 
         // Sinkronkan approval pembayaranSupplier terkait
-        await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
+        await syncPembayaranToPending(existing.id, existing.poId);
       }
 
       res.json({
@@ -1379,7 +1477,7 @@ router.put(
 router.post(
   "/pengajuan-bayar/bulk-approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [] } = req.body;
@@ -1396,6 +1494,8 @@ router.post(
           include: { purchaseOrder: { include: { items: true } } },
         });
         if (!existing || existing.status === "APPROVED") continue;
+        // ENFORCE two-step approval: hanya proses yg sudah diverifikasi Finance
+        if (existing.status !== "APPROVED_FINANCE") continue;
 
         const po = existing.purchaseOrder;
         const totalTagihan = Number(
@@ -1461,10 +1561,12 @@ router.post(
                 noPembayaran: po.kategoriPO === "JASA" ? null : undefined,
                 paymentHistory: {
                   entries: [],
-                  approvalStatus: "APPROVED_ATASAN",
+                  approvalStatus: "PENDING",
                   isPostedKasBank: false,
-                  atasanApprovedAt: new Date(),
-                  atasanApprovedBy: req.user?.name || req.user?.username || "Atasan",
+                  financeApprovedAt: null,
+                  financeApprovedBy: null,
+                  atasanApprovedAt: null,
+                  atasanApprovedBy: null,
                 },
               },
             });
@@ -1483,7 +1585,7 @@ router.post(
           }
 
           // Sinkronkan approval pembayaranSupplier terkait
-          await syncPembayaranToApprovedAtasan(existing.id, existing.poId, req.user);
+          await syncPembayaranToPending(existing.id, existing.poId);
         }
         successCount++;
       }
@@ -1508,7 +1610,7 @@ router.post(
 router.post(
   "/pengajuan-bayar/bulk-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [], reason = "Ditolak oleh atasan" } = req.body;
@@ -1537,10 +1639,12 @@ router.post(
           await prisma.purchaseOrder.update({
             where: { id: existing.poId },
             data: {
-              status: "MENUNGGU_ATASAN",
+              status: "REJECTED",
               rejectReason: reason,
               rejectedAt: new Date(),
               rejectedById: req.user?.userId || null,
+              approvedById: null,
+              approvedAt: null,
             },
           });
         }
@@ -1562,6 +1666,14 @@ router.post(
 // 3. PEMBAYARAN SUPPLIER
 // =====================================================================
 
+const normalizePembayaranApprovalStatus = (status) => {
+  const s = String(status || "").toUpperCase();
+  if (!s || s === "MENUNGGU_FINANCE") return "PENDING";
+  if (s === "APPROVED_ATASAN") return "APPROVED";
+  if (["PENDING", "APPROVED_FINANCE", "APPROVED", "REJECTED"].includes(s)) return s;
+  return s;
+};
+
 const enrichPembayaranApproval = (pembayaran) => {
   if (!pembayaran) return null;
   const rawPh = pembayaran.paymentHistory;
@@ -1582,16 +1694,17 @@ const enrichPembayaranApproval = (pembayaran) => {
     ? Boolean(phMeta.isPostedKasBank)
     : Boolean(isOldPaid);
 
-  let approvalStatus = phMeta.approvalStatus;
+  let approvalStatus = normalizePembayaranApprovalStatus(phMeta.approvalStatus);
   if (!approvalStatus) {
     if (isPosted) {
-      approvalStatus = "APPROVED_ATASAN";
+      approvalStatus = "APPROVED";
     } else if (pembayaran.pengajuan?.status === "APPROVED") {
-      approvalStatus = "APPROVED_ATASAN";
+      // Pengajuan bayar sudah disetujui Atasan, tetapi pembayaran masih draft
+      approvalStatus = "PENDING";
     } else if (pembayaran.pengajuan?.status === "APPROVED_FINANCE") {
       approvalStatus = "APPROVED_FINANCE";
     } else {
-      approvalStatus = "MENUNGGU_FINANCE";
+      approvalStatus = "PENDING";
     }
   }
 
@@ -1846,9 +1959,11 @@ router.post("/pembayaran-supplier", verifyToken, async (req, res) => {
       });
     }
 
+    const initialApprovalStatus = "PENDING";
+
     const initialPaymentHistory = {
       entries: paymentHistoryEntries,
-      approvalStatus: "MENUNGGU_FINANCE",
+      approvalStatus: initialApprovalStatus,
       isPostedKasBank: false,
       financeApprovedAt: null,
       financeApprovedBy: null,
@@ -2076,18 +2191,18 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
 
     const sisaBayarBaru = Math.max(totalTagihan - totalTerbayarBaru, 0);
 
-    let autoStatus = "PENDING";
+    let autoStatus = "TEMPO";
     if (isJasaFlow) {
       if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "LUNAS";
       else if (totalTerbayarBaru > 0) autoStatus = "BON";
       else autoStatus = "BELUM_BAYAR";
     } else {
-      if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "PAID";
-      else if (totalTerbayarBaru > 0) autoStatus = "PARTIAL";
+      if (totalTagihan > 0 && totalTerbayarBaru >= totalTagihan) autoStatus = "LUNAS";
+      else autoStatus = "TEMPO";
     }
 
-    if (status && ["PENDING", "PARTIAL", "PAID", "BELUM_BAYAR", "BON", "LUNAS"].includes(status)) {
-      autoStatus = status;
+    if (status && ["PENDING", "PARTIAL", "PAID", "BELUM_BAYAR", "BON", "LUNAS", "TEMPO"].includes(status)) {
+      autoStatus = status === "PAID" ? "LUNAS" : status === "PARTIAL" ? "TEMPO" : status;
     }
 
     const nominalJurnal = Math.max(totalTerbayarBaru - existingTerbayar, 0);
@@ -2120,16 +2235,36 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
             ? (sisaBayarBaru <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
             : "PEMBAYARAN",
         keterangan: keterangan || null,
+        approvalStatus: "PENDING",
+        financeApprovedAt: null,
+        financeApprovedBy: null,
+        atasanApprovedAt: null,
+        atasanApprovedBy: null,
+        isPostedKasBank: false,
+        postedKasBankAt: null,
+        postedBy: null,
       });
     }
+
+    const currentApprovalStatus = normalizePembayaranApprovalStatus(existingMeta.approvalStatus || "PENDING");
+    const isNewAction = nominalJurnal > 0;
 
     const updatedPaymentHistory = {
       ...existingMeta,
       entries: existingEntries,
-      approvalStatus: existingMeta.isPostedKasBank
-        ? (existingMeta.approvalStatus || "APPROVED_ATASAN")
-        : (existingMeta.approvalStatus || "MENUNGGU_FINANCE"),
-      isPostedKasBank: Boolean(existingMeta.isPostedKasBank),
+      approvalStatus: isNewAction ? "PENDING" : currentApprovalStatus,
+      isPostedKasBank: isNewAction ? false : Boolean(existingMeta.isPostedKasBank),
+      ...(isNewAction
+        ? {
+            financeApprovedAt: null,
+            financeApprovedBy: null,
+            atasanApprovedAt: null,
+            atasanApprovedBy: null,
+            postedKasBankAt: null,
+            postedBy: null,
+            rejectReason: null,
+          }
+        : {}),
     };
 
     const pembayaran = await prisma.pembayaranSupplier.update({
@@ -2280,7 +2415,26 @@ router.put(
         entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
       }
 
+      // Guard: hanya PENDING -> APPROVED_FINANCE
+      const currentStatus = normalizePembayaranApprovalStatus(meta.approvalStatus || "PENDING");
+      if (!["PENDING"].includes(currentStatus)) {
+        return res.status(400).json({
+          error:
+            currentStatus === "APPROVED"
+              ? "Pembayaran sudah disetujui Atasan, tidak perlu approve Finance lagi."
+              : currentStatus === "APPROVED_FINANCE"
+                ? "Pembayaran sudah disetujui Finance. Tunggu approval Atasan."
+                : "Pembayaran sudah ditolak. Batalkan reject terlebih dahulu.",
+        });
+      }
+
       meta.entries = entries;
+      const pendingEntry = [...meta.entries].reverse().find(e => !e.approvalStatus || e.approvalStatus === "PENDING");
+      if (pendingEntry) {
+        pendingEntry.approvalStatus = "APPROVED_FINANCE";
+        pendingEntry.financeApprovedAt = new Date();
+        pendingEntry.financeApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
+      }
       meta.approvalStatus = "APPROVED_FINANCE";
       meta.financeApprovedAt = new Date();
       meta.financeApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
@@ -2330,7 +2484,7 @@ router.put(
 router.put(
   "/pembayaran-supplier/:id/approve-atasan",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2351,8 +2505,23 @@ router.put(
         entries = Array.isArray(rawPh.entries) ? rawPh.entries : [];
       }
 
+      // Guard: hanya APPROVED_FINANCE -> APPROVED
+      const currentStatus = normalizePembayaranApprovalStatus(meta.approvalStatus || "PENDING");
+      if (currentStatus !== "APPROVED_FINANCE") {
+        return res.status(400).json({
+          error:
+            "Pembayaran belum diverifikasi Finance. Minta Finance approve di halaman Pembayaran Finance terlebih dahulu.",
+        });
+      }
+
       meta.entries = entries;
-      meta.approvalStatus = "APPROVED_ATASAN";
+      const awaitingEntry = [...meta.entries].reverse().find(e => e.approvalStatus === "APPROVED_FINANCE");
+      if (awaitingEntry) {
+        awaitingEntry.approvalStatus = "APPROVED";
+        awaitingEntry.atasanApprovedAt = new Date();
+        awaitingEntry.atasanApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
+      }
+      meta.approvalStatus = "APPROVED";
       meta.atasanApprovedAt = new Date();
       meta.atasanApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
       meta.rejectReason = null;
@@ -2415,7 +2584,7 @@ router.post(
       }
 
       const enriched = enrichPembayaranApproval(existing);
-      if (enriched.approvalStatus !== "APPROVED_ATASAN" && req.user?.role !== "SUPER_ADMIN") {
+      if (enriched.approvalStatus !== "APPROVED" && req.user?.role !== "SUPER_ADMIN") {
         return res.status(400).json({
           error: "Pembayaran belum disetujui oleh Atasan. Harus menunggu approval Atasan di menu Permintaan Bayar.",
         });
@@ -2512,7 +2681,13 @@ router.post(
 
       // 2. Tandai metadata pembayaran
       meta.entries = entries;
-      meta.approvalStatus = "APPROVED_ATASAN";
+      const approvedEntry = [...meta.entries].reverse().find(e => e.approvalStatus === "APPROVED" && !e.isPostedKasBank);
+      if (approvedEntry) {
+        approvedEntry.isPostedKasBank = true;
+        approvedEntry.postedKasBankAt = new Date();
+        approvedEntry.postedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
+      }
+      meta.approvalStatus = "APPROVED";
       meta.isPostedKasBank = true;
       meta.postedKasBankAt = new Date();
       meta.postedBy = req.user?.name || req.user?.username || req.user?.userId || "Finance";
@@ -2526,7 +2701,7 @@ router.post(
       if (isJasaFlow) {
         finalStatus = sisaBayarBaru <= 0 ? "LUNAS" : "BON";
       } else {
-        finalStatus = sisaBayarBaru <= 0 ? "PAID" : "PARTIAL";
+        finalStatus = sisaBayarBaru <= 0 ? "LUNAS" : "TEMPO";
       }
 
       const updated = await prisma.pembayaranSupplier.update({
@@ -2647,7 +2822,7 @@ router.post(
         }
 
         meta.entries = entries;
-        meta.approvalStatus = "APPROVED_ATASAN";
+        meta.approvalStatus = "APPROVED";
         meta.atasanApprovedAt = new Date();
         meta.atasanApprovedBy = req.user?.name || req.user?.username || req.user?.userId || "Atasan";
         meta.rejectReason = null;
@@ -2727,6 +2902,356 @@ router.post(
     }
   }
 );
+
+
+// =====================================================================
+// 3.1 INVOICE PDF PEMBAYARAN SUPPLIER
+// =====================================================================
+
+function fmtDateId(d) {
+  if (!d) return "-";
+  return new Date(d).toLocaleDateString("id-ID", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function streamSupplierInvoicePdf(res, {
+  pembayaran,
+  entry,
+  logoPath,
+}) {
+  const doc = new PDFDocument({ size: "A4", margin: 36, bufferPages: true });
+  doc.pipe(res);
+
+  const po = pembayaran.purchaseOrder || {};
+  const supplier = pembayaran.supplier || po.supplier || {};
+  const project = po.project || {};
+  const rekening = pembayaran.rekeningBank || {};
+
+  const noPembayaran = pembayaran.noPembayaran || `INV-${pembayaran.id.slice(0, 8).toUpperCase()}`;
+  const tanggalDoc = entry?.tanggal || pembayaran.tanggalBayar || pembayaran.tanggal || new Date();
+  const totalTagihan = Number(pembayaran.totalTagihan || po.grandTotal || po.subTotal || 0);
+  const totalTerbayar = Number(pembayaran.totalTerbayar || pembayaran.jumlahBayar || 0);
+  const sisaBayar = Math.max(0, totalTagihan - totalTerbayar);
+  const nominalAction = entry ? Number(entry.jumlah || 0) : Number(pembayaran.jumlahBayar || 0);
+
+  const isLunas = totalTagihan > 0 && totalTerbayar >= totalTagihan;
+  const statusBayarLabel = isLunas ? "LUNAS" : "TEMPO";
+  const approvalStatusLabel = String(entry?.approvalStatus || pembayaran.approvalStatus || "APPROVED").toUpperCase();
+
+  const financeApprovedBy = entry?.financeApprovedBy || pembayaran.financeApprovedBy || "-";
+  const financeApprovedAt = entry?.financeApprovedAt || pembayaran.financeApprovedAt;
+  const atasanApprovedBy = entry?.atasanApprovedBy || pembayaran.atasanApprovedBy || "-";
+  const atasanApprovedAt = entry?.atasanApprovedAt || pembayaran.atasanApprovedAt;
+
+  // Header Banner
+  doc.save();
+  doc.rect(0, 0, doc.page.width, 100).fill("#1A1917");
+  doc.rect(0, 97, doc.page.width, 3).fill("#D4AF37");
+
+  // Logo
+  if (logoPath && fs.existsSync(logoPath)) {
+    try {
+      doc.image(logoPath, 36, 26, { height: 48, fit: [140, 48] });
+    } catch (_) {}
+  } else {
+    doc.fillColor("#D4AF37").fontSize(18).font("Helvetica-Bold").text("DIVES", 36, 35);
+  }
+
+  // Header Title
+  doc.fillColor("#D4AF37").fontSize(18).font("Helvetica-Bold").text("INVOICE SUPPLIER", 300, 26, { align: "right", width: 255 });
+  doc.fillColor("#FFFFFF").fontSize(10).font("Helvetica-Bold").text(`No: ${noPembayaran}`, 300, 48, { align: "right", width: 255 });
+  doc.fillColor("#A3A3A3").fontSize(9).font("Helvetica").text(`Tanggal: ${fmtDateId(tanggalDoc)}`, 300, 64, { align: "right", width: 255 });
+  doc.restore();
+
+  // Status Badges Bar
+  let y = 112;
+  const badgeWidth = 140;
+  const badgeHeight = 22;
+
+  // Badge Status Bayar
+  const bayarBg = isLunas ? "#ECFDF5" : "#FFFBEB";
+  const bayarStroke = isLunas ? "#10B981" : "#F59E0B";
+  const bayarText = isLunas ? "#065F46" : "#92400E";
+  doc.roundedRect(36, y, badgeWidth, badgeHeight, 4).fillAndStroke(bayarBg, bayarStroke);
+  doc.fillColor(bayarText).font("Helvetica-Bold").fontSize(9).text(`STATUS: ${statusBayarLabel}`, 42, y + 6, { width: badgeWidth - 12, align: "center" });
+
+  // Badge Status Approval
+  const appBg = approvalStatusLabel === "APPROVED" ? "#ECFDF5" : "#EFF6FF";
+  const appStroke = approvalStatusLabel === "APPROVED" ? "#10B981" : "#3B82F6";
+  const appText = approvalStatusLabel === "APPROVED" ? "#065F46" : "#1E40AF";
+  doc.roundedRect(186, y, badgeWidth + 30, badgeHeight, 4).fillAndStroke(appBg, appStroke);
+  doc.fillColor(appText).font("Helvetica-Bold").fontSize(9).text(`APPROVAL: ${approvalStatusLabel === "APPROVED" ? "APPROVED (ATASAN)" : approvalStatusLabel}`, 192, y + 6, { width: badgeWidth + 18, align: "center" });
+
+  // Two Column Information Cards
+  y = 144;
+  const cardW = 252;
+  const cardH = 92;
+
+  // Left Card: Supplier & PO Info
+  doc.roundedRect(36, y, cardW, cardH, 6).fillAndStroke("#F9FAFB", "#E5E7EB");
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(9.5).text("INFORMASI SUPPLIER & PROYEK", 46, y + 8);
+  doc.font("Helvetica").fontSize(8.5).fillColor("#6B7280");
+  doc.text("Supplier", 46, y + 26);
+  doc.text("Proyek", 46, y + 42);
+  doc.text("No PO", 46, y + 58);
+  doc.text("Kontak / HP", 46, y + 74);
+
+  doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111827");
+  doc.text(`: ${supplier.name || "-"}`, 110, y + 26, { width: cardW - 120, lineBreak: false });
+  doc.text(`: ${project.name || "-"}`, 110, y + 42, { width: cardW - 120, lineBreak: false });
+  doc.text(`: ${po.poNumber || "-"}`, 110, y + 58, { width: cardW - 120, lineBreak: false });
+  doc.text(`: ${supplier.phone || supplier.contact || "-"}`, 110, y + 74, { width: cardW - 120, lineBreak: false });
+
+  // Right Card: Payment & Approval Info
+  const rightX = 302;
+  doc.roundedRect(rightX, y, cardW, cardH, 6).fillAndStroke("#F9FAFB", "#E5E7EB");
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(9.5).text("INFORMASI PEMBAYARAN", rightX + 10, y + 8);
+  doc.font("Helvetica").fontSize(8.5).fillColor("#6B7280");
+  doc.text("Metode Bayar", rightX + 10, y + 26);
+  doc.text("Rekening Bank", rightX + 10, y + 42);
+  doc.text("Verif. Finance", rightX + 10, y + 58);
+  doc.text("Appr. Atasan", rightX + 10, y + 74);
+
+  const rekLabel = rekening.namaRekening ? `${rekening.namaRekening} - ${rekening.nomorRekening}` : (pembayaran.tipeAkunKasBank || "KAS / BANK");
+  doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111827");
+  doc.text(`: ${entry?.metodeBayar || pembayaran.metodeBayar || "TRANSFER"}`, rightX + 85, y + 26, { width: cardW - 95, lineBreak: false });
+  doc.text(`: ${rekLabel}`, rightX + 85, y + 42, { width: cardW - 95, lineBreak: false });
+  doc.text(`: ${financeApprovedBy} ${financeApprovedAt ? `(${fmtDateId(financeApprovedAt)})` : ""}`, rightX + 85, y + 58, { width: cardW - 95, lineBreak: false });
+  doc.text(`: ${atasanApprovedBy} ${atasanApprovedAt ? `(${fmtDateId(atasanApprovedAt)})` : ""}`, rightX + 85, y + 74, { width: cardW - 95, lineBreak: false });
+
+  // Table of Items
+  y = 248;
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10).text("Rincian Barang / Material PO", 36, y);
+
+  y += 16;
+  const tableX = 36;
+  const colWidths = [26, 215, 60, 48, 85, 84]; // sum = 518
+  const tableHeaders = ["No", "Nama Barang / Deskripsi", "Qty", "Satuan", "Harga Satuan", "Total (Rp)"];
+
+  doc.rect(tableX, y, 518, 20).fill("#2A2723");
+  doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(8);
+  let curX = tableX;
+  tableHeaders.forEach((th, idx) => {
+    const align = (idx === 2 || idx === 4 || idx === 5) ? "right" : (idx === 3 || idx === 0) ? "center" : "left";
+    doc.text(th, curX + 4, y + 5, { width: colWidths[idx] - 8, align });
+    curX += colWidths[idx];
+  });
+
+  y += 20;
+  const items = po.items || [];
+  const maxDisplayItems = Math.min(items.length, 10);
+
+  doc.font("Helvetica").fontSize(8).fillColor("#1F2937");
+  for (let i = 0; i < maxDisplayItems; i++) {
+    const it = items[i];
+    const itemName = it.description || it.materialRequest?.itemName || it.rabItem?.name || `Item ${i + 1}`;
+    const qty = Number(it.qty || 0);
+    const unit = it.unit || it.materialRequest?.unit || "-";
+    const unitPrice = Number(it.unitPrice || 0);
+    const itemTotal = Number(it.total || qty * unitPrice || 0);
+
+    const rowBg = i % 2 === 1 ? "#F9FAFB" : "#FFFFFF";
+    doc.rect(tableX, y, 518, 18).fillAndStroke(rowBg, "#F3F4F6");
+
+    doc.fillColor("#374151");
+    doc.text(String(i + 1), tableX + 4, y + 5, { width: colWidths[0] - 8, align: "center" });
+    doc.text(itemName, tableX + colWidths[0] + 4, y + 5, { width: colWidths[1] - 8, ellipsis: true });
+    doc.text(qty.toLocaleString("id-ID", { maximumFractionDigits: 2 }), tableX + colWidths[0] + colWidths[1] + 4, y + 5, { width: colWidths[2] - 8, align: "right" });
+    doc.text(unit, tableX + colWidths[0] + colWidths[1] + colWidths[2] + 4, y + 5, { width: colWidths[3] - 8, align: "center" });
+    doc.text(fmtRp(unitPrice), tableX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + 4, y + 5, { width: colWidths[4] - 8, align: "right" });
+    doc.font("Helvetica-Bold").text(fmtRp(itemTotal), tableX + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3] + colWidths[4] + 4, y + 5, { width: colWidths[5] - 8, align: "right" });
+    doc.font("Helvetica");
+
+    y += 18;
+  }
+
+  if (items.length === 0) {
+    doc.rect(tableX, y, 518, 22).fillAndStroke("#FFFFFF", "#E5E7EB");
+    doc.fillColor("#9CA3AF").text("Detail item barang tidak tersedia.", tableX, y + 6, { width: 518, align: "center" });
+    y += 22;
+  } else if (items.length > maxDisplayItems) {
+    doc.rect(tableX, y, 518, 16).fillAndStroke("#F3F4F6", "#E5E7EB");
+    doc.fillColor("#6B7280").fontSize(7.5).text(`... dan ${items.length - maxDisplayItems} item lainnya tercantum pada Purchase Order resmi`, tableX, y + 4, { width: 518, align: "center" });
+    y += 16;
+  }
+
+  // Summary & Notes
+  y += 12;
+  const summaryBoxW = 240;
+  const summaryBoxX = 518 + tableX - summaryBoxW;
+  const leftBoxW = 265;
+
+  const entries = (pembayaran.paymentHistory && Array.isArray(pembayaran.paymentHistory))
+    ? pembayaran.paymentHistory
+    : (pembayaran.paymentHistory?.entries && Array.isArray(pembayaran.paymentHistory.entries))
+      ? pembayaran.paymentHistory.entries
+      : [];
+
+  if (entries.length > 0) {
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(9).text("Riwayat Pembayaran / Termin", tableX, y);
+    let termY = y + 14;
+    doc.rect(tableX, termY, leftBoxW, 16).fill("#374151");
+    doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(7.5);
+    doc.text("No", tableX + 4, termY + 4, { width: 22, align: "center" });
+    doc.text("Tanggal", tableX + 28, termY + 4, { width: 58 });
+    doc.text("Metode", tableX + 88, termY + 4, { width: 48 });
+    doc.text("Nominal", tableX + 138, termY + 4, { width: 68, align: "right" });
+    doc.text("Status", tableX + 208, termY + 4, { width: 52, align: "center" });
+    termY += 16;
+
+    const displayEntries = entries.slice(0, 5);
+    displayEntries.forEach((ent, idx) => {
+      const eBg = idx % 2 === 1 ? "#F9FAFB" : "#FFFFFF";
+      doc.rect(tableX, termY, leftBoxW, 14).fillAndStroke(eBg, "#E5E7EB");
+      doc.fillColor("#374151").font("Helvetica").fontSize(7.5);
+      doc.text(String(idx + 1), tableX + 4, termY + 3, { width: 22, align: "center" });
+      doc.text(fmtDateId(ent.tanggal), tableX + 28, termY + 3, { width: 58 });
+      doc.text(ent.metodeBayar || "-", tableX + 88, termY + 3, { width: 48 });
+      doc.font("Helvetica-Bold").text(fmtRp(ent.jumlah), tableX + 138, termY + 3, { width: 68, align: "right" });
+      doc.font("Helvetica");
+      const eStat = String(ent.approvalStatus || "APPROVED").toUpperCase();
+      doc.text(eStat === "APPROVED" ? "Approved" : eStat, tableX + 208, termY + 3, { width: 52, align: "center" });
+      termY += 14;
+    });
+  } else {
+    doc.roundedRect(tableX, y, leftBoxW, 86, 6).fillAndStroke("#F9FAFB", "#E5E7EB");
+    doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5).text("Catatan & Keterangan", tableX + 10, y + 8);
+    doc.fillColor("#4B5563").font("Helvetica").fontSize(8).text(pembayaran.keterangan || "Pembayaran material sesuai PO yang telah diverifikasi Finance dan disetujui Atasan.", tableX + 10, y + 24, { width: leftBoxW - 20, lineGap: 2 });
+  }
+
+  const sumY = y;
+  doc.roundedRect(summaryBoxX, sumY, summaryBoxW, 86, 6).fillAndStroke("#FFFBEB", "#FDE68A");
+  doc.fillColor("#92400E").font("Helvetica-Bold").fontSize(9.5).text("RINGKASAN PEMBAYARAN", summaryBoxX + 12, sumY + 8);
+
+  const drawSumRow = (label, val, rY, bold = false, color = "#111827", fontSize = 8.5) => {
+    doc.fillColor("#6B7280").font("Helvetica").fontSize(fontSize).text(label, summaryBoxX + 12, rY);
+    doc.fillColor(color).font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(fontSize).text(val, summaryBoxX + 100, rY, { width: summaryBoxW - 114, align: "right" });
+  };
+
+  drawSumRow("Total Tagihan PO", fmtRp(totalTagihan), sumY + 26);
+  if (nominalAction > 0 && nominalAction !== totalTerbayar) {
+    drawSumRow("Pembayaran Aksi Ini", fmtRp(nominalAction), sumY + 40, true, "#1E40AF");
+    drawSumRow("Akumulasi Terbayar", fmtRp(totalTerbayar), sumY + 54);
+    drawSumRow("Sisa Tagihan", fmtRp(sisaBayar), sumY + 68, true, sisaBayar > 0 ? "#DC2626" : "#059669", 9.5);
+  } else {
+    drawSumRow("Total Terbayar", fmtRp(totalTerbayar), sumY + 42, true, "#059669");
+    drawSumRow("Sisa Tagihan", fmtRp(sisaBayar), sumY + 62, true, sisaBayar > 0 ? "#DC2626" : "#059669", 9.5);
+  }
+
+  // Signatures Section
+  const sigY = 660;
+  doc.rect(36, sigY - 12, 518, 1).fill("#E5E7EB");
+
+  const sigColW = 160;
+  const sigGap = (518 - (sigColW * 3)) / 2;
+
+  const s1X = 36;
+  doc.fillColor("#6B7280").font("Helvetica").fontSize(8).text("Diajukan / Verifikasi:", s1X, sigY, { width: sigColW, align: "center" });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5).text("Finance & Purchasing", s1X, sigY + 12, { width: sigColW, align: "center" });
+  doc.rect(s1X + 20, sigY + 64, sigColW - 40, 1).fill("#9CA3AF");
+  doc.fillColor("#374151").font("Helvetica-Bold").fontSize(8).text(financeApprovedBy, s1X, sigY + 68, { width: sigColW, align: "center" });
+
+  const s2X = s1X + sigColW + sigGap;
+  doc.fillColor("#6B7280").font("Helvetica").fontSize(8).text("Disetujui Oleh:", s2X, sigY, { width: sigColW, align: "center" });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5).text("Project Manager / Atasan", s2X, sigY + 12, { width: sigColW, align: "center" });
+  doc.rect(s2X + 20, sigY + 64, sigColW - 40, 1).fill("#9CA3AF");
+  doc.fillColor("#374151").font("Helvetica-Bold").fontSize(8).text(atasanApprovedBy, s2X, sigY + 68, { width: sigColW, align: "center" });
+
+  const s3X = s2X + sigColW + sigGap;
+  doc.fillColor("#6B7280").font("Helvetica").fontSize(8).text("Diterima Oleh:", s3X, sigY, { width: sigColW, align: "center" });
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(8.5).text("Supplier / Rekanan", s3X, sigY + 12, { width: sigColW, align: "center" });
+  doc.rect(s3X + 20, sigY + 64, sigColW - 40, 1).fill("#9CA3AF");
+  doc.fillColor("#374151").font("Helvetica-Bold").fontSize(8).text(supplier.name || "(.................................)", s3X, sigY + 68, { width: sigColW, align: "center" });
+
+  doc.fillColor("#9CA3AF").font("Helvetica").fontSize(7.5).text("Dokumen ini dihasilkan secara otomatis oleh DIVES Construction Management System dan merupakan bukti penagihan / pembayaran yang sah.", 36, 785, { width: 518, align: "center" });
+
+  doc.end();
+}
+
+/**
+ * GET /api/pembayaran-supplier/:id/invoice-pdf
+ * Cetak / Download Invoice PDF Pembayaran Supplier
+ */
+router.get("/pembayaran-supplier/:id/invoice-pdf", async (req, res) => {
+  try {
+    const pembayaran = await prisma.pembayaranSupplier.findUnique({
+      where: { id: req.params.id },
+      include: {
+        supplier: true,
+        jasa: true,
+        rekeningBank: { include: { tipeRekening: true } },
+        tipeRekening: true,
+        purchaseOrder: {
+          include: {
+            supplier: true,
+            project: true,
+            items: {
+              include: {
+                materialRequest: true,
+                rabItem: true,
+              },
+            },
+          },
+        },
+        pengajuan: {
+          include: {
+            verifiedBy: true,
+            approvedBy: true,
+          },
+        },
+      },
+    });
+
+    if (!pembayaran) {
+      return res.status(404).json({ error: "Data pembayaran supplier tidak ditemukan" });
+    }
+
+    const enriched = enrichPembayaranApproval(pembayaran);
+
+    // Guard: Cetak invoice diizinkan jika sudah disetujui Atasan
+    const isApproved =
+      enriched.approvalStatus === "APPROVED" ||
+      enriched.isPostedKasBank ||
+      (pembayaran.purchaseOrder?.status === "APPROVED" && enriched.approvalStatus !== "REJECTED");
+
+    if (!isApproved) {
+      return res.status(400).json({
+        error: "Invoice supplier hanya dapat dicetak setelah disetujui oleh Atasan.",
+      });
+    }
+
+    let selectedEntry = null;
+    const entries = Array.isArray(enriched.paymentHistory) ? enriched.paymentHistory : [];
+    if (req.query.entryId) {
+      selectedEntry = entries.find((e) => e.id === req.query.entryId) || null;
+    } else if (req.query.entryIndex !== undefined && req.query.entryIndex !== "") {
+      const idx = parseInt(req.query.entryIndex, 10);
+      if (!isNaN(idx) && idx >= 0 && idx < entries.length) {
+        selectedEntry = entries[idx];
+      }
+    }
+
+    const noSafe = String(
+      pembayaran.noPembayaran || pembayaran.purchaseOrder?.poNumber || pembayaran.id
+    ).replace(/[^a-zA-Z0-9_-]/g, "_");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="Invoice_Supplier_${noSafe}.pdf"`);
+
+    const logoPath = path.resolve(__dirname, "../../../public/assets/dives.png");
+    return streamSupplierInvoicePdf(res, {
+      pembayaran: enriched,
+      entry: selectedEntry,
+      logoPath,
+    });
+  } catch (error) {
+    console.error("Stream Supplier Invoice PDF Error:", error);
+    res.status(500).json({ error: "Gagal membuat invoice PDF supplier" });
+  }
+});
 
 
 // =====================================================================

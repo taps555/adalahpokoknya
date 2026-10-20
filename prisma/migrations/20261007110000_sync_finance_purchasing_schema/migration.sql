@@ -13,6 +13,18 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'KategoriItem') THEN
     CREATE TYPE "KategoriItem" AS ENUM ('BAHAN', 'ALAT');
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'KategoriPO') THEN
+    CREATE TYPE "KategoriPO" AS ENUM ('MATERIAL', 'HABIS_PAKAI', 'JASA');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'MetodeBayar') THEN
+    CREATE TYPE "MetodeBayar" AS ENUM ('TRANSFER', 'CASH', 'CEK', 'GIRO', 'TEMPO');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'PembayaranStatus') THEN
+    CREATE TYPE "PembayaranStatus" AS ENUM ('PENDING', 'PARTIAL', 'PAID', 'BELUM_BAYAR', 'BON', 'LUNAS');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'SupplierType') THEN
+    CREATE TYPE "SupplierType" AS ENUM ('BAHAN', 'ALAT', 'BAHAN_ALAT', 'JASA');
+  END IF;
 END $$;
 
 ALTER TYPE "KategoriPO" ADD VALUE IF NOT EXISTS 'JASA';
@@ -118,38 +130,66 @@ CREATE INDEX IF NOT EXISTS "MasterRekeningBank_tipeRekeningId_idx"
   ON "MasterRekeningBank"("tipeRekeningId");
 
 -- Additive changes to existing Purchasing tables.
-ALTER TABLE "PurchaseOrder"
-  ADD COLUMN IF NOT EXISTS "globalDiscount2Percent" DOUBLE PRECISION NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
-  ALTER COLUMN "supplierId" DROP NOT NULL;
+DO $$
+BEGIN
+  IF to_regclass('"PurchaseOrder"') IS NOT NULL THEN
+    ALTER TABLE "PurchaseOrder"
+      ADD COLUMN IF NOT EXISTS "globalDiscount2Percent" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
+      ALTER COLUMN "supplierId" DROP NOT NULL;
+  END IF;
+END $$;
 
-ALTER TABLE "PengajuanPembayaran"
-  ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
-  ALTER COLUMN "supplierId" DROP NOT NULL;
+DO $$
+BEGIN
+  IF to_regclass('"PengajuanPembayaran"') IS NOT NULL THEN
+    ALTER TABLE "PengajuanPembayaran"
+      ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
+      ALTER COLUMN "supplierId" DROP NOT NULL;
+  END IF;
+END $$;
 
-ALTER TABLE "PembayaranSupplier"
-  ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
-  ADD COLUMN IF NOT EXISTS "jatuhTempo" TIMESTAMP(3),
-  ADD COLUMN IF NOT EXISTS "paymentHistory" JSONB,
-  ADD COLUMN IF NOT EXISTS "rekeningBankId" TEXT,
-  ADD COLUMN IF NOT EXISTS "sisaBayar" DOUBLE PRECISION NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS "tanggalBayar" TIMESTAMP(3),
-  ADD COLUMN IF NOT EXISTS "tipeAkunKasBank" "TipeAkunBukuBesar" NOT NULL DEFAULT 'KAS',
-  ADD COLUMN IF NOT EXISTS "tipeRekeningId" TEXT,
-  ADD COLUMN IF NOT EXISTS "totalTagihan" DOUBLE PRECISION NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS "totalTerbayar" DOUBLE PRECISION NOT NULL DEFAULT 0,
-  ALTER COLUMN "supplierId" DROP NOT NULL;
+DO $$
+BEGIN
+  IF to_regclass('"PembayaranSupplier"') IS NOT NULL THEN
+    ALTER TABLE "PembayaranSupplier"
+      ADD COLUMN IF NOT EXISTS "jasaId" TEXT,
+      ADD COLUMN IF NOT EXISTS "jatuhTempo" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "paymentHistory" JSONB,
+      ADD COLUMN IF NOT EXISTS "rekeningBankId" TEXT,
+      ADD COLUMN IF NOT EXISTS "sisaBayar" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "tanggalBayar" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "tipeAkunKasBank" "TipeAkunBukuBesar" NOT NULL DEFAULT 'KAS',
+      ADD COLUMN IF NOT EXISTS "tipeRekeningId" TEXT,
+      ADD COLUMN IF NOT EXISTS "totalTagihan" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS "totalTerbayar" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      ALTER COLUMN "supplierId" DROP NOT NULL;
+  END IF;
+END $$;
 
-ALTER TABLE "SupplierItem"
-  ADD COLUMN IF NOT EXISTS "kategori" "KategoriItem",
-  ALTER COLUMN "supplierId" DROP NOT NULL;
+DO $$
+BEGIN
+  IF to_regclass('"SupplierItem"') IS NOT NULL THEN
+    ALTER TABLE "SupplierItem"
+      ADD COLUMN IF NOT EXISTS "kategori" "KategoriItem",
+      ALTER COLUMN "supplierId" DROP NOT NULL;
+  END IF;
+END $$;
 
-CREATE INDEX IF NOT EXISTS "PurchaseOrder_supplierId_idx" ON "PurchaseOrder"("supplierId");
-CREATE INDEX IF NOT EXISTS "PurchaseOrder_jasaId_idx" ON "PurchaseOrder"("jasaId");
-CREATE INDEX IF NOT EXISTS "PembayaranSupplier_rekeningBankId_idx"
-  ON "PembayaranSupplier"("rekeningBankId");
-CREATE INDEX IF NOT EXISTS "PembayaranSupplier_tipeRekeningId_idx"
-  ON "PembayaranSupplier"("tipeRekeningId");
+DO $$
+BEGIN
+  IF to_regclass('"PurchaseOrder"') IS NOT NULL THEN
+    CREATE INDEX IF NOT EXISTS "PurchaseOrder_supplierId_idx" ON "PurchaseOrder"("supplierId");
+    CREATE INDEX IF NOT EXISTS "PurchaseOrder_jasaId_idx" ON "PurchaseOrder"("jasaId");
+  END IF;
+
+  IF to_regclass('"PembayaranSupplier"') IS NOT NULL THEN
+    CREATE INDEX IF NOT EXISTS "PembayaranSupplier_rekeningBankId_idx"
+      ON "PembayaranSupplier"("rekeningBankId");
+    CREATE INDEX IF NOT EXISTS "PembayaranSupplier_tipeRekeningId_idx"
+      ON "PembayaranSupplier"("tipeRekeningId");
+  END IF;
+END $$;
 
 -- General-ledger transactions expected by Finance routes.
 CREATE TABLE IF NOT EXISTS "BukuBesarTransaksi" (
@@ -193,67 +233,114 @@ CREATE INDEX IF NOT EXISTS "BukuBesarTransaksi_tipeRekeningId_idx" ON "BukuBesar
 -- that were previously synchronized with prisma db push.
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'JasaNilaiKontrak_jasaId_fkey') THEN
+  IF to_regclass('"JasaNilaiKontrak"') IS NOT NULL
+     AND to_regclass('"Jasa"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'JasaNilaiKontrak_jasaId_fkey') THEN
     ALTER TABLE "JasaNilaiKontrak" ADD CONSTRAINT "JasaNilaiKontrak_jasaId_fkey"
       FOREIGN KEY ("jasaId") REFERENCES "Jasa"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'JasaNilaiKontrak_projectId_fkey') THEN
+
+  IF to_regclass('"JasaNilaiKontrak"') IS NOT NULL
+     AND to_regclass('"Project"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'JasaNilaiKontrak_projectId_fkey') THEN
     ALTER TABLE "JasaNilaiKontrak" ADD CONSTRAINT "JasaNilaiKontrak_projectId_fkey"
       FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PurchaseOrder_jasaId_fkey') THEN
+
+  IF to_regclass('"PurchaseOrder"') IS NOT NULL
+     AND to_regclass('"Jasa"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PurchaseOrder_jasaId_fkey') THEN
     ALTER TABLE "PurchaseOrder" ADD CONSTRAINT "PurchaseOrder_jasaId_fkey"
       FOREIGN KEY ("jasaId") REFERENCES "Jasa"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PengajuanPembayaran_jasaId_fkey') THEN
+
+  IF to_regclass('"PengajuanPembayaran"') IS NOT NULL
+     AND to_regclass('"Jasa"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PengajuanPembayaran_jasaId_fkey') THEN
     ALTER TABLE "PengajuanPembayaran" ADD CONSTRAINT "PengajuanPembayaran_jasaId_fkey"
       FOREIGN KEY ("jasaId") REFERENCES "Jasa"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_jasaId_fkey') THEN
+
+  IF to_regclass('"PembayaranSupplier"') IS NOT NULL
+     AND to_regclass('"Jasa"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_jasaId_fkey') THEN
     ALTER TABLE "PembayaranSupplier" ADD CONSTRAINT "PembayaranSupplier_jasaId_fkey"
       FOREIGN KEY ("jasaId") REFERENCES "Jasa"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'MasterRekeningBank_tipeRekeningId_fkey') THEN
+
+  IF to_regclass('"MasterRekeningBank"') IS NOT NULL
+     AND to_regclass('"MasterTipeRekening"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'MasterRekeningBank_tipeRekeningId_fkey') THEN
     ALTER TABLE "MasterRekeningBank" ADD CONSTRAINT "MasterRekeningBank_tipeRekeningId_fkey"
       FOREIGN KEY ("tipeRekeningId") REFERENCES "MasterTipeRekening"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_rekeningBankId_fkey') THEN
+
+  IF to_regclass('"PembayaranSupplier"') IS NOT NULL
+     AND to_regclass('"MasterRekeningBank"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_rekeningBankId_fkey') THEN
     ALTER TABLE "PembayaranSupplier" ADD CONSTRAINT "PembayaranSupplier_rekeningBankId_fkey"
       FOREIGN KEY ("rekeningBankId") REFERENCES "MasterRekeningBank"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_tipeRekeningId_fkey') THEN
+
+  IF to_regclass('"PembayaranSupplier"') IS NOT NULL
+     AND to_regclass('"MasterTipeRekening"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PembayaranSupplier_tipeRekeningId_fkey') THEN
     ALTER TABLE "PembayaranSupplier" ADD CONSTRAINT "PembayaranSupplier_tipeRekeningId_fkey"
       FOREIGN KEY ("tipeRekeningId") REFERENCES "MasterTipeRekening"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_projectId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"Project"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_projectId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_projectId_fkey"
       FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_akunBukuBesarId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"AkunBukuBesar"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_akunBukuBesarId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_akunBukuBesarId_fkey"
       FOREIGN KEY ("akunBukuBesarId") REFERENCES "AkunBukuBesar"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_rekeningBankId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"MasterRekeningBank"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_rekeningBankId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_rekeningBankId_fkey"
       FOREIGN KEY ("rekeningBankId") REFERENCES "MasterRekeningBank"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_tipeRekeningId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"MasterTipeRekening"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_tipeRekeningId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_tipeRekeningId_fkey"
       FOREIGN KEY ("tipeRekeningId") REFERENCES "MasterTipeRekening"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_poId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"PurchaseOrder"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_poId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_poId_fkey"
       FOREIGN KEY ("poId") REFERENCES "PurchaseOrder"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_pengajuanId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"PengajuanPembayaran"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_pengajuanId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_pengajuanId_fkey"
       FOREIGN KEY ("pengajuanId") REFERENCES "PengajuanPembayaran"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_pembayaranId_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"PembayaranSupplier"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_pembayaranId_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_pembayaranId_fkey"
       FOREIGN KEY ("pembayaranId") REFERENCES "PembayaranSupplier"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_createdById_fkey') THEN
+
+  IF to_regclass('"BukuBesarTransaksi"') IS NOT NULL
+     AND to_regclass('"User"') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'BukuBesarTransaksi_createdById_fkey') THEN
     ALTER TABLE "BukuBesarTransaksi" ADD CONSTRAINT "BukuBesarTransaksi_createdById_fkey"
       FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
   END IF;

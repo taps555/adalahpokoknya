@@ -64,16 +64,30 @@ async function getRapForItem({ materialRequestId, description, indukPoId }) {
   return { rapQty, rapPrice, rapSource };
 }
 
-async function getAggregatesForItem({ itemName, projectId }) {
-  const conditions = itemMatchConditions(itemName);
-  if (!conditions.length) {
-    return { akumulasiPoQty: 0, akumulasiReceived: 0, akumulasiPoHargaRata: 0 };
-  }
+async function getAggregatesForItem({ itemName, projectId, materialRequestId }) {
+  let where;
 
-  const where = {
-    OR: conditions,
-    purchaseOrder: projectId ? { projectId } : undefined,
-  };
+  if (materialRequestId) {
+    where = {
+      materialRequestId,
+      purchaseOrder: {
+        ...(projectId ? { projectId } : {}),
+        status: { not: 'REJECTED' },
+      },
+    };
+  } else {
+    const conditions = itemMatchConditions(itemName);
+    if (!conditions.length) {
+      return { akumulasiPoQty: 0, akumulasiReceived: 0, akumulasiPoHargaRata: 0 };
+    }
+    where = {
+      OR: conditions,
+      purchaseOrder: {
+        ...(projectId ? { projectId } : {}),
+        status: { not: 'REJECTED' },
+      },
+    };
+  }
 
   const poItems = await prisma.purchaseOrderItem.findMany({
     where,
@@ -104,6 +118,8 @@ async function getAggregatesForItem({ itemName, projectId }) {
   return { akumulasiPoQty, akumulasiReceived, akumulasiPoHargaRata };
 }
 
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+
 const buildKetVolume = ({ itemName, unit, rapQty, akumulasiPoQty, akumulasiReceived }) => {
   const u = unit ? ` ${unit}` : '';
   const rapPart = `RAP ${fmtNum(rapQty)}${u}`;
@@ -111,8 +127,8 @@ const buildKetVolume = ({ itemName, unit, rapQty, akumulasiPoQty, akumulasiRecei
   const recvPart = `Diterima ${fmtNum(akumulasiReceived)}${u}`;
 
   if (rapQty > 0) {
-    const diffPo = akumulasiPoQty - rapQty;
-    const diffRecv = akumulasiReceived - rapQty;
+    const diffPo = round2(akumulasiPoQty) - round2(rapQty);
+    const diffRecv = round2(akumulasiReceived) - round2(rapQty);
 
     const statusPo =
       diffPo > 0
@@ -136,8 +152,8 @@ const buildKetVolume = ({ itemName, unit, rapQty, akumulasiPoQty, akumulasiRecei
 
 const buildKetHarga = ({ itemName, rapPrice, poPrice, poAvgPrice }) => {
   if (rapPrice > 0) {
-    const diffNow = poPrice - rapPrice;
-    const diffAvg = poAvgPrice - rapPrice;
+    const diffNow = Math.round(poPrice - rapPrice);
+    const diffAvg = Math.round(poAvgPrice - rapPrice);
 
     const statusNow =
       diffNow > 0
@@ -192,6 +208,7 @@ async function getKeteranganVolumeHarga(po) {
       await getAggregatesForItem({
         itemName,
         projectId,
+        materialRequestId: item.materialRequestId,
       });
 
     ketVolParts.push(
@@ -242,6 +259,7 @@ async function getKeteranganForHabisPakai({
     await getAggregatesForItem({
       itemName,
       projectId,
+      materialRequestId: mrItemId,
     });
 
   const keteranganVolume = buildKetVolume({
