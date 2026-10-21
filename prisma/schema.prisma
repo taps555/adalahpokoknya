@@ -98,6 +98,12 @@ model User {
   password                       String // password yang sudah di-hash
   name                           String // nama lengkap pegawai
   role                           Role                     @default(PERENCANA)
+  email                          String?                  @unique
+  photoUrl                       String?
+  isActive                       Boolean                  @default(true)
+  lastLoginAt                    DateTime?
+  emailVerifiedAt               DateTime?
+  activityLogs                   ActivityLog[]
   approvedPOs                    PurchaseOrder[]          @relation("ApprovedByUser")
   verifiedPOs                    PurchaseOrder[]          @relation("VerifiedByUser")
   rejectedPOs                    PurchaseOrder[]          @relation("RejectedByUser")
@@ -119,6 +125,51 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// Audit global: satu baris per aksi bisnis / mutasi / export.
+/// Tidak ada endpoint update/delete supaya jejak tidak dapat diedit dari aplikasi.
+model ActivityLog {
+  id            String   @id @default(cuid())
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userName      String?
+  role          String?
+  module        String
+  action        String
+  status        String   @default("SUCCESS")
+  entityType    String?
+  entityId      String?
+  entityName    String?
+  projectId     String?
+  projectName   String?
+  summary       String   @db.Text
+  changes       Json     @default("{}")
+  requestMethod String?
+  requestPath   String?
+  statusCode    Int?
+  ipAddress     String?
+  userAgent     String?  @db.Text
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([module, action, createdAt])
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+}
+
+model ActivityArchive {
+  id          String   @id @default(cuid())
+  month       String   @unique
+  fileName    String
+  recordCount Int
+  byteSize    Int
+  sha256      String
+  status      String   @default("VERIFIED")
+  firstLogAt  DateTime?
+  lastLogAt   DateTime?
+  createdAt   DateTime @default(now())
 }
 
 model WorkCategory {

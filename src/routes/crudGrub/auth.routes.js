@@ -13,7 +13,7 @@ const SECRET_KEY = process.env.JWT_SECRET || "rahasia_super_aman_123";
  */
 router.post("/register", async (req, res) => {
   try {
-    const { username, password, name, role } = req.body;
+    const { username, password, name, role, email } = req.body;
 
     // 1. Cek apakah username sudah dipakai
     const existingUser = await prisma.user.findUnique({ where: { username } });
@@ -29,6 +29,7 @@ router.post("/register", async (req, res) => {
         username,
         password: hashedPassword,
         name,
+        email: email ? String(email).trim().toLowerCase() : null,
         role: role || "PERENCANA",
       },
     });
@@ -53,7 +54,7 @@ router.post("/login", async (req, res) => {
 
     // 1. Cari user di database
     const user = await prisma.user.findUnique({ where: { username } });
-    if (!user)
+    if (!user || user.isActive === false)
       return res.status(401).json({ error: "Username atau password salah." });
 
     // 2. Cocokkan password yang diketik dengan yang diacak di database
@@ -69,11 +70,14 @@ router.post("/login", async (req, res) => {
       { expiresIn: "12h" },
     );
 
+    const loggedInAt = new Date();
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: loggedInAt } });
+
     // 4. Kirim tiket ke Frontend
     res.json({
       message: "Login berhasil!",
       token: token,
-      user: { id: user.id, name: user.name, role: user.role },
+      user: { id: user.id, name: user.name, username: user.username, role: user.role, email: user.email || null, photoUrl: user.photoUrl || null, lastLoginAt: loggedInAt },
     });
   } catch (error) {
     console.error("Login Error:", error);
@@ -93,6 +97,10 @@ router.get("/users", verifyToken, async (req, res) => {
         name: true,
         username: true,
         role: true,
+        email: true,
+        photoUrl: true,
+        isActive: true,
+        lastLoginAt: true,
       },
       orderBy: { name: "asc" },
     });
