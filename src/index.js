@@ -10,6 +10,9 @@ const jobsRoutes = require("./routes/jobs.routes");
 const clientsRouter = require("./routes/clients");
 const hspkRouter = require("./routes/hspk");
 const projectsRouter = require("./routes/projects");
+const prisma = require("./lib/prisma");
+const activityLogger = require("./middleware/activityLogger");
+const { startActivityArchiveScheduler } = require("./services/activityArchiveService");
 
 const rabRoutes = require("./routes/crudGrub/rab.routes");
 const rabGrub = require("./routes/crudGrub/rabGrub.routes");
@@ -30,6 +33,8 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Audit global dipasang sebelum router API. GET biasa diabaikan oleh middleware.
+app.use(activityLogger(prisma));
 
 // Static serve untuk frontend build
 // Gunakan path relatif dari __dirname (berada di backend/src)
@@ -93,6 +98,7 @@ app.use("/api", require("./routes/crudGrub/lapangan.routes"));
 app.use("/api", require("./routes/crudGrub/rab.routes"));
 app.use("/api", require("./routes/crudGrub/supplier.route"));
 app.use("/api/auth", require("./routes/crudGrub/auth.routes"));
+app.use("/api/security", require("./routes/crudGrub/security.routes"));
 app.use("/api", require("./routes/crudGrub/spk.routes"));
 app.use("/api/finance", require("./routes/crudGrub/finance.routes"));
 app.use("/api", require("./routes/crudGrub/task.routes"));
@@ -117,6 +123,7 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
+startActivityArchiveScheduler(prisma);
 app.listen(PORT, () => {
   console.log(`HSPK/AHSP importer jalan di http://localhost:${PORT}`);
 });
