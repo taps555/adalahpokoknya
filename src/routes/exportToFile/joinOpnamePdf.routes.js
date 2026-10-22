@@ -67,6 +67,13 @@ function fmtDate(d) {
   });
 }
 
+function statusFor(rekapPercent) {
+  if (rekapPercent >= 100) return "SELESAI";
+  if (rekapPercent >= 95) return "QUALITY CHECK";
+  if (rekapPercent >= 51) return "ON PROGRESS";
+  return "BELUM MULAI";
+}
+
 function drawHeader(doc, project, contentWidth, targetDate, titleText) {
   const x0 = MARGIN;
   const headerH = 70;
@@ -355,7 +362,7 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
         const actualRapTotal = hasChildren ? parentRapSum[it.bvItem?.id] || 0 : Number(it.rapTotalPrice);
         const weight = totalContract > 0 ? (actualRapTotal / totalContract) * 100 : 0;
         
-        let maxProgressSoFar = 0;
+        let sumProgressSoFar = 0;
         let progNow = 0;
         let photos = [];
         let hasActivity = false;
@@ -363,17 +370,18 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
         (it.dailyProgress || []).forEach(p => {
           const pStr = new Date(p.date).toISOString().slice(0, 10);
           const pVal = Number(p.progressPercent);
-          if (pVal > maxProgressSoFar) maxProgressSoFar = pVal;
+          sumProgressSoFar += pVal;
           if (pStr >= sStr && pStr <= eStr) {
              hasActivity = true;
-             if (pVal > progNow) progNow = pVal;
+             progNow += pVal;
              if (p.photoUrls && p.photoUrls.length > 0) {
                photos = photos.concat(p.photoUrls);
              }
           }
         });
+        if (sumProgressSoFar > 100) sumProgressSoFar = 100;
         
-        return { it, hasChildren, actualRapTotal, weight, maxProgressSoFar, progNow, photos, hasActivity };
+        return { it, hasChildren, actualRapTotal, weight, maxProgressSoFar: sumProgressSoFar, progNow, photos, hasActivity };
       });
 
       const parentRekapSum = {};
@@ -397,10 +405,9 @@ router.get("/:projectId/join-opname/export/pdf", async (req, res) => {
            progNow = data.actualRapTotal > 0 ? ((parentProgNowSum[pId] || 0) / data.actualRapTotal) * 100 : 0;
            volNow = 0; 
         }
+        if (rekapProgress > 100) rekapProgress = 100;
 
-        let status = "ON PROGRESS";
-        if (rekapProgress === 0) status = "BELUM MULAI";
-        else if (rekapProgress >= 100) status = "SELESAI";
+        let status = statusFor(rekapProgress);
 
         if (data.hasActivity || data.hasChildren) {
           items.push({

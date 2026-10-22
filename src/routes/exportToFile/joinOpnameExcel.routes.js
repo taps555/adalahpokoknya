@@ -65,6 +65,13 @@ function makeSafeSheetName(rawName, existingSheetNames) {
   return finalName;
 }
 
+function statusFor(rekapPercent) {
+  if (rekapPercent >= 100) return "SELESAI";
+  if (rekapPercent >= 95) return "QUALITY CHECK";
+  if (rekapPercent >= 51) return "ON PROGRESS";
+  return "BELUM MULAI";
+}
+
 router.get("/:projectId/join-opname/export/excel", async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -362,12 +369,12 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
         rabItems.forEach((it) => {
           if (!parentIds.has(it.bvItem?.id) && totalContract > 0) {
             const w = Number(it.rapTotalPrice) / totalContract;
-            let m = 0;
+            let sumProg = 0;
             (it.dailyProgress || []).forEach((dp) => {
-              const val = Number(dp.progressPercent);
-              if (val > m) m = val;
+              sumProg += Number(dp.progressPercent);
             });
-            overallTotalBobot += w * (m / 100);
+            if (sumProg > 100) sumProg = 100;
+            overallTotalBobot += w * (sumProg / 100);
           }
         });
 
@@ -377,12 +384,12 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
           if (!parentIds.has(it.bvItem?.id) && it.bvItem?.parentBvItemId) {
             const pId = it.bvItem.parentBvItemId;
             const actualTotal = Number(it.rapTotalPrice);
-            let itemMaxProg = 0;
+            let itemSumProg = 0;
             (it.dailyProgress || []).forEach((dp) => {
-              const pVal = Number(dp.progressPercent);
-              if (pVal > itemMaxProg) itemMaxProg = pVal;
+              itemSumProg += Number(dp.progressPercent);
             });
-            parentRekapSum[pId] = (parentRekapSum[pId] || 0) + actualTotal * (itemMaxProg / 100);
+            if (itemSumProg > 100) itemSumProg = 100;
+            parentRekapSum[pId] = (parentRekapSum[pId] || 0) + actualTotal * (itemSumProg / 100);
           }
         });
 
@@ -571,12 +578,12 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
               hasChildren ? "" : weight / 100
             ];
 
-            let maxProgressSoFar = 0;
+            let sumProgressSoFar = 0;
             if (!hasChildren) {
               (it.dailyProgress || []).forEach(dp => {
-                const val = Number(dp.progressPercent);
-                if (val > maxProgressSoFar) maxProgressSoFar = val;
+                sumProgressSoFar += Number(dp.progressPercent);
               });
+              if (sumProgressSoFar > 100) sumProgressSoFar = 100;
             }
 
             // Hitung data untuk setiap periode
@@ -588,8 +595,7 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
                 (it.dailyProgress || []).forEach(dp => {
                   const pDateStr = formatDateIso(parseDateUtc(dp.date));
                   if (pDateStr >= period.startIso && pDateStr <= period.endIso) {
-                    const pVal = Number(dp.progressPercent);
-                    if (pVal > progNow) progNow = pVal;
+                    progNow += Number(dp.progressPercent);
                   }
                 });
 
@@ -608,19 +614,14 @@ router.get("/:projectId/join-opname/export/excel", async (req, res) => {
             if (hasChildren) {
               const pId = it.bvItem?.id;
               const parentTotal = parentRapSum[pId] || 0;
-              const parentProgress = parentTotal > 0 ? (parentRekapSum[pId] || 0) / parentTotal : 0;
+              let parentProgress = parentTotal > 0 ? (parentRekapSum[pId] || 0) / parentTotal : 0;
+              if (parentProgress > 1) parentProgress = 1;
               rowData.push(parentProgress);
-              let status = "Belum Mulai";
-              if (parentProgress >= 1) status = "Selesai";
-              else if (parentProgress >= 0.95) status = "Quality Check";
-              else if (parentProgress > 0) status = "On Progress";
+              let status = statusFor(parentProgress * 100);
               rowData.push(status);
             } else {
-              rowData.push(maxProgressSoFar / 100);
-              let status = "Belum Mulai";
-              if (maxProgressSoFar >= 100) status = "Selesai";
-              else if (maxProgressSoFar >= 95) status = "Quality Check";
-              else if (maxProgressSoFar > 0) status = "On Progress";
+              rowData.push(sumProgressSoFar / 100);
+              let status = statusFor(sumProgressSoFar);
               rowData.push(status);
             }
 

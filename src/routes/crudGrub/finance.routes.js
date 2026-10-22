@@ -1466,7 +1466,27 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
       orderBy: [{ order: "asc" }],
       include: {
         group: { include: { parent: true } },
-        parent: { include: { parent: true } },
+        parent: {
+          include: {
+            parent: true,
+            workCategory: true,
+            workSubCategory: true,
+            bvItem: {
+              include: {
+                workCategory: true,
+                workSubCategory: true,
+              },
+            },
+          },
+        },
+        workCategory: true,
+        workSubCategory: true,
+        bvItem: {
+          include: {
+            workCategory: true,
+            workSubCategory: true,
+          },
+        },
       },
     });
 
@@ -1477,6 +1497,20 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
       const overUnderNotes = [];
       if (!rapQty || rapQty <= 0) overUnderNotes.push("Volume RAP belum terisi");
       if (!rapPrice || rapPrice <= 0) overUnderNotes.push("Harga RAP belum terisi");
+
+      // If it.parent exists, the parent job is it.parent
+      const hasParent = Boolean(it.parent);
+      const parentObj = hasParent ? it.parent : it;
+      const parentWorkCat = parentObj.workCategory || parentObj.bvItem?.workCategory;
+      // Di BV dan RAB, parent / header pekerjaan tidak memiliki subkategori (subkategori hanya ada di level item pekerjaan)
+      const parentWorkSubCat = hasParent ? (it.parent.workSubCategory || it.parent.bvItem?.workSubCategory) : null;
+      const parentDiscipline = parentObj.discipline;
+
+      // Item classification: from it directly, with category fallback to parent if not set
+      const itemWorkCat = it.workCategory || it.bvItem?.workCategory || parentWorkCat;
+      const itemWorkSubCat = it.workSubCategory || it.bvItem?.workSubCategory;
+      const itemDiscipline = it.discipline || parentDiscipline;
+
       return {
         uniqueId: `item_${it.id}`,
         rabItemId: it.id,
@@ -1487,6 +1521,15 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
         rapTotal,
         groupName: it.group?.name || null,
         jobName: it.parent?.name || it.name,
+        isParent: !hasParent,
+        parentWorkCategoryCode: parentWorkCat ? parentWorkCat.code : (parentDiscipline || null),
+        parentWorkCategoryName: parentWorkCat ? parentWorkCat.name : null,
+        parentWorkSubCategoryCode: parentWorkSubCat ? parentWorkSubCat.code : null,
+        parentWorkSubCategoryName: parentWorkSubCat ? parentWorkSubCat.name : null,
+        workCategoryCode: itemWorkCat ? itemWorkCat.code : (itemDiscipline || null),
+        workCategoryName: itemWorkCat ? itemWorkCat.name : null,
+        workSubCategoryCode: itemWorkSubCat ? itemWorkSubCat.code : null,
+        workSubCategoryName: itemWorkSubCat ? itemWorkSubCat.name : null,
         notes: overUnderNotes.join("; ") || null,
       };
     });
@@ -1501,7 +1544,27 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
         rabItem: {
           include: {
             group: { include: { parent: true } },
-            parent: { include: { parent: true } },
+            parent: {
+              include: {
+                parent: true,
+                workCategory: true,
+                workSubCategory: true,
+                bvItem: {
+                  include: {
+                    workCategory: true,
+                    workSubCategory: true,
+                  },
+                },
+              },
+            },
+            workCategory: true,
+            workSubCategory: true,
+            bvItem: {
+              include: {
+                workCategory: true,
+                workSubCategory: true,
+              },
+            },
           },
         },
       },
@@ -1515,6 +1578,21 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
       const overUnderNotes = [];
       if (!rapQty || rapQty <= 0) overUnderNotes.push("Volume RAP belum terisi");
       if (!rapPrice || rapPrice <= 0) overUnderNotes.push("Harga RAP belum terisi");
+
+      // For components, comp belongs to it (RabItem).
+      // If it.parent exists, the parent job is it.parent, and it is the child item.
+      const hasParent = Boolean(it.parent);
+      const parentObj = hasParent ? it.parent : it;
+      const parentWorkCat = parentObj.workCategory || parentObj.bvItem?.workCategory;
+      // Di BV dan RAB, parent / header pekerjaan tidak memiliki subkategori
+      const parentWorkSubCat = hasParent ? (it.parent.workSubCategory || it.parent.bvItem?.workSubCategory) : null;
+      const parentDiscipline = parentObj.discipline;
+
+      // Item classification belongs to it (e.g. child job)
+      const itemWorkCat = it.workCategory || it.bvItem?.workCategory || parentWorkCat;
+      const itemWorkSubCat = it.workSubCategory || it.bvItem?.workSubCategory;
+      const itemDiscipline = it.discipline || parentDiscipline;
+
       return {
         uniqueId: `comp_${comp.id}`,
         rabItemId: it.id, // Gunakan ID parent (RabItem) agar sesuai dengan relasi database
@@ -1525,6 +1603,15 @@ router.post("/po-jasa/rap-plan", verifyToken, async (req, res) => {
         rapTotal,
         groupName: it.group?.name || null,
         jobName: it.parent?.name || it.name,
+        isParent: false,
+        parentWorkCategoryCode: parentWorkCat ? parentWorkCat.code : (parentDiscipline || null),
+        parentWorkCategoryName: parentWorkCat ? parentWorkCat.name : null,
+        parentWorkSubCategoryCode: parentWorkSubCat ? parentWorkSubCat.code : null,
+        parentWorkSubCategoryName: parentWorkSubCat ? parentWorkSubCat.name : null,
+        workCategoryCode: itemWorkCat ? itemWorkCat.code : (itemDiscipline || null),
+        workCategoryName: itemWorkCat ? itemWorkCat.name : null,
+        workSubCategoryCode: itemWorkSubCat ? itemWorkSubCat.code : null,
+        workSubCategoryName: itemWorkSubCat ? itemWorkSubCat.name : null,
         notes: overUnderNotes.join("; ") || null,
       };
     });
