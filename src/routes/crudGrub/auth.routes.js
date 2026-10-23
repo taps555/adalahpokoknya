@@ -65,7 +65,7 @@ router.post("/login", async (req, res) => {
     // 3. Jika cocok, buat Tiket JWT
     // Tiket ini menyimpan ID dan Role, berlaku selama 12 jam
     const token = jwt.sign(
-      { userId: user.id, role: user.role, name: user.name },
+      { id: user.id, userId: user.id, role: user.role, name: user.name, username: user.username },
       SECRET_KEY,
       { expiresIn: "12h" },
     );

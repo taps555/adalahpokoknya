@@ -451,6 +451,7 @@ router.get("/pengajuan-bayar", async (req, res) => {
             },
           },
         },
+        createdBy: { select: { name: true, id: true } },
         approvedBy: { select: { name: true, id: true } },
         verifiedBy: { select: { name: true, id: true } },
         pembayaran: true,
@@ -1081,7 +1082,7 @@ router.put(
               sisaBayar: totalTagihan,
               metodeBayar: metodeDefault,
               keterangan: `Draft pembayaran PO ${poForPayment.poNumber || poForPayment.id}`,
-              status: poForPayment.kategoriPO === "JASA" ? "BELUM_BAYAR" : "PENDING",
+              status: "PENDING",
               noPembayaran: poForPayment.kategoriPO === "JASA" ? null : undefined,
               paymentHistory: {
                 entries: [],
@@ -1726,6 +1727,102 @@ const enrichPembayaranApproval = (pembayaran) => {
 /**
  * GET /api/pembayaran-supplier
  */
+
+/**
+ * Menghitung progress Join Opname (JO) proyek dan plafon maksimal pembayaran jasa
+ */
+async function getJoinOpnameProgressForPembayaran(pembayaran) {
+  try {
+    const po = pembayaran.purchaseOrder;
+    const projectId = po?.projectId || pembayaran.pengajuan?.projectId;
+    const totalTagihan = Math.max(
+      0,
+      Number(
+        pembayaran.totalTagihan ||
+        po?.grandTotal ||
+        po?.subTotal ||
+        0
+      )
+    );
+    const totalTerbayar = Math.max(0, Number(pembayaran.totalTerbayar || 0));
+
+    if (!projectId) {
+      return {
+        progressJoPercent: 100,
+        totalTagihan,
+        maxPlafonBayar: totalTagihan,
+        totalTerbayar,
+        sisaPlafonBayar: Math.max(0, totalTagihan - totalTerbayar),
+      };
+    }
+
+    const rabItems = await prisma.rabItem.findMany({
+      where: { projectId },
+      include: {
+        dailyProgress: true,
+        bvItem: { select: { id: true, parentBvItemId: true } },
+      },
+    });
+
+    if (!rabItems || rabItems.length === 0) {
+      return {
+        progressJoPercent: 100,
+        totalTagihan,
+        maxPlafonBayar: totalTagihan,
+        totalTerbayar,
+        sisaPlafonBayar: Math.max(0, totalTagihan - totalTerbayar),
+      };
+    }
+
+    const parentIds = new Set(
+      rabItems.map((it) => it.bvItem?.parentBvItemId).filter(Boolean)
+    );
+
+    const leafItems = rabItems.filter((it) => !parentIds.has(it.bvItem?.id));
+    const totalContract = leafItems.reduce(
+      (sum, it) => sum + Number(it.rapTotalPrice || 0),
+      0
+    );
+
+    let progressSum = 0;
+    leafItems.forEach((it) => {
+      const itemRap = Number(it.rapTotalPrice || 0);
+      const sumProg = (it.dailyProgress || []).reduce(
+        (s, p) => s + Number(p.progressPercent || 0),
+        0
+      );
+      const rekapProgress = Math.min(100, Math.max(0, sumProg));
+      if (totalContract > 0) {
+        const weight = (itemRap / totalContract) * 100;
+        progressSum += weight * (rekapProgress / 100);
+      }
+    });
+
+    const progressJoPercent = Math.min(100, Math.round(progressSum * 100) / 100);
+    const maxPlafonBayar = Math.round((progressJoPercent / 100) * totalTagihan);
+    const sisaPlafonBayar = Math.max(0, maxPlafonBayar - totalTerbayar);
+
+    return {
+      progressJoPercent,
+      totalTagihan,
+      maxPlafonBayar,
+      totalTerbayar,
+      sisaPlafonBayar,
+    };
+  } catch (err) {
+    console.error("Error getJoinOpnameProgressForPembayaran:", err);
+    const totalTagihan = Number(pembayaran.totalTagihan || 0);
+    const totalTerbayar = Number(pembayaran.totalTerbayar || 0);
+    return {
+      progressJoPercent: 100,
+      totalTagihan,
+      maxPlafonBayar: totalTagihan,
+      totalTerbayar,
+      sisaPlafonBayar: Math.max(0, totalTagihan - totalTerbayar),
+    };
+  }
+}
+
 router.get("/pembayaran-supplier", async (req, res) => {
   try {
     const pembayaran = await prisma.pembayaranSupplier.findMany({
@@ -1748,6 +1845,8 @@ router.get("/pembayaran-supplier", async (req, res) => {
         bukuBesarTransaksi: { select: { id: true } },
         purchaseOrder: {
           include: {
+            supplier: { select: { id: true, name: true, type: true } },
+            jasa: { select: { id: true, nama: true } },
             items: {
               include: {
                 materialRequest: true,
@@ -1782,6 +1881,24 @@ router.get("/pembayaran-supplier", async (req, res) => {
 /**
  * GET /api/pembayaran-supplier/:id
  */
+
+router.get("/pembayaran-supplier/:id/jo-progress", async (req, res) => {
+  try {
+    const pembayaran = await prisma.pembayaranSupplier.findUnique({
+      where: { id: req.params.id },
+      include: {
+        purchaseOrder: { include: { project: true } },
+        pengajuan: true,
+      },
+    });
+    if (!pembayaran) return res.status(404).json({ error: "Pembayaran tidak ditemukan" });
+    const joData = await getJoinOpnameProgressForPembayaran(pembayaran);
+    res.json(joData);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get("/pembayaran-supplier/:id", async (req, res) => {
   try {
     const pembayaran = await prisma.pembayaranSupplier.findUnique({
@@ -2176,17 +2293,66 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
     const existingTerbayar = Number(existing.totalTerbayar ?? existing.jumlahBayar ?? 0);
     let totalTerbayarBaru = existingTerbayar;
 
+    // Deteksi jika user sedang merevisi pengajuan pembayaran yang sebelumnya ditolak
+    let existingEntries = [];
+    let existingMeta = {};
+    if (Array.isArray(existing.paymentHistory)) {
+      existingEntries = [...existing.paymentHistory];
+    } else if (existing.paymentHistory && typeof existing.paymentHistory === "object") {
+      existingMeta = { ...existing.paymentHistory };
+      existingEntries = Array.isArray(existing.paymentHistory.entries)
+        ? [...existing.paymentHistory.entries]
+        : [];
+    }
+
+    const isRejectedRevision =
+      existingMeta.approvalStatus === "REJECTED" ||
+      existing.approvalStatus === "REJECTED" ||
+      Boolean(req.body.isRevisi);
+
+    let baseTerbayar = existingTerbayar;
+    let rejectedEntryIndex = -1;
+
+    if (isRejectedRevision && existingEntries.length > 0) {
+      // Cari entry terakhir yang ditolak
+      rejectedEntryIndex = existingEntries.map(e => e.approvalStatus).lastIndexOf("REJECTED");
+      if (rejectedEntryIndex === -1) rejectedEntryIndex = existingEntries.length - 1;
+      const rejectedEntry = existingEntries[rejectedEntryIndex];
+      const rejectedNominal = Number(rejectedEntry?.jumlah || 0);
+      baseTerbayar = Math.max(0, existingTerbayar - rejectedNominal);
+    }
+
     if (tambahPembayaran) {
       if (jumlahInput <= 0) {
         return res.status(400).json({ error: "Nominal cicilan/pelunasan harus > 0" });
       }
-      totalTerbayarBaru += jumlahInput;
+      totalTerbayarBaru = isRejectedRevision
+        ? baseTerbayar + jumlahInput
+        : existingTerbayar + jumlahInput;
     } else if (jumlahBayar !== undefined && jumlahBayar !== null && jumlahBayar !== "") {
       totalTerbayarBaru = jumlahInput;
     }
 
     if (totalTagihan > 0 && totalTerbayarBaru > totalTagihan) {
       return res.status(400).json({ error: "Total pembayaran melebihi total tagihan" });
+    }
+
+    if (isJasaFlow && (tambahPembayaran || (jumlahBayar !== undefined && jumlahBayar !== null && jumlahBayar !== ""))) {
+      const joData = await getJoinOpnameProgressForPembayaran(existing);
+      if (joData.progressJoPercent <= 0 && totalTerbayarBaru > 0) {
+        return res.status(400).json({
+          error: "Progress Join Opname (JO) pekerjaan ini masih 0%. Belum dapat melakukan pembayaran jasa/subkon.",
+          progressJo: 0,
+        });
+      }
+      if (totalTerbayarBaru > joData.maxPlafonBayar + 100) {
+        return res.status(400).json({
+          error: `Total pembayaran (Rp ${totalTerbayarBaru.toLocaleString('id-ID')}) melebihi plafon progress Join Opname (${joData.progressJoPercent}% = Rp ${joData.maxPlafonBayar.toLocaleString('id-ID')}). Maksimal pembayaran saat ini: Rp ${joData.sisaPlafonBayar.toLocaleString('id-ID')}`,
+          progressJo: joData.progressJoPercent,
+          maxPlafon: joData.maxPlafonBayar,
+          sisaPlafon: joData.sisaPlafonBayar,
+        });
+      }
     }
 
     const sisaBayarBaru = Math.max(totalTagihan - totalTerbayarBaru, 0);
@@ -2205,49 +2371,46 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
       autoStatus = status === "PAID" ? "LUNAS" : status === "PARTIAL" ? "TEMPO" : status;
     }
 
-    const nominalJurnal = Math.max(totalTerbayarBaru - existingTerbayar, 0);
+    const nominalJurnal = isRejectedRevision
+      ? jumlahInput
+      : Math.max(totalTerbayarBaru - existingTerbayar, 0);
 
     const resolvedTipeAkunKasBank =
       tipeAkunKasBank || existing.tipeAkunKasBank || (rekeningBankId || existing.rekeningBankId ? "BANK" : "KAS");
 
-    let existingEntries = [];
-    let existingMeta = {};
-    if (Array.isArray(existing.paymentHistory)) {
-      existingEntries = [...existing.paymentHistory];
-    } else if (existing.paymentHistory && typeof existing.paymentHistory === "object") {
-      existingMeta = { ...existing.paymentHistory };
-      existingEntries = Array.isArray(existing.paymentHistory.entries)
-        ? [...existing.paymentHistory.entries]
-        : [];
-    }
+    const newEntryObj = {
+      id: (isRejectedRevision && rejectedEntryIndex >= 0 && existingEntries[rejectedEntryIndex]?.id) || `PMT-${Date.now()}`,
+      tanggal: (tanggalBayarFinal || new Date()).toISOString(),
+      jumlah: nominalJurnal > 0 ? nominalJurnal : jumlahInput,
+      metodeBayar: metodeFinal,
+      rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
+      tipeAkunKasBank: resolvedTipeAkunKasBank,
+      tipeRekeningId: tipeRekeningId || existing.tipeRekeningId || null,
+      tipeEntry:
+        metodeFinal === "TEMPO"
+          ? (sisaBayarBaru <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
+          : "PEMBAYARAN",
+      keterangan: keterangan || null,
+      createdById: req.user?.userId || req.user?.id || null,
+      createdByName: req.user?.name || req.user?.username || "Staf",
+      approvalStatus: "PENDING",
+      financeApprovedAt: null,
+      financeApprovedBy: null,
+      atasanApprovedAt: null,
+      atasanApprovedBy: null,
+      isPostedKasBank: false,
+      postedKasBankAt: null,
+      postedBy: null,
+    };
 
-    if (nominalJurnal > 0) {
-      existingEntries.push({
-        id: `PMT-${Date.now()}`,
-        tanggal: (tanggalBayarFinal || new Date()).toISOString(),
-        jumlah: nominalJurnal,
-        metodeBayar: metodeFinal,
-        rekeningBankId: rekeningBankId || existing.rekeningBankId || null,
-        tipeAkunKasBank: resolvedTipeAkunKasBank,
-        tipeRekeningId: tipeRekeningId || existing.tipeRekeningId || null,
-        tipeEntry:
-          metodeFinal === "TEMPO"
-            ? (sisaBayarBaru <= 0 ? "PELUNASAN_TEMPO" : "CICILAN_TEMPO")
-            : "PEMBAYARAN",
-        keterangan: keterangan || null,
-        approvalStatus: "PENDING",
-        financeApprovedAt: null,
-        financeApprovedBy: null,
-        atasanApprovedAt: null,
-        atasanApprovedBy: null,
-        isPostedKasBank: false,
-        postedKasBankAt: null,
-        postedBy: null,
-      });
+    if (isRejectedRevision && rejectedEntryIndex >= 0) {
+      existingEntries[rejectedEntryIndex] = newEntryObj;
+    } else if (nominalJurnal > 0 || (tambahPembayaran && jumlahInput > 0)) {
+      existingEntries.push(newEntryObj);
     }
 
     const currentApprovalStatus = normalizePembayaranApprovalStatus(existingMeta.approvalStatus || "PENDING");
-    const isNewAction = nominalJurnal > 0;
+    const isNewAction = nominalJurnal > 0 || isRejectedRevision || (tambahPembayaran && jumlahInput > 0);
 
     const updatedPaymentHistory = {
       ...existingMeta,
@@ -2263,6 +2426,8 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
             postedKasBankAt: null,
             postedBy: null,
             rejectReason: null,
+            rejectedAt: null,
+            rejectedBy: null,
           }
         : {}),
     };

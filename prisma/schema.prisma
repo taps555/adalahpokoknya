@@ -105,19 +105,24 @@ model User {
   emailVerifiedAt               DateTime?
   activityLogs                   ActivityLog[]
   approvedPOs                    PurchaseOrder[]          @relation("ApprovedByUser")
+  createdPOs                     PurchaseOrder[]          @relation("CreatedPOsByUser")
   verifiedPOs                    PurchaseOrder[]          @relation("VerifiedByUser")
   rejectedPOs                    PurchaseOrder[]          @relation("RejectedByUser")
   approvedPengajuan              PengajuanPembayaran[]    @relation("ApprovedPengajuanByUser")
+  createdPengajuan               PengajuanPembayaran[]    @relation("CreatedPengajuanByUser")
   verifiedPengajuan              PengajuanPembayaran[]    @relation("VerifiedPengajuanByUser")
   verifiedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("VerifiedInvoicePenjualanDesainByUser")
   approvedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("ApprovedInvoicePenjualanDesainByUser")
   postedInvoicePenjualanDesain   InvoicePenjualanDesain[] @relation("PostedInvoicePenjualanDesainByUser")
+  createdInvoicePenjualanDesain  InvoicePenjualanDesain[] @relation("CreatedInvoicePenjualanDesainByUser")
   verifiedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("VerifiedInvoicePenjualanKlienByUser")
   approvedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("ApprovedInvoicePenjualanKlienByUser")
   postedInvoicePenjualanKlien    InvoicePenjualanKlien[]  @relation("PostedInvoicePenjualanKlienByUser")
+  createdInvoicePenjualanKlien   InvoicePenjualanKlien[]  @relation("CreatedInvoicePenjualanKlienByUser")
   verifiedInvoiceOperasional     InvoiceOperasional[]     @relation("VerifiedInvoiceOperasionalByUser")
   approvedInvoiceOperasional     InvoiceOperasional[]     @relation("ApprovedInvoiceOperasionalByUser")
   postedInvoiceOperasional       InvoiceOperasional[]     @relation("PostedInvoiceOperasionalByUser")
+  createdInvoiceOperasional      InvoiceOperasional[]     @relation("CreatedInvoiceOperasionalByUser")
   requestedHabisPakai            PermintaanHabisPakai[]   @relation("RequestedHabisPakai")
   bukuBesarTransaksi             BukuBesarTransaksi[]     @relation("TransaksiBB")
   createdTasks                   TaskItem[]               @relation("TaskCreator")
@@ -1237,6 +1242,8 @@ model AhspItemMapping {
 }
 
 model PurchaseOrder {
+  createdById  String?
+  createdBy    User?     @relation("CreatedPOsByUser", fields: [createdById], references: [id])
   id       String  @id @default(uuid())
   poNumber String? @unique
   seq      Int     @default(autoincrement())
@@ -1391,6 +1398,7 @@ enum PembayaranStatus {
   BELUM_BAYAR
   BON
   LUNAS
+  TEMPO
 }
 
 enum InvoiceBayarStatus {
@@ -1450,6 +1458,8 @@ model ReturPembelianItem {
 
 // 2. PENGAJUAN PEMBAYARAN
 model PengajuanPembayaran {
+  createdById   String?
+  createdBy     User?          @relation("CreatedPengajuanByUser", fields: [createdById], references: [id])
   id            String         @id @default(cuid())
   noPengajuan   String?        @unique
   seq           Int            @default(autoincrement())
@@ -1553,6 +1563,8 @@ model InvoicePenagihan {
 }
 
 model InvoicePenjualanDesain {
+  createdById       String?
+  createdBy         User?               @relation("CreatedInvoicePenjualanDesainByUser", fields: [createdById], references: [id])
   id                String              @id @default(cuid())
   projectId         String
   project           Project             @relation("ProjectInvoicePenjualanDesain", fields: [projectId], references: [id], onDelete: Cascade)
@@ -1598,6 +1610,8 @@ model InvoicePenjualanDesain {
 }
 
 model InvoicePenjualanKlien {
+  createdById    String?
+  createdBy      User?               @relation("CreatedInvoicePenjualanKlienByUser", fields: [createdById], references: [id])
   id             String              @id @default(cuid())
   projectId      String
   project        Project             @relation("ProjectInvoicePenjualanKlien", fields: [projectId], references: [id], onDelete: Cascade)
@@ -1650,6 +1664,8 @@ model InvoicePenjualanKlien {
 }
 
 model InvoiceOperasional {
+  createdById    String?
+  createdBy      User?                   @relation("CreatedInvoiceOperasionalByUser", fields: [createdById], references: [id])
   id             String                  @id @default(cuid())
   projectId      String
   project        Project                 @relation("ProjectInvoiceOperasional", fields: [projectId], references: [id], onDelete: Cascade)
