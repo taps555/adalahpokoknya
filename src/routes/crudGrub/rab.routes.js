@@ -109,7 +109,6 @@ router.put("/rab-items/:id", async (req, res, next) => {
       operationalPercent,
       wastePercent,
       profitPercent,
-      ohComponents,
       components,
       groupId,
       isByOwner,
@@ -206,7 +205,7 @@ router.put("/rab-items/:id", async (req, res, next) => {
     }
 
     const oh = resolveOhBreakdown(
-      { operationalPercent, wastePercent, profitPercent, overheadPercent, ohComponents },
+      { operationalPercent, wastePercent, profitPercent, overheadPercent },
       existing,
     );
     const pricing = calculateRabOh(rapSatuan, vol, oh);
@@ -229,7 +228,6 @@ router.put("/rab-items/:id", async (req, res, next) => {
           operationalPercent: oh.operationalPercent,
           wastePercent: oh.wastePercent,
           profitPercent: oh.profitPercent,
-          ohComponents: oh.ohComponents,
           rabUnitPrice: rabSatuan,
           rabTotalPrice: rabTotal,
           ...(componentUpdate ? { components: componentUpdate } : {}),
@@ -414,7 +412,6 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN
           operationalPercent: oh.operationalPercent,
           wastePercent: oh.wastePercent,
           profitPercent: oh.profitPercent,
-          ohComponents: oh.ohComponents,
           rapUnitPrice: rapSatuan,
           rapTotalPrice: rapTotal,
           rabUnitPrice: rabSatuan,
@@ -566,7 +563,6 @@ router.put("/rab-items/bulk-price", async (req, res) => {
             operationalPercent: oh.operationalPercent,
             wastePercent: oh.wastePercent,
             profitPercent: oh.profitPercent,
-            ohComponents: oh.ohComponents,
             rabUnitPrice: rabSatuan,
             rabTotalPrice: rabTotal,
             ...(shouldClearComponents ? { components: { deleteMany: {} } } : {}),
@@ -744,7 +740,6 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMI
             operationalPercent: ohBulk.operationalPercent,
             wastePercent: ohBulk.wastePercent,
             profitPercent: ohBulk.profitPercent,
-            ohComponents: ohBulk.ohComponents,
             rapUnitPrice: rapSatuan,
             rapTotalPrice: rapTotal,
             rabUnitPrice: rabSatuan,

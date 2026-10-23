@@ -433,9 +433,6 @@ model RabItem {
   operationalPercent Decimal       @default(0) @db.Decimal(5, 2)
   wastePercent       Decimal       @default(0) @db.Decimal(5, 2)
   profitPercent      Decimal       @default(0) @db.Decimal(5, 2)
-  // Komponen OH dinamis (termasuk 3 default). Nama field tetap "OH" agar
-  // pembaca lama, export, dan PDF tidak perlu diubah. Web hanya menampilkan OVH.
-  ohComponents       Json?         @default("[]")
   discipline         Discipline?
   grade              String?
   timeSchedule       TimeSchedule? // <-- TAMBAH
