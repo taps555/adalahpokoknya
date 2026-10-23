@@ -993,7 +993,8 @@ async function rapikanAnak(tx, indukBvId) {
 }
 
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
-router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post(
+  "/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     // Tambahkan includeChildren dari req.body
@@ -1154,6 +1155,13 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
           order: insertOrder,
           components: componentRows.length > 0 ? { create: componentRows } : undefined,
+          // Komponen OH default dari total overhead. Nama backend tetap OH,
+          // label web OVH. 3 komponen selalu ada agar detail ovh tidak kosong.
+          ohComponents: [
+            { id: "operational", name: "Operasional", percent: overheadPct, kind: "OPERATIONAL" },
+            { id: "waste", name: "Waste Anggaran", percent: 0, kind: "WASTE" },
+            { id: "profit", name: "Laba Rencana", percent: 0, kind: "PROFIT" },
+          ],
         },
       });
 
