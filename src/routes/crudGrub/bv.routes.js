@@ -18,6 +18,7 @@ const {
 const { computeAhspPricing, normalizeAhspOverhead } = require("../../services/ahspPricingService");
 const { recordChange } = require("../../services/bvRabAuditService");
 const { assertProjectEditable } = require("../../services/bvRabApprovalService");
+const { normalizeOhDefinitions } = require("../../services/rabOhService");
 const ExcelJS = require("exceljs");
 const { buildBvSheet } = require("../../services/bvExportHelper");
 const { buildRabSheet } = require("../../services/rabExportHelper");
@@ -887,8 +888,9 @@ async function pastikanIndukTerlink(tx, bvItem) {
   });
   const proj = await tx.project.findUnique({
     where: { id: parent.projectId },
-    select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true },
+    select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true, ohDefinitions: true },
   });
+  const shellOhDefinitions = normalizeOhDefinitions(proj?.ohDefinitions);
 
   const shell = await tx.rabItem.create({
     data: {
@@ -907,6 +909,7 @@ async function pastikanIndukTerlink(tx, bvItem) {
       wastePercent: 0,
       profitPercent: 0,
       overheadPercent: 0,
+      ohComponents: shellOhDefinitions.map((definition) => ({ ...definition, percent: 0 })),
       rapUnitPrice: 0,
       rapTotalPrice: 0,
       rabUnitPrice: 0,
@@ -993,8 +996,7 @@ async function rapikanAnak(tx, indukBvId) {
 }
 
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
-router.post(
-  "/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     // Tambahkan includeChildren dari req.body
@@ -1124,10 +1126,15 @@ router.post(
       // --- CREATE PARENT DI TABEL RAB ---
       // FIX: discipline dulu tidak pernah diisi (selalu null) walau project punya
       // discipline. Diwarisi dari project supaya filter per-disiplin di FE bekerja.
-      const bvProject = await tx.project.findUnique({
+    const bvProject = await tx.project.findUnique({
         where: { id: bvItem.projectId },
-        select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true },
+        select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true, ohDefinitions: true },
       });
+      const projectOhDefinitions = normalizeOhDefinitions(bvProject?.ohDefinitions);
+      const initialOhComponents = projectOhDefinitions.map((definition) => ({
+        ...definition,
+        percent: definition.id === "operational" ? overheadPct : 0,
+      }));
 
       const rabItem = await tx.rabItem.create({
         data: {
@@ -1139,6 +1146,10 @@ router.post(
           category: finalCategory,
           reference: finalReference,
           overheadPercent: overheadPct, // <-- Pastikan overheadPercent
+          operationalPercent: overheadPct,
+          wastePercent: 0,
+          profitPercent: 0,
+          ohComponents: initialOhComponents,
           volume: vol,
           isHeaderOnly: bvItem.isHeaderOnly || false,
           discipline: bvItem.workCategoryId
@@ -1155,13 +1166,6 @@ router.post(
           sourceJobTypeId: bvItem.sourceJobTypeId || null,
           order: insertOrder,
           components: componentRows.length > 0 ? { create: componentRows } : undefined,
-          // Komponen OH default dari total overhead. Nama backend tetap OH,
-          // label web OVH. 3 komponen selalu ada agar detail ovh tidak kosong.
-          ohComponents: [
-            { id: "operational", name: "Operasional", percent: overheadPct, kind: "OPERATIONAL" },
-            { id: "waste", name: "Waste Anggaran", percent: 0, kind: "WASTE" },
-            { id: "profit", name: "Laba Rencana", percent: 0, kind: "PROFIT" },
-          ],
         },
       });
 
@@ -1200,6 +1204,13 @@ router.post(
               paymentUnit: childBv.paymentUnit || "-",
               category: childCategory,
               overheadPercent: childOverhead,
+              operationalPercent: childOverhead,
+              wastePercent: 0,
+              profitPercent: 0,
+              ohComponents: projectOhDefinitions.map((definition) => ({
+                ...definition,
+                percent: definition.id === "operational" ? childOverhead : 0,
+              })),
               volume: childVol,
               discipline: childBv.workCategoryId
                 ? null
@@ -1333,8 +1344,9 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
         // 5. Buat kembarannya di tabel RAB dengan struktur yang utuh
         const bulkProject = await tx.project.findUnique({
           where: { id: bvItem.projectId },
-          select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true },
+          select: { discipline: true, grade: true, sipilGrade: true, interiorGrade: true, ohDefinitions: true },
         });
+        const bulkOhDefinitions = normalizeOhDefinitions(bulkProject?.ohDefinitions);
 
         const bulkPricing = await computeAhspPricing({
           sourceJobTypeId: bvItem.sourceJobTypeId,
@@ -1376,6 +1388,13 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
             sourceJobTypeId: bvItem.sourceJobTypeId || null,
 
             overheadPercent: bulkOverheadPct,
+            operationalPercent: bulkOverheadPct,
+            wastePercent: 0,
+            profitPercent: 0,
+            ohComponents: bulkOhDefinitions.map((definition) => ({
+              ...definition,
+              percent: definition.id === "operational" ? bulkOverheadPct : 0,
+            })),
             rapUnitPrice: bulkRapUnitPrice,
             rabUnitPrice: bulkRabUnitPrice,
             rapTotalPrice: bulkRapUnitPrice * Number(bvItem.totalVolume),
@@ -1572,6 +1591,14 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
         0,
     );
     let componentUpdate;
+    const syncProject = await prisma.project.findUnique({
+      where: { id: bvItem.projectId },
+      select: { ohDefinitions: true },
+    });
+    const syncOhDefinitions = normalizeOhDefinitions(syncProject?.ohDefinitions);
+    const existingOhComponents = Array.isArray(bvItem.linkedRabItem.ohComponents)
+      ? bvItem.linkedRabItem.ohComponents
+      : syncOhDefinitions.map((definition) => ({ ...definition, percent: 0 }));
 
     // 🔥 PERBAIKAN AHSP: Hitung Modal Murni dari Komponen
     if (bvItem.sourceJobTypeId) {
@@ -1624,6 +1651,10 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
           wastePercent: 0,
           profitPercent: 0,
           overheadPercent: overheadPct, // total OH; legacy OH masuk operasional
+          ohComponents: syncOhDefinitions.map((definition) => ({
+            ...definition,
+            percent: Number(existingOhComponents.find((component) => component.id === definition.id)?.percent ?? (definition.id === "operational" ? overheadPct : 0)),
+          })),
           volume: vol,
           rapUnitPrice: rapUnitPrice,
           rapTotalPrice: rapUnitPrice * vol,

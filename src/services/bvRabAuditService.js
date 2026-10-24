@@ -13,7 +13,7 @@ const AUDIT_FIELDS = Object.freeze({
     "id", "projectId", "name", "volume", "category", "reference", "discipline", "grade",
     "workCategoryId", "workSubCategoryId", "sourceJobTypeId", "overheadPercent",
     "operationalPercent", "wastePercent", "profitPercent", "rapUnitPrice", "rapTotalPrice",
-    "rabUnitPrice", "rabTotalPrice", "isByOwner", "isStip", "components",
+    "rabUnitPrice", "rabTotalPrice", "isByOwner", "isStip", "components", "ohComponents",
   ],
 });
 

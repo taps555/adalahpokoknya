@@ -9,7 +9,7 @@ const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhe
 const { normalizeAhspOverhead } = require("../../services/ahspPricingService");
 const { recordChange } = require("../../services/bvRabAuditService");
 const { assertProjectEditable } = require("../../services/bvRabApprovalService");
-const { resolveOhBreakdown, calculateRabOh } = require("../../services/rabOhService");
+const { resolveOhBreakdown, calculateRabOh, normalizeOhDefinitions, alignOhComponents, DEFAULT_OH_DEFINITIONS } = require("../../services/rabOhService");
 
 const redactSellingResponse = (req, res, next) => {
   if (req.user?.role === "SUPER_ADMIN") return next();
@@ -71,6 +71,11 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
   try {
     const { projectId } = req.params;
     const { discipline, workCategoryId } = req.query;
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { ohDefinitions: true },
+    });
+    const ohDefinitions = normalizeOhDefinitions(project?.ohDefinitions);
     let itemWhere = {};
     if (workCategoryId) {
       const config = await prisma.projectWorkCategory.findUnique({
@@ -89,7 +94,7 @@ router.get("/projects/:projectId/rab-items", async (req, res) => {
       include: { components: true, workCategory: true, workSubCategory: true },
       orderBy: [{ order: "asc" }],
     });
-    res.json(items);
+    res.json(items.map((item) => ({ ...item, ohDefinitions })));
   } catch (error) {
     console.error("Error List RabItem:", error);
     res.status(500).json({ error: "Terjadi kesalahan pada server." });
@@ -110,6 +115,7 @@ router.put("/rab-items/:id", async (req, res, next) => {
       wastePercent,
       profitPercent,
       ohComponents,
+      ohDefinitions,
       components,
       groupId,
       isByOwner,
@@ -125,6 +131,19 @@ router.put("/rab-items/:id", async (req, res, next) => {
 
     // Approval state is authoritative for every RAB edit.
     await assertProjectEditable(prisma, existing.projectId);
+
+    // Master kolom OH milik project: definisi ikut permintaan, lalu nilai item
+    // diselaraskan agar seluruh grup memakai kolom identik.
+    const project = await prisma.project.findUnique({
+      where: { id: existing.projectId },
+      select: { id: true, ohDefinitions: true },
+    });
+    let rawDefinitions = ohDefinitions !== undefined ? ohDefinitions : project?.ohDefinitions;
+    if (!Array.isArray(rawDefinitions)) {
+      rawDefinitions = DEFAULT_OH_DEFINITIONS;
+    }
+    const definitions = normalizeOhDefinitions(rawDefinitions);
+    const saveProjectDefinitions = ohDefinitions !== undefined || !Array.isArray(project?.ohDefinitions);
 
     // ==========================================
     // 🚨 KODE SATPAM: CEK APAKAH DIA INDUK? 🚨
@@ -205,10 +224,14 @@ router.put("/rab-items/:id", async (req, res, next) => {
       }
     }
 
-    const oh = resolveOhBreakdown(
-      { operationalPercent, wastePercent, profitPercent, overheadPercent, ohComponents },
-      existing,
-    );
+    const sourceOhComponents = ohComponents !== undefined ? ohComponents : existing.ohComponents;
+    const alignedOhComponents = alignOhComponents(sourceOhComponents, definitions, existing);
+    const ohInput = { operationalPercent, wastePercent, profitPercent, overheadPercent };
+    if (ohComponents !== undefined || saveProjectDefinitions) ohInput.ohComponents = alignedOhComponents;
+    const ohExisting = Array.isArray(existing.ohComponents)
+      ? { ...existing, ohComponents: alignedOhComponents }
+      : existing;
+    const oh = resolveOhBreakdown(ohInput, ohExisting);
     const pricing = calculateRabOh(rapSatuan, vol, oh);
     const rabSatuan =
       rabUnitPrice !== undefined && rabUnitPrice !== null && rabUnitPrice !== ""
@@ -220,6 +243,42 @@ router.put("/rab-items/:id", async (req, res, next) => {
 
     // 3. SIMPAN KE DATABASE
     const updated = await prisma.$transaction(async (tx) => {
+      if (saveProjectDefinitions) {
+        await tx.project.update({
+          where: { id: existing.projectId },
+          data: { ohDefinitions: definitions },
+        });
+        const projectItems = await tx.rabItem.findMany({
+          where: { projectId: existing.projectId, id: { not: id } },
+          select: {
+            id: true,
+            volume: true,
+            rapUnitPrice: true,
+            ohComponents: true,
+            operationalPercent: true,
+            wastePercent: true,
+            profitPercent: true,
+          },
+        });
+        for (const projectItem of projectItems) {
+          const aligned = alignOhComponents(projectItem.ohComponents, definitions, projectItem);
+          const projectOh = resolveOhBreakdown({ ohComponents: aligned }, projectItem);
+          const projectPricing = calculateRabOh(Number(projectItem.rapUnitPrice || 0), Number(projectItem.volume || 0), projectOh);
+          await tx.rabItem.update({
+            where: { id: projectItem.id },
+            data: {
+              operationalPercent: projectOh.operationalPercent,
+              wastePercent: projectOh.wastePercent,
+              profitPercent: projectOh.profitPercent,
+              overheadPercent: projectOh.overheadPercent,
+              ohComponents: aligned,
+              rapTotalPrice: projectPricing.rapTotalPrice,
+              rabUnitPrice: projectPricing.rabUnitPrice,
+              rabTotalPrice: projectPricing.rabTotalPrice,
+            },
+          });
+        }
+      }
       const saved = await tx.rabItem.update({
         where: { id },
         data: {
@@ -373,6 +432,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN
       ),
       wastePercent: Number(existing.wastePercent ?? 0),
       profitPercent: Number(existing.profitPercent ?? 0),
+      ...(Array.isArray(existing.ohComponents) ? { ohComponents: existing.ohComponents } : {}),
     };
     const hasExistingBreakdown =
       existingOh.operationalPercent > 0 ||
@@ -543,6 +603,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
               ),
               wastePercent: Number(existing.wastePercent ?? 0),
               profitPercent: Number(existing.profitPercent ?? 0),
+              ...(Array.isArray(existing.ohComponents) ? { ohComponents: existing.ohComponents } : {}),
             },
       );
 
@@ -703,6 +764,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMI
         ),
         wastePercent: Number(existing.wastePercent ?? 0),
         profitPercent: Number(existing.profitPercent ?? 0),
+        ...(Array.isArray(existing.ohComponents) ? { ohComponents: existing.ohComponents } : {}),
       };
       const hasExistingBreakdownBulk =
         existingOhBulk.operationalPercent > 0 ||

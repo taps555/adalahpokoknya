@@ -22,7 +22,7 @@ const RAB_FIELDS = [
   "id", "projectId", "workCategoryId", "workSubCategoryId", "name", "paymentUnit", "category", "reference",
   "overheadPercent", "operationalPercent", "wastePercent", "profitPercent", "discipline", "grade", "volume", "rapUnitPrice", "rapTotalPrice",
   "rabUnitPrice", "rabTotalPrice", "sourceJobTypeId", "groupId", "isByOwner", "isStip",
-  "isHeaderOnly", "order", "parentId", "components",
+  "isHeaderOnly", "order", "parentId", "components", "ohComponents",
 ];
 
 function projectFields(value, fields) {

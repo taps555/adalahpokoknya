@@ -4,6 +4,7 @@ const prisma = require("../../lib/prisma");
 const { verifyToken } = require("../../middleware/auth");
 const { redactSellingFields, validateJobTypeForProject, buildWorkCategoryItemWhere } = require("../../services/bvCalculationService");
 const { assertProjectEditable } = require("../../services/bvRabApprovalService");
+const { normalizeOhDefinitions } = require("../../services/rabOhService");
 const router = express.Router();
 
 const redactSellingResponse = (req, res, next) => {
@@ -98,6 +99,11 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
   try {
     const { projectId } = req.params;
     const { discipline, workCategoryId } = req.query;
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { ohDefinitions: true },
+    });
+    const ohDefinitions = normalizeOhDefinitions(project?.ohDefinitions);
     let itemWhere = {};
     if (workCategoryId) {
       const config = await prisma.projectWorkCategory.findUnique({
@@ -128,7 +134,11 @@ router.get("/projects/:projectId/rab-groups", async (req, res) => {
       },
       orderBy: [{ order: "asc" }],
     });
-    const byId = new Map(groups.map((g) => [g.id, { ...g, children: [] }]));
+    const byId = new Map(groups.map((g) => [g.id, {
+      ...g,
+      items: (g.items || []).map((item) => ({ ...item, ohDefinitions })),
+      children: [],
+    }]));
     const roots = [];
     for (const g of byId.values()) {
       if (g.parentId && byId.has(g.parentId)) {
