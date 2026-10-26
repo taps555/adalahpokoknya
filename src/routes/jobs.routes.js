@@ -58,11 +58,14 @@ router.get('/jobs/:id', async (req, res) => {
 
 /** GET /api/price-items?period=2026&type=BAHAN&q=semen */
 router.get('/price-items', async (req, res) => {
-  const { period, type, q } = req.query;
+  const { period, type, q, discipline, grade, workCategoryId } = req.query;
   const where = {};
   if (period) where.period = parseInt(period, 10);
   if (type) where.type = type;
   if (q) where.name = { contains: q, mode: 'insensitive' };
+  if (discipline) where.discipline = discipline;
+  if (grade) where.grade = grade;
+  if (workCategoryId) where.workCategoryId = workCategoryId;
 
   const items = await prisma.priceItem.findMany({
     where,
