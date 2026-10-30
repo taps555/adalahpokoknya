@@ -77,7 +77,7 @@ function moduleAccessGuard() {
       return next();
     } catch (error) {
       console.error('moduleAccessGuard error:', error.message);
-      return next();
+      return res.status(503).json({ error: 'Pemeriksaan akses sedang gagal. Coba lagi.' });
     }
   };
 }
@@ -119,7 +119,7 @@ async function attachProjectScope(req, res, next) {
     return next();
   } catch (error) {
     console.error('attachProjectScope error:', error.message);
-    return next();
+    return res.status(503).json({ error: 'Pemeriksaan membership project sedang gagal. Coba lagi.' });
   }
 }
 

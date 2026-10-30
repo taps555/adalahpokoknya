@@ -287,6 +287,36 @@ router.get('/permissions/my-access', async (req, res) => {
   }
 });
 
+// Project membership: pembatas data setelah permission halaman lolos.
+router.get('/project-memberships', async (req, res) => {
+  try {
+    if (req.user?.role !== 'OWNER' && req.user?.role !== 'ADMIN') return res.status(403).json({ error: 'Hanya OWNER/ADMIN yang dapat melihat membership project.' });
+    const memberships = await prisma.projectMember.findMany({
+      include: { user: { select: { id: true, name: true, username: true, role: true } }, project: { select: { id: true, name: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ data: memberships });
+  } catch (error) { res.status(500).json({ error: error.message || 'Gagal memuat membership project.' }); }
+});
+
+router.put('/project-memberships/:projectId', async (req, res) => {
+  try {
+    if (req.user?.role !== 'OWNER' && req.user?.role !== 'ADMIN') return res.status(403).json({ error: 'Hanya OWNER/ADMIN yang dapat mengatur membership project.' });
+    const projectId = String(req.params.projectId);
+    const userIds = [...new Set((Array.isArray(req.body?.userIds) ? req.body.userIds : []).map(String).filter(Boolean))];
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true, name: true } });
+    if (!project) return res.status(404).json({ error: 'Project tidak ditemukan.' });
+    const users = await prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true } });
+    if (users.length !== userIds.length) return res.status(400).json({ error: 'Satu atau lebih user tidak ditemukan.' });
+    await prisma.$transaction(async (tx) => {
+      await tx.projectMember.deleteMany({ where: { projectId } });
+      if (userIds.length) await tx.projectMember.createMany({ data: userIds.map((userId) => ({ projectId, userId })) });
+    });
+    await logSecurity(req, { module: 'SETTING', action: 'PROJECT_MEMBERSHIP_UPDATE', entityType: 'PROJECT', entityId: projectId, entityName: project.name, summary: `Membership project ${project.name} diperbarui.`, changes: { userIds } });
+    res.json({ message: 'Membership project disimpan.', data: { projectId, userIds } });
+  } catch (error) { res.status(500).json({ error: error.message || 'Gagal menyimpan membership project.' }); }
+});
+
 router.get('/integration-status', (_req, res) => {
   res.json({ gmailEnabled: process.env.GMAIL_OTP_ENABLED === 'true', otpTtlMinutes: 10, maxOtpAttempts: 5, suspiciousLogin: { failedAttempts: 5, windowMinutes: 15 }, retentionMonths: 3 });
 });
