@@ -16,7 +16,7 @@ const {
 } = require("../../services/rabExportHelper");
 
 const router = express.Router();
-const RAP_VIEW_ROLES = new Set(["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"]);
+const RAP_VIEW_ROLES = new Set(["OWNER", "ADMIN", "PERENCANA"]);
 
 function escapeHtml(s) {
   return String(s ?? "").replace(
@@ -203,10 +203,10 @@ router.get("/projects/:projectId/rab-items/view", verifyToken, async (req, res) 
       return res.status(400).send("Mode view harus RAP atau RAB.");
     }
     if (!RAP_VIEW_ROLES.has(req.user?.role)) {
-      return res.status(403).send("Akses RAP hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA.");
+      return res.status(403).send("Akses RAP hanya untuk OWNER, ADMIN, atau PERENCANA.");
     }
-    if (mode === "RAB" && req.user?.role !== "SUPER_ADMIN") {
-      return res.status(403).send("Akses RAB Selling hanya untuk SUPER_ADMIN.");
+    if (mode === "RAB" && req.user?.role !== "OWNER") {
+      return res.status(403).send("Akses RAB Selling hanya untuk OWNER.");
     }
 
     const project = await prisma.project.findUnique({

@@ -15,7 +15,7 @@ test('normalize profile accepts own name and email but never role', () => {
     name: '  Nama Baru  ',
     email: ' USER@Example.COM ',
     username: 'username-baru',
-    role: 'SUPER_ADMIN',
+    role: 'OWNER',
     isActive: false,
   });
   assert.deepEqual(result, {

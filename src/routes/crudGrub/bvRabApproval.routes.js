@@ -15,9 +15,9 @@ const {
 } = require("../../services/bvRabApprovalService");
 
 const router = express.Router();
-const APPROVAL_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
-const REVIEWER_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER"];
-const SUBMITTER_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const APPROVAL_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
+const REVIEWER_ROLES = ["OWNER", "ADMIN"];
+const SUBMITTER_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 function publicApprovalShape(row, role) {
   if (!row) return null;

@@ -392,7 +392,7 @@ const { buildRabSheet, normalizeRabExportMode } = require("../../services/rabExp
 const { verifyToken } = require("../../middleware/auth");
 
 const router = express.Router();
-const RAP_EXPORT_ROLES = new Set(["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"]);
+const RAP_EXPORT_ROLES = new Set(["OWNER", "ADMIN", "PERENCANA"]);
 
 function rabSheetCategoryCode(categoryCode) {
   const code = String(categoryCode || "GENERAL").trim().toUpperCase();
@@ -424,12 +424,12 @@ router.get("/projects/:projectId/rab-items/export", verifyToken, async (req, res
     if (!mode) {
       return res.status(400).json({ error: "Mode export harus RAP, RAB, atau COMBINED." });
     }
-    // Role-aware: PM/Perencana hanya boleh RAP (costing). RAB/COMBINED tetap SUPER_ADMIN.
+    // Role-aware: PM/Perencana hanya boleh RAP (costing). RAB/COMBINED tetap OWNER.
     if (!RAP_EXPORT_ROLES.has(req.user?.role)) {
-      return res.status(403).json({ error: "Akses Ditolak! Fitur export hanya untuk SUPER_ADMIN, PROJECT_MANAGER, atau PERENCANA." });
+      return res.status(403).json({ error: "Akses Ditolak! Fitur export hanya untuk OWNER, ADMIN, atau PERENCANA." });
     }
-    if (mode !== "RAP" && req.user?.role !== "SUPER_ADMIN") {
-      return res.status(403).json({ error: "Export RAB/Combined hanya untuk SUPER_ADMIN." });
+    if (mode !== "RAP" && req.user?.role !== "OWNER") {
+      return res.status(403).json({ error: "Export RAB/Combined hanya untuk OWNER." });
     }
 
     const project = await prisma.project.findUnique({

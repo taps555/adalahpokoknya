@@ -7,9 +7,9 @@ const { verifyToken } = require("../../middleware/auth");
 const { createTransaksiBukuBesar } = require("./glBank.routes.js");
 const PDFDocument = require("pdfkit");
 
-const CREATOR_ROLES = ["SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"];
-const FINANCE_VERIFY_ROLES = ["SUPER_ADMIN", "FINANCE"];
-const FINAL_APPROVE_ROLES = ["SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"];
+const CREATOR_ROLES = ["OWNER", "FINANCE", "ADMIN"];
+const FINANCE_VERIFY_ROLES = ["OWNER", "FINANCE"];
+const FINAL_APPROVE_ROLES = ["OWNER", "FINANCE", "ADMIN"];
 
 function getUserId(req) {
   return req.user?.userId || req.user?.id || null;

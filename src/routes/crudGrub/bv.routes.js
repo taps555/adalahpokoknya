@@ -25,7 +25,7 @@ const { buildRabSheet } = require("../../services/rabExportHelper");
 const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
-const BV_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const BV_MUTATION_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 const VALID_DISCIPLINE_LABELS = new Set(["GENERAL", "SIPIL", "INTERIOR"]);
 
@@ -377,7 +377,7 @@ router.get("/projects/:projectId/bv-items", verifyToken, async (req, res) => {
     });
 
     const result = items.map(withStatus);
-    res.json(req.user?.role === "SUPER_ADMIN" ? result : result.map(redactLinkedSelling));
+    res.json(req.user?.role === "OWNER" ? result : result.map(redactLinkedSelling));
   } catch (error) {
     console.error("Error List BvItem:", error);
     res.status(500).json({ error: "Terjadi kesalahan pada server." });
@@ -749,7 +749,7 @@ router.put(
       return saved;
     });
 
-    const responseData = req.user?.role === "SUPER_ADMIN" ? updated : redactSellingFields(updated);
+    const responseData = req.user?.role === "OWNER" ? updated : redactSellingFields(updated);
     res.json({ message: "Item BV berhasil diperbarui", data: responseData });
   } catch (error) {
     console.error("Error Update BvItem:", error);
@@ -996,7 +996,7 @@ async function rapikanAnak(tx, indukBvId) {
 }
 
 /** POST /bv-items/:id/sync — update volume RAB sesuai BV terbaru */
-router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     // Tambahkan includeChildren dari req.body
@@ -1254,7 +1254,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
       return { rabItem, bvItem: updatedBv };
     });
 
-    const responseData = req.user?.role === "SUPER_ADMIN" ? result : redactSellingFields(result);
+    const responseData = req.user?.role === "OWNER" ? result : redactSellingFields(result);
     res
       .status(201)
       .json({ message: "Item BV berhasil di-link ke RAB", data: responseData });
@@ -1272,7 +1272,7 @@ router.post("/bv-items/:id/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMI
 // ==========================================
 // BULK ACTION: LINK TO RAB MASSAL
 // ==========================================
-router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { itemIds } = req.body;
 
@@ -1436,7 +1436,7 @@ router.post("/bv-items-bulk/link-to-rab", verifyToken, authorizeRoles("SUPER_ADM
   }
 });
 
-router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { itemIds } = req.body;
 
@@ -1566,7 +1566,7 @@ router.post("/bv-items-bulk/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "P
   }
 });
 
-router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
     const bvItem = await prisma.bvItem.findUnique({
@@ -1687,7 +1687,7 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
       return hasil;
     });
 
-    const responseData = req.user?.role === "SUPER_ADMIN" ? updated : redactSellingFields(updated);
+    const responseData = req.user?.role === "OWNER" ? updated : redactSellingFields(updated);
     res.json({
       message:
         "RAB berhasil disinkronkan dengan BV terbaru (nama, satuan, RAP, RAB, volume, posisi)",
@@ -1704,7 +1704,7 @@ router.post("/bv-items/:id/sync", verifyToken, authorizeRoles("SUPER_ADMIN", "PR
   }
 });
 
-router.post("/bv-items/:id/unlink", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), guardBvApproval, async (req, res) => {
+router.post("/bv-items/:id/unlink", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), guardBvApproval, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -2448,7 +2448,7 @@ async function buildBvSheetFromData(ws, groups, project) {
 router.get(
   "/projects/:projectId/bv-items/export-excel",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("OWNER"),
   async (req, res) => {
   try {
     const { projectId } = req.params;

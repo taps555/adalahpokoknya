@@ -13,7 +13,7 @@ const {
 const path = require("path");
 const fs = require("fs");
 
-const PROJECT_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const PROJECT_MUTATION_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 // POST /api/projects
 // body: { name, location, hspkPeriod, interiorGrade, sipilGrade, categories?, clientId?, clientName? }
@@ -153,6 +153,10 @@ router.post(
 // GET /api/projects/:id
 router.get("/:id", async (req, res, next) => {
   try {
+    // Pembatasan membership: user dengan ProjectMember hanya melihat project anggotanya.
+    if (req.projectScope && !req.projectScope.includes(req.params.id)) {
+      return res.status(403).json({ error: "Anda bukan anggota project ini." });
+    }
     const project = await prisma.project.findUnique({
       where: { id: req.params.id },
       include: {
@@ -176,6 +180,7 @@ router.get("/", async (req, res, next) => {
   try {
     const { clientId, discipline, grade } = req.query;
     const where = {};
+    if (req.projectScope) where.id = { in: req.projectScope };
     if (clientId) where.clientId = clientId;
     if (discipline) where.discipline = discipline;
     if (grade) where.grade = grade;

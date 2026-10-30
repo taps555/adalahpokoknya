@@ -176,7 +176,7 @@ async function recordBulkChanges(db, changes) {
 }
 
 function redactHistoryEntry(entry, role) {
-  if (role === "SUPER_ADMIN" || entry?.entityType !== "RAB_ITEM") return entry;
+  if (role === "OWNER" || entry?.entityType !== "RAB_ITEM") return entry;
   const redactSnapshot = (snapshot) => Object.fromEntries(
     Object.entries(snapshot || {}).filter(([field]) => !SELLING_FIELDS.has(field)),
   );
@@ -189,7 +189,7 @@ function redactHistoryEntry(entry, role) {
 }
 
 async function restoreSnapshot(db, entityType, snapshot, changedFields, role) {
-  const restrictedFields = role === "SUPER_ADMIN"
+  const restrictedFields = role === "OWNER"
     ? new Set()
     : new Set(["rabUnitPrice", "rabTotalPrice"]);
   const fields = new Set((changedFields || []).filter((field) => !restrictedFields.has(field)));
@@ -221,7 +221,7 @@ async function restoreSnapshot(db, entityType, snapshot, changedFields, role) {
         create: (snapshot.components || []).map(({ id, rabItemId, ...row }) => row),
       };
     }
-    if (role !== "SUPER_ADMIN" && (fields.has("rapUnitPrice") || fields.has("overheadPercent"))) {
+    if (role !== "OWNER" && (fields.has("rapUnitPrice") || fields.has("overheadPercent"))) {
       const rapUnitPrice = fields.has("rapUnitPrice") ? Number(snapshot.rapUnitPrice) : Number(snapshot.rapUnitPrice);
       const overheadPercent = fields.has("overheadPercent") ? Number(snapshot.overheadPercent) : Number(snapshot.overheadPercent);
       data.rabUnitPrice = rapUnitPrice + rapUnitPrice * (overheadPercent / 100);

@@ -14,7 +14,7 @@ const {
 } = require("../services/workSubCategoryService");
 const { nextWorkCategorySortOrder } = require("../services/workCategoryOrderService");
 
-const CATEGORY_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const CATEGORY_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 function sendServiceError(res, error, label) {
   if (error.statusCode) {

@@ -37,12 +37,12 @@ enum FileKind {
 }
 
 enum Role {
-  SUPER_ADMIN
+  OWNER
   PERENCANA
   PELAKSANA
   FINANCE
   PURCHASING
-  PROJECT_MANAGER
+  ADMIN
 }
 
 enum Survey3DStatus {
@@ -122,6 +122,7 @@ model User {
   bukuBesarTransaksi             BukuBesarTransaksi[]     @relation("TransaksiBB")
   createdTasks                   TaskItem[]               @relation("TaskCreator")
   assignedTasks                  TaskItem[]               @relation("TaskAssignee")
+  projectMemberships             ProjectMember[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -325,6 +326,44 @@ model UploadIssue {
 }
 
 // =========================================================
+// RBAC template permission + project membership
+// =========================================================
+model Permission {
+  id              String           @id @default(cuid())
+  key             String           @unique
+  module          String
+  action          String
+  rolePermissions RolePermission[]
+
+  @@index([module])
+}
+
+model RolePermission {
+  id           String     @id @default(cuid())
+  role         Role
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  allowed      Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([role, permissionId])
+  @@index([role])
+}
+
+model ProjectMember {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+// =========================================================
 // Tambahan: Client & Project
 // Bagian "Input Data Dasar" + "Pemilihan Data HSPK/AHSP"
 // =========================================================
@@ -359,6 +398,7 @@ model Project {
   changeHistory     BvRabChangeHistory[]
   approvalRevisions BvRabApprovalRevision[]
   workCategories    ProjectWorkCategory[]
+  members           ProjectMember[]
 
   rabStatus         RabStatus          @default(DRAFT)
   materialRequests  MaterialRequest[]
@@ -1003,7 +1043,7 @@ enum ProcurementStatus {
 
 enum POStatus {
   BELUM_APPROVE // baru dibuat purchasing, belum dilihat finance
-  MENUNGGU_ATASAN // finance sudah ACC, nunggu PROJECT_MANAGER
+  MENUNGGU_ATASAN // finance sudah ACC, nunggu ADMIN
   APPROVED // dua tingkat lolos
   REJECTED
 }

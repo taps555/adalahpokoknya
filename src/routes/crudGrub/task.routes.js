@@ -5,12 +5,12 @@ const { verifyToken } = require("../../middleware/auth");
 const router = express.Router();
 
 const VALID_ROLES = [
-  "SUPER_ADMIN",
+  "OWNER",
   "PERENCANA",
   "PELAKSANA",
   "FINANCE",
   "PURCHASING",
-  "PROJECT_MANAGER",
+  "ADMIN",
 ];
 
 /**
@@ -24,7 +24,7 @@ const VALID_ROLES = [
  */
 const canUserChangeStatus = (user, task) => {
   if (!user || !task) return false;
-  if (user.role === "SUPER_ADMIN") return true;
+  if (user.role === "OWNER") return true;
   if (task.creatorId === user.userId) return true;
   if (task.assigneeId) return task.assigneeId === user.userId;
   if (task.targetRole) return task.targetRole === user.role;
@@ -195,7 +195,7 @@ router.post("/tasks", verifyToken, async (req, res) => {
 /**
  * PUT /api/tasks/:id
  * Mengedit detail tugas.
- * Aturan: Hanya Creator tugas atau SUPER_ADMIN yang berhak mengedit detail task.
+ * Aturan: Hanya Creator tugas atau OWNER yang berhak mengedit detail task.
  */
 router.put("/tasks/:id", verifyToken, async (req, res) => {
   try {
@@ -216,7 +216,7 @@ router.put("/tasks/:id", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Tugas tidak ditemukan." });
     }
 
-    const isSuperAdmin = req.user.role === "SUPER_ADMIN";
+    const isSuperAdmin = req.user.role === "OWNER";
     const isCreator = existingTask.creatorId === req.user.userId;
 
     if (!isSuperAdmin && !isCreator) {
@@ -374,7 +374,7 @@ router.patch("/tasks/reorder", verifyToken, async (req, res) => {
 /**
  * DELETE /api/tasks/:id
  * Menghapus tugas.
- * Aturan: Hanya Creator atau SUPER_ADMIN yang berhak menghapus.
+ * Aturan: Hanya Creator atau OWNER yang berhak menghapus.
  */
 router.delete("/tasks/:id", verifyToken, async (req, res) => {
   try {
@@ -385,7 +385,7 @@ router.delete("/tasks/:id", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Tugas tidak ditemukan." });
     }
 
-    const isSuperAdmin = req.user.role === "SUPER_ADMIN";
+    const isSuperAdmin = req.user.role === "OWNER";
     const isCreator = existingTask.creatorId === req.user.userId;
 
     if (!isSuperAdmin && !isCreator) {

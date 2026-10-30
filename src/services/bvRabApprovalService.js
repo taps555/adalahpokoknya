@@ -80,7 +80,7 @@ function redactObjectSelling(value) {
 }
 
 function redactBaselineSnapshot(snapshot, role) {
-  return role === "SUPER_ADMIN" ? snapshot : redactObjectSelling(snapshot);
+  return role === "OWNER" ? snapshot : redactObjectSelling(snapshot);
 }
 
 function diffRows(beforeRows = [], afterRows = []) {

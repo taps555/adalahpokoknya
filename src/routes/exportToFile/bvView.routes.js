@@ -556,7 +556,7 @@ const groupIncludeLevel1 = {
 router.get(
   "/projects/:projectId/bv-items/view",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"),
+  authorizeRoles("OWNER", "ADMIN", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;

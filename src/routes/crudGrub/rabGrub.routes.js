@@ -8,13 +8,13 @@ const { normalizeOhDefinitions } = require("../../services/rabOhService");
 const router = express.Router();
 
 const redactSellingResponse = (req, res, next) => {
-  if (req.user?.role === "SUPER_ADMIN") return next();
+  if (req.user?.role === "OWNER") return next();
   const originalJson = res.json.bind(res);
   res.json = (body) => originalJson(redactSellingFields(body));
   next();
 };
 
-const canEditRap = (req) => ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role);
+const canEditRap = (req) => ["OWNER", "ADMIN", "PERENCANA"].includes(req.user?.role);
 const protectRapWrite = (req, res, next) => {
   if (!canEditRap(req)) return res.status(403).json({ error: "Tidak memiliki akses mengubah RAP." });
   next();

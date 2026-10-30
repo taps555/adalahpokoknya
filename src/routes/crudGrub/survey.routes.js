@@ -106,7 +106,7 @@ router.get("/projects/:projectId/survey-3d", verifyToken, async (req, res) => {
 router.put(
   "/projects/:projectId/survey-3d",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  authorizeRoles("OWNER", "PERENCANA"),
   uploadSurvey3d.array("images", MAX_IMAGES_3D),
   async (req, res) => {
     const uploadedUrls = (req.files || []).map(
