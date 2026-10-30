@@ -13,7 +13,10 @@ const SECRET_KEY = process.env.JWT_SECRET || "rahasia_super_aman_123";
  */
 router.post("/register", async (req, res) => {
   try {
-    const { username, password, name, role, email } = req.body;
+    // Batas sementara: pendaftaran publik hanya boleh membuat role non-privilege.
+    const requestedRole = String(req.body?.role || "PERENCANA").toUpperCase();
+    const role = ["PERENCANA", "PELAKSANA", "FINANCE", "PURCHASING"].includes(requestedRole) ? requestedRole : "PERENCANA";
+    const { username, password, name, email } = req.body;
 
     // 1. Cek apakah username sudah dipakai
     const existingUser = await prisma.user.findUnique({ where: { username } });
