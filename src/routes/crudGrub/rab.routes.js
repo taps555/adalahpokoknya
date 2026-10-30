@@ -12,26 +12,26 @@ const { assertProjectEditable } = require("../../services/bvRabApprovalService")
 const { resolveOhBreakdown, calculateRabOh, normalizeOhDefinitions, alignOhComponents, DEFAULT_OH_DEFINITIONS } = require("../../services/rabOhService");
 
 const redactSellingResponse = (req, res, next) => {
-  if (req.user?.role === "SUPER_ADMIN") return next();
+  if (req.user?.role === "OWNER") return next();
   const originalJson = res.json.bind(res);
   res.json = (body) => originalJson(redactSellingFields(body));
   next();
 };
 const protectSelling = (req, res, next) => {
-  if (req.user?.role === "SUPER_ADMIN") return next();
+  if (req.user?.role === "OWNER") return next();
   const isSellingWrite = ["rabUnitPrice", "rabTotalPrice"].some((key) =>
     Object.prototype.hasOwnProperty.call(req.body || {}, key),
   );
   if (isSellingWrite) {
     return res.status(403).json({
-      error: "Harga jual RAB hanya dapat diubah oleh SUPER_ADMIN.",
+      error: "Harga jual RAB hanya dapat diubah oleh OWNER.",
     });
   }
   next();
 };
 
 const protectRapWrite = (req, res, next) => {
-  if (!["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"].includes(req.user?.role)) {
+  if (!["OWNER", "ADMIN", "PERENCANA"].includes(req.user?.role)) {
     return res.status(403).json({ error: "Tidak memiliki akses mengubah RAP." });
   }
   next();
@@ -338,7 +338,7 @@ router.delete("/rab-items/:id", async (req, res) => {
 //atas no revisi
 
 /** PUT /rab-items/:id/switch-job — ganti sumber JobType master, tarik rincian AHSP */
-router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), async (req, res) => {
   try {
     const { id } = req.params;
     const { newJobTypeId, customOverhead, ahspDiscipline, workCategoryId, workSubCategoryId } = req.body;
@@ -513,7 +513,7 @@ router.put("/rab-items/:id/switch-job", verifyToken, authorizeRoles("SUPER_ADMIN
 router.post(
   "/rab-items/bulk-delete",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"),
+  authorizeRoles("OWNER", "ADMIN", "PERENCANA"),
   async (req, res) => {
     try {
       const { ids } = req.body;
@@ -668,7 +668,7 @@ router.put("/rab-items/bulk-price", async (req, res) => {
   }
 });
 
-router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"), async (req, res) => {
+router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("OWNER", "ADMIN", "PERENCANA"), async (req, res) => {
   try {
     const { ids, newJobTypeId, customOverhead, ahspDiscipline, workCategoryId, workSubCategoryId } = req.body;
 
@@ -851,7 +851,7 @@ router.put("/rab-items/bulk-switch-job", verifyToken, authorizeRoles("SUPER_ADMI
 router.put(
   "/projects/:projectId/rab-items/bulk-price-by-name",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"),
+  authorizeRoles("OWNER", "ADMIN", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;
@@ -965,7 +965,7 @@ const formatDate = (date) => {
 router.post(
   "/projects/:projectId/sync-finance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("OWNER"),
   async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -1188,7 +1188,7 @@ router.post(
 router.put(
   "/material-request-items/finance-update-bulk",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("OWNER", "FINANCE"),
   async (req, res) => {
     try {
       const { items } = req.body; // [{ id, orderedVolume, catatanFinance }, ...]
@@ -1256,7 +1256,7 @@ router.put(
 router.post(
   "/projects/:projectId/cancel-finance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PERENCANA"),
+  authorizeRoles("OWNER", "PERENCANA"),
   async (req, res) => {
     try {
       const { projectId } = req.params;

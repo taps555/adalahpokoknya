@@ -200,7 +200,7 @@ test("records every changed item in one bulk transaction", async () => {
   assert.ok(created.every((entry) => entry.action === "BULK_UPDATE"));
 });
 
-test("redacts RAB selling snapshots and changes outside SUPER_ADMIN", () => {
+test("redacts RAB selling snapshots and changes outside OWNER", () => {
   const entry = {
     entityType: "RAB_ITEM",
     beforeData: { rapUnitPrice: "100", rabUnitPrice: "120", rabTotalPrice: "240" },

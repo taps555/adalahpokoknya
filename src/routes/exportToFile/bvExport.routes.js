@@ -8,7 +8,7 @@ const { verifyToken, authorizeRoles } = require("../../middleware/auth");
 
 const router = express.Router();
 
-router.get("/projects/:projectId/bv-items/export", verifyToken, authorizeRoles("PROJECT_MANAGER", "PERENCANA", "SUPER_ADMIN"), async (req, res) => {
+router.get("/projects/:projectId/bv-items/export", verifyToken, authorizeRoles("ADMIN", "PERENCANA", "OWNER"), async (req, res) => {
   try {
     const { projectId } = req.params;
     const project = await prisma.project.findUnique({
@@ -43,7 +43,7 @@ router.get("/projects/:projectId/bv-items/export", verifyToken, authorizeRoles("
 router.get(
   "/projects/:projectId/bv-items/export-combined",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN"),
+  authorizeRoles("OWNER"),
   async (req, res) => {
     try {
       const { projectId } = req.params;

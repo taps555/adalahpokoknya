@@ -46,8 +46,8 @@ function assertRealImage(buffer) {
 }
 
 function settingAccess(req, res, next) {
-  if (SETTINGS_OPEN_ACCESS || req.user?.role === 'SUPER_ADMIN') return next();
-  return res.status(403).json({ error: 'Akses Setting hanya untuk SUPER_ADMIN.' });
+  if (SETTINGS_OPEN_ACCESS || req.user?.role === 'OWNER') return next();
+  return res.status(403).json({ error: 'Akses Setting hanya untuk OWNER.' });
 }
 
 function actor(req) {

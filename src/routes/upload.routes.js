@@ -158,7 +158,7 @@ router.get('/uploads', async (req, res, next) => {
 router.delete(
   '/uploads/:id',
   verifyToken,
-  authorizeRoles('SUPER_ADMIN', 'PROJECT_MANAGER'),
+  authorizeRoles('OWNER', 'ADMIN'),
   async (req, res, next) => {
     try {
       const { id } = req.params;
@@ -184,7 +184,7 @@ router.delete(
 router.delete(
   '/del/:id',
   verifyToken,
-  authorizeRoles('SUPER_ADMIN', 'PROJECT_MANAGER'),
+  authorizeRoles('OWNER', 'ADMIN'),
   async (req, res, next) => {
     try {
       const { id } = req.params;

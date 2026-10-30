@@ -17,7 +17,7 @@ const {
 } = require("../../services/bvRabAuditService");
 
 const router = express.Router();
-const HISTORY_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const HISTORY_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 router.get(
   "/projects/:projectId/bv-rab-history",

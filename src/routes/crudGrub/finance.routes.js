@@ -814,7 +814,7 @@ router.get("/po/:id", verifyToken, async (req, res) => {
 router.put(
   "/po/:id/verify",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("OWNER", "FINANCE"),
   async (req, res) => {
     try {
       const { catatanFinance } = req.body || {};
@@ -909,14 +909,14 @@ router.put(
 
 /**
  * PUT /api/finance/po/:id/approve
- * TINGKAT 2 — Atasan (PROJECT_MANAGER) menyetujui.
+ * TINGKAT 2 — Atasan (ADMIN) menyetujui.
  * MENUNGGU_ATASAN -> APPROVED
- * Tetap menerima BELUM_APPROVE untuk kompatibilitas data lama / SUPER_ADMIN.
+ * Tetap menerima BELUM_APPROVE untuk kompatibilitas data lama / OWNER.
  */
 router.put(
   "/po/:id/approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "ADMIN"),
   async (req, res) => {
     try {
       const existing = await prisma.purchaseOrder.findUnique({
@@ -1069,7 +1069,7 @@ router.put(
 router.put(
   "/po/:id/reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const { rejectReason } = req.body;
@@ -1128,7 +1128,7 @@ router.put(
 router.put(
   "/po/:id/cancel-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const existing = await prisma.purchaseOrder.findUnique({

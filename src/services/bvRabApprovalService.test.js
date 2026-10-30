@@ -65,12 +65,12 @@ test("hashes the same logical baseline consistently", () => {
   assert.match(hashBaselineSnapshot(baseline), /^[a-f0-9]{64}$/);
 });
 
-test("redacts every RAB selling field from nested baseline rows outside SUPER_ADMIN", () => {
+test("redacts every RAB selling field from nested baseline rows outside OWNER", () => {
   const baseline = buildBaselineSnapshot(sampleSnapshotInput());
   const visible = redactBaselineSnapshot(baseline, "PERENCANA");
   assert.equal(visible.rabItems[0].rabUnitPrice, undefined);
   assert.equal(visible.rabItems[0].rabTotalPrice, undefined);
-  assert.equal(redactBaselineSnapshot(baseline, "SUPER_ADMIN").rabItems[0].rabUnitPrice, "120.00");
+  assert.equal(redactBaselineSnapshot(baseline, "OWNER").rabItems[0].rabUnitPrice, "120.00");
 });
 
 test("diffs BV/RAB rows against baseline and redacts selling values from non-admin output", () => {
@@ -86,7 +86,7 @@ test("diffs BV/RAB rows against baseline and redacts selling values from non-adm
   assert.equal(diff.bv.removed.length, 0);
   assert.equal(diff.rab.changed.length, 1);
   assert.ok(diff.rab.changed[0].changes.every((change) => !["rabUnitPrice", "rabTotalPrice"].includes(change.field)));
-  assert.equal(diffBaselineSnapshots(baseline, current, "SUPER_ADMIN").rab.changed[0].changes.some((change) => change.field === "rabUnitPrice"), true);
+  assert.equal(diffBaselineSnapshots(baseline, current, "OWNER").rab.changed[0].changes.some((change) => change.field === "rabUnitPrice"), true);
 });
 
 test("submit rejects non-header leaves missing a subcategory but keeps legacy discipline rows", async () => {

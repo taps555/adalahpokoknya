@@ -37,12 +37,12 @@ enum FileKind {
 }
 
 enum Role {
-  SUPER_ADMIN
+  OWNER
   PERENCANA
   PELAKSANA
   FINANCE
   PURCHASING
-  PROJECT_MANAGER
+  ADMIN
 }
 
 enum Survey3DStatus {
@@ -1003,7 +1003,7 @@ enum ProcurementStatus {
 
 enum POStatus {
   BELUM_APPROVE // baru dibuat purchasing, belum dilihat finance
-  MENUNGGU_ATASAN // finance sudah ACC, nunggu PROJECT_MANAGER
+  MENUNGGU_ATASAN // finance sudah ACC, nunggu ADMIN
   APPROVED // dua tingkat lolos
   REJECTED
 }

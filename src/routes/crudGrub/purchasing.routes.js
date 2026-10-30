@@ -849,7 +849,7 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
 router.put(
   "/pengajuan-bayar/:id/verify",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("OWNER", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -993,14 +993,14 @@ const syncPembayaranToPending = async (pengajuanId, poId) => {
 
 /**
  * PUT /api/pengajuan-bayar/:id/approve
- * TINGKAT 2 — Atasan (PROJECT_MANAGER) menyetujui final.
+ * TINGKAT 2 — Atasan (ADMIN) menyetujui final.
  * APPROVED_FINANCE -> APPROVED
  * Tetap terima PENDING / APPROVED_FINANCE untuk kompatibilitas.
  */
 router.put(
   "/pengajuan-bayar/:id/approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -1133,7 +1133,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/cancel-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -1170,7 +1170,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const reason = req.body.reason || req.body.catatan;
@@ -1235,7 +1235,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/item-decision",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const { decisions = [], generalRejectReason = "" } = req.body;
@@ -1478,7 +1478,7 @@ router.put(
 router.post(
   "/pengajuan-bayar/bulk-approve",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const { ids = [] } = req.body;
@@ -1611,7 +1611,7 @@ router.post(
 router.post(
   "/pengajuan-bayar/bulk-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const { ids = [], reason = "Ditolak oleh atasan" } = req.body;
@@ -2559,7 +2559,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
 router.put(
   "/pembayaran-supplier/:id/approve-finance",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("OWNER", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2649,7 +2649,7 @@ router.put(
 router.put(
   "/pembayaran-supplier/:id/approve-atasan",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2723,7 +2723,7 @@ router.put(
 router.post(
   "/pembayaran-supplier/:id/kirim-kas-bank",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE"),
+  authorizeRoles("OWNER", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2749,7 +2749,7 @@ router.post(
       }
 
       const enriched = enrichPembayaranApproval(existing);
-      if (enriched.approvalStatus !== "APPROVED" && req.user?.role !== "SUPER_ADMIN") {
+      if (enriched.approvalStatus !== "APPROVED" && req.user?.role !== "OWNER") {
         return res.status(400).json({
           error: "Pembayaran belum disetujui oleh Atasan. Harus menunggu approval Atasan di menu Permintaan Bayar.",
         });
@@ -2911,7 +2911,7 @@ router.post(
 router.put(
   "/pembayaran-supplier/:id/reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
   async (req, res) => {
     try {
       const { reason = "Ditolak" } = req.body;
@@ -2961,7 +2961,7 @@ router.put(
 router.post(
   "/pembayaran-supplier/bulk-approve-atasan",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "ADMIN"),
   async (req, res) => {
     try {
       const { ids = [] } = req.body;
@@ -3018,7 +3018,7 @@ router.post(
 router.post(
   "/pembayaran-supplier/bulk-reject",
   verifyToken,
-  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
+  authorizeRoles("OWNER", "ADMIN"),
   async (req, res) => {
     try {
       const { ids = [], reason = "Ditolak oleh Atasan" } = req.body;

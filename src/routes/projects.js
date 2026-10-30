@@ -13,7 +13,7 @@ const {
 const path = require("path");
 const fs = require("fs");
 
-const PROJECT_MUTATION_ROLES = ["SUPER_ADMIN", "PROJECT_MANAGER", "PERENCANA"];
+const PROJECT_MUTATION_ROLES = ["OWNER", "ADMIN", "PERENCANA"];
 
 // POST /api/projects
 // body: { name, location, hspkPeriod, interiorGrade, sipilGrade, categories?, clientId?, clientName? }
