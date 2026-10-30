@@ -12,6 +12,7 @@ const prisma = require('../../lib/prisma');
 const { verifyToken } = require('../../middleware/auth');
 const { normalizeProfileUpdate, validatePasswordChange, publicUser, groupUsersByRole } = require('../../services/securityService');
 const { sanitizeActivityData } = require('../../services/activityLogService');
+const { loadTemplate, saveTemplate, seedPermissions, MODULES, ROLE_ORDER, canManageRole, assertRole } = require('../../services/permissionService');
 
 const router = express.Router();
 const SETTINGS_OPEN_ACCESS = process.env.SETTINGS_OPEN_ACCESS !== 'false';
@@ -230,6 +231,33 @@ router.get('/archives/:month/download', async (req, res) => {
     res.set({ 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `attachment; filename="activity-${month}.txt"` });
     res.send(text);
   } catch (error) { res.status(500).json({ error: `Gagal mengunduh arsip: ${error.message}` }); }
+});
+
+router.get('/permissions/templates', async (req, res) => {
+  try {
+    if (req.user?.role !== 'OWNER') return res.status(403).json({ error: 'Hanya OWNER yang dapat mengatur permission role.' });
+    await seedPermissions(prisma);
+    const template = await loadTemplate(prisma);
+    res.json({ data: { roles: ROLE_ORDER, modules: MODULES, template } });
+  } catch (error) { res.status(500).json({ error: error.message || 'Gagal memuat template permission.' }); }
+});
+
+router.put('/permissions/templates/:role', async (req, res) => {
+  try {
+    if (req.user?.role !== 'OWNER') return res.status(403).json({ error: 'Hanya OWNER yang dapat menyimpan permission role.' });
+    const role = assertRole(req.params.role);
+    if (!canManageRole(req.user.role, role)) return res.status(403).json({ error: 'Role ini tidak dapat diubah.' });
+    const current = await loadTemplate(prisma);
+    current[role] = req.body?.permissions || {};
+    const template = await saveTemplate(prisma, current);
+    await logSecurity(req, { module: 'SETTING', action: 'PERMISSION_UPDATE', entityType: 'ROLE', entityName: role, summary: `Template permission role ${role} diperbarui.`, changes: { role, permissions: template[role] } });
+    res.json({ message: `Permission role ${role} disimpan.`, data: template });
+  } catch (error) { res.status(error.statusCode || 400).json({ error: error.message || 'Gagal menyimpan permission role.' }); }
+});
+
+router.get('/permissions/modules', async (req, res) => {
+  if (req.user?.role !== 'OWNER') return res.status(403).json({ error: 'Hanya OWNER yang dapat melihat katalog permission.' });
+  res.json({ data: MODULES });
 });
 
 router.get('/integration-status', (_req, res) => {
