@@ -36,6 +36,20 @@ app.use(express.urlencoded({ extended: true }));
 // Audit global dipasang sebelum router API. GET biasa diabaikan oleh middleware.
 app.use(activityLogger(prisma));
 
+// RBAC enforcement global: verifikasi token + cek permission per halaman modul.
+// Path /api/auth dikecualikan (login/register belum punya token).
+const { moduleAccessGuard, attachProjectScope } = require("./middleware/moduleAccess");
+const PUBLIC_API_PREFIXES = ["/api/auth", "/api/health", "/api/upload"];
+app.use("/api", (req, res, next) => {
+  const publicPath = PUBLIC_API_PREFIXES.some((prefix) => (req.originalUrl || req.url || "").startsWith(prefix));
+  if (publicPath) return next();
+  if (!req.headers.authorization?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Anda belum login atau token tidak valid." });
+  }
+  const { verifyToken } = require("./middleware/auth");
+  return verifyToken(req, res, () => attachProjectScope(req, res, () => moduleAccessGuard()(req, res, next)));
+});
+
 // Static serve untuk frontend build
 // Gunakan path relatif dari __dirname (berada di backend/src)
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");

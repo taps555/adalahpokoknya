@@ -260,6 +260,33 @@ router.get('/permissions/modules', async (req, res) => {
   res.json({ data: MODULES });
 });
 
+// Akses milik user login sendiri: dipakai guard frontend (sidebar menu & halaman).
+router.get('/permissions/my-access', async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Belum login.' });
+    const role = req.user.role;
+    if (role === 'OWNER') {
+      const allManage = Object.fromEntries(MODULES.map((module) => [module.key, 'MANAGE']));
+      return res.json({ data: { role, template: allManage, projectScope: null } });
+    }
+    const rows = await prisma.rolePermission.findMany({
+      where: { role, allowed: true },
+      select: { permission: { select: { key: true } } },
+    });
+    const granted = new Set(rows.map((row) => row.permission.key));
+    const grid = {};
+    for (const module of MODULES) {
+      if (granted.has(`${module.key}.MANAGE`)) grid[module.key] = 'MANAGE';
+      else if (granted.has(`${module.key}.READ`)) grid[module.key] = 'READ';
+      else grid[module.key] = 'NONE';
+    }
+    const memberships = await prisma.projectMember.findMany({ where: { userId: req.user.id }, select: { projectId: true } });
+    res.json({ data: { role, template: grid, projectScope: memberships.length ? memberships.map((m) => m.projectId) : null } });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Gagal memuat akses.' });
+  }
+});
+
 router.get('/integration-status', (_req, res) => {
   res.json({ gmailEnabled: process.env.GMAIL_OTP_ENABLED === 'true', otpTtlMinutes: 10, maxOtpAttempts: 5, suspiciousLogin: { failedAttempts: 5, windowMinutes: 15 }, retentionMonths: 3 });
 });
