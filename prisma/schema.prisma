@@ -104,17 +104,22 @@ model User {
   lastLoginAt                    DateTime?
   emailVerifiedAt               DateTime?
   activityLogs                   ActivityLog[]
+  createdPOs                     PurchaseOrder[]          @relation("CreatedPOsByUser")
   approvedPOs                    PurchaseOrder[]          @relation("ApprovedByUser")
   verifiedPOs                    PurchaseOrder[]          @relation("VerifiedByUser")
   rejectedPOs                    PurchaseOrder[]          @relation("RejectedByUser")
+  createdPengajuan               PengajuanPembayaran[]    @relation("CreatedPengajuanByUser")
   approvedPengajuan              PengajuanPembayaran[]    @relation("ApprovedPengajuanByUser")
   verifiedPengajuan              PengajuanPembayaran[]    @relation("VerifiedPengajuanByUser")
+  createdInvoicePenjualanDesain  InvoicePenjualanDesain[] @relation("CreatedInvoicePenjualanDesainByUser")
   verifiedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("VerifiedInvoicePenjualanDesainByUser")
   approvedInvoicePenjualanDesain InvoicePenjualanDesain[] @relation("ApprovedInvoicePenjualanDesainByUser")
   postedInvoicePenjualanDesain   InvoicePenjualanDesain[] @relation("PostedInvoicePenjualanDesainByUser")
+  createdInvoicePenjualanKlien   InvoicePenjualanKlien[]  @relation("CreatedInvoicePenjualanKlienByUser")
   verifiedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("VerifiedInvoicePenjualanKlienByUser")
   approvedInvoicePenjualanKlien  InvoicePenjualanKlien[]  @relation("ApprovedInvoicePenjualanKlienByUser")
   postedInvoicePenjualanKlien    InvoicePenjualanKlien[]  @relation("PostedInvoicePenjualanKlienByUser")
+  createdInvoiceOperasional      InvoiceOperasional[]     @relation("CreatedInvoiceOperasionalByUser")
   verifiedInvoiceOperasional     InvoiceOperasional[]     @relation("VerifiedInvoiceOperasionalByUser")
   approvedInvoiceOperasional     InvoiceOperasional[]     @relation("ApprovedInvoiceOperasionalByUser")
   postedInvoiceOperasional       InvoiceOperasional[]     @relation("PostedInvoiceOperasionalByUser")
@@ -1296,6 +1301,9 @@ model PurchaseOrder {
   perusahaan   String?   @default("PT DIVES JAYA PERKASA")
   status       POStatus  @default(BELUM_APPROVE)
 
+  createdById  String?
+  createdBy    User?     @relation("CreatedPOsByUser", fields: [createdById], references: [id])
+
   approvedById String?
   approvedBy   User?     @relation("ApprovedByUser", fields: [approvedById], references: [id])
   approvedAt   DateTime?
@@ -1505,6 +1513,8 @@ model PengajuanPembayaran {
   tanggal       DateTime
   totalTagihan  Float          @default(0)
   status        ReturStatus    @default(PENDING)
+  createdById   String?
+  createdBy     User?          @relation("CreatedPengajuanByUser", fields: [createdById], references: [id])
   approvedById  String?
   approvedBy    User?          @relation("ApprovedPengajuanByUser", fields: [approvedById], references: [id])
   approvedAt    DateTime?
@@ -1608,6 +1618,8 @@ model InvoicePenjualanDesain {
   sisaTagihan       Float               @default(0)
   statusBayar       InvoiceBayarStatus  @default(UNPAID)
   approvalStatus    ReturStatus         @default(PENDING)
+  createdById       String?
+  createdBy         User?               @relation("CreatedInvoicePenjualanDesainByUser", fields: [createdById], references: [id])
   rekeningBankId    String?
   rekeningBank      MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
   tipeRekeningId    String?
@@ -1658,6 +1670,8 @@ model InvoicePenjualanKlien {
   sisaTagihan    Float               @default(0)
   statusBayar    InvoiceBayarStatus  @default(UNPAID)
   approvalStatus ReturStatus         @default(PENDING)
+  createdById    String?
+  createdBy      User?               @relation("CreatedInvoicePenjualanKlienByUser", fields: [createdById], references: [id])
   rekeningBankId String?
   rekeningBank   MasterRekeningBank? @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
   tipeRekeningId String?
@@ -1705,6 +1719,8 @@ model InvoiceOperasional {
   sisaTagihan    Float                   @default(0)
   statusBayar    InvoiceBayarStatus      @default(UNPAID)
   approvalStatus ReturStatus             @default(PENDING)
+  createdById    String?
+  createdBy      User?                   @relation("CreatedInvoiceOperasionalByUser", fields: [createdById], references: [id])
   rekeningBankId String?
   rekeningBank   MasterRekeningBank?     @relation(fields: [rekeningBankId], references: [id], onDelete: SetNull)
   tipeRekeningId String?

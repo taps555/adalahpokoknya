@@ -849,7 +849,7 @@ router.put("/pengajuan-bayar/:id", verifyToken, async (req, res) => {
 router.put(
   "/pengajuan-bayar/:id/verify",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -993,14 +993,14 @@ const syncPembayaranToPending = async (pengajuanId, poId) => {
 
 /**
  * PUT /api/pengajuan-bayar/:id/approve
- * TINGKAT 2 — Atasan (ADMIN) menyetujui final.
+ * TINGKAT 2 — Atasan (PROJECT_MANAGER) menyetujui final.
  * APPROVED_FINANCE -> APPROVED
  * Tetap terima PENDING / APPROVED_FINANCE untuk kompatibilitas.
  */
 router.put(
   "/pengajuan-bayar/:id/approve",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -1133,7 +1133,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/cancel-reject",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.pengajuanPembayaran.findUnique({
@@ -1170,7 +1170,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/reject",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const reason = req.body.reason || req.body.catatan;
@@ -1235,7 +1235,7 @@ router.put(
 router.put(
   "/pengajuan-bayar/:id/item-decision",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { decisions = [], generalRejectReason = "" } = req.body;
@@ -1478,7 +1478,7 @@ router.put(
 router.post(
   "/pengajuan-bayar/bulk-approve",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [] } = req.body;
@@ -1611,7 +1611,7 @@ router.post(
 router.post(
   "/pengajuan-bayar/bulk-reject",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [], reason = "Ditolak oleh atasan" } = req.body;
@@ -2559,7 +2559,7 @@ router.put("/pembayaran-supplier/:id", verifyToken, async (req, res) => {
 router.put(
   "/pembayaran-supplier/:id/approve-finance",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2649,7 +2649,7 @@ router.put(
 router.put(
   "/pembayaran-supplier/:id/approve-atasan",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2723,7 +2723,7 @@ router.put(
 router.post(
   "/pembayaran-supplier/:id/kirim-kas-bank",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE"),
   async (req, res) => {
     try {
       const existing = await prisma.pembayaranSupplier.findUnique({
@@ -2749,7 +2749,7 @@ router.post(
       }
 
       const enriched = enrichPembayaranApproval(existing);
-      if (enriched.approvalStatus !== "APPROVED" && req.user?.role !== "OWNER") {
+      if (enriched.approvalStatus !== "APPROVED" && req.user?.role !== "SUPER_ADMIN") {
         return res.status(400).json({
           error: "Pembayaran belum disetujui oleh Atasan. Harus menunggu approval Atasan di menu Permintaan Bayar.",
         });
@@ -2911,7 +2911,7 @@ router.post(
 router.put(
   "/pembayaran-supplier/:id/reject",
   verifyToken,
-  authorizeRoles("OWNER", "FINANCE", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "FINANCE", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { reason = "Ditolak" } = req.body;
@@ -2961,7 +2961,7 @@ router.put(
 router.post(
   "/pembayaran-supplier/bulk-approve-atasan",
   verifyToken,
-  authorizeRoles("OWNER", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [] } = req.body;
@@ -3018,7 +3018,7 @@ router.post(
 router.post(
   "/pembayaran-supplier/bulk-reject",
   verifyToken,
-  authorizeRoles("OWNER", "ADMIN"),
+  authorizeRoles("SUPER_ADMIN", "PROJECT_MANAGER"),
   async (req, res) => {
     try {
       const { ids = [], reason = "Ditolak oleh Atasan" } = req.body;
@@ -3095,6 +3095,19 @@ function streamSupplierInvoicePdf(res, {
   const project = po.project || {};
   const rekening = pembayaran.rekeningBank || {};
 
+  const isJasa = Boolean(pembayaran.jasa || po.jasa || po.isJasa || (po.poNumber && po.poNumber.startsWith("POJ")));
+  const docTitle = isJasa ? "INVOICE JASA / SUBKON" : "INVOICE SUPPLIER";
+  const partyHeaderLabel = isJasa ? "INFORMASI MITRA JASA & PROYEK" : "INFORMASI SUPPLIER & PROYEK";
+  const partyLabel = isJasa ? "Mitra Jasa" : "Supplier";
+  const partyName = isJasa
+    ? (pembayaran.jasa?.nama || po.jasa?.nama || "-")
+    : (supplier.name || "-");
+  const partyContact = isJasa
+    ? (pembayaran.jasa?.telepon || pembayaran.jasa?.kontak || "-")
+    : (supplier.phone || supplier.contact || "-");
+  const itemsSectionTitle = isJasa ? "Rincian Pekerjaan Jasa / SPK" : "Rincian Barang / Material PO";
+  const itemsTableHeader = isJasa ? "Nama Pekerjaan / Deskripsi" : "Nama Barang / Deskripsi";
+
   const noPembayaran = pembayaran.noPembayaran || `INV-${pembayaran.id.slice(0, 8).toUpperCase()}`;
   const tanggalDoc = entry?.tanggal || pembayaran.tanggalBayar || pembayaran.tanggal || new Date();
   const totalTagihan = Number(pembayaran.totalTagihan || po.grandTotal || po.subTotal || 0);
@@ -3103,7 +3116,7 @@ function streamSupplierInvoicePdf(res, {
   const nominalAction = entry ? Number(entry.jumlah || 0) : Number(pembayaran.jumlahBayar || 0);
 
   const isLunas = totalTagihan > 0 && totalTerbayar >= totalTagihan;
-  const statusBayarLabel = isLunas ? "LUNAS" : "TEMPO";
+  const statusBayarLabel = isLunas ? "LUNAS" : (isJasa ? "BON" : "TEMPO");
   const approvalStatusLabel = String(entry?.approvalStatus || pembayaran.approvalStatus || "APPROVED").toUpperCase();
 
   const financeApprovedBy = entry?.financeApprovedBy || pembayaran.financeApprovedBy || "-";
@@ -3126,7 +3139,7 @@ function streamSupplierInvoicePdf(res, {
   }
 
   // Header Title
-  doc.fillColor("#D4AF37").fontSize(18).font("Helvetica-Bold").text("INVOICE SUPPLIER", 300, 26, { align: "right", width: 255 });
+  doc.fillColor("#D4AF37").fontSize(18).font("Helvetica-Bold").text(docTitle, 300, 26, { align: "right", width: 255 });
   doc.fillColor("#FFFFFF").fontSize(10).font("Helvetica-Bold").text(`No: ${noPembayaran}`, 300, 48, { align: "right", width: 255 });
   doc.fillColor("#A3A3A3").fontSize(9).font("Helvetica").text(`Tanggal: ${fmtDateId(tanggalDoc)}`, 300, 64, { align: "right", width: 255 });
   doc.restore();
@@ -3155,20 +3168,20 @@ function streamSupplierInvoicePdf(res, {
   const cardW = 252;
   const cardH = 92;
 
-  // Left Card: Supplier & PO Info
+  // Left Card: Supplier/Jasa & PO Info
   doc.roundedRect(36, y, cardW, cardH, 6).fillAndStroke("#F9FAFB", "#E5E7EB");
-  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(9.5).text("INFORMASI SUPPLIER & PROYEK", 46, y + 8);
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(9.5).text(partyHeaderLabel, 46, y + 8);
   doc.font("Helvetica").fontSize(8.5).fillColor("#6B7280");
-  doc.text("Supplier", 46, y + 26);
+  doc.text(partyLabel, 46, y + 26);
   doc.text("Proyek", 46, y + 42);
-  doc.text("No PO", 46, y + 58);
+  doc.text(isJasa ? "No SPK/PO" : "No PO", 46, y + 58);
   doc.text("Kontak / HP", 46, y + 74);
 
   doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111827");
-  doc.text(`: ${supplier.name || "-"}`, 110, y + 26, { width: cardW - 120, lineBreak: false });
+  doc.text(`: ${partyName}`, 110, y + 26, { width: cardW - 120, lineBreak: false });
   doc.text(`: ${project.name || "-"}`, 110, y + 42, { width: cardW - 120, lineBreak: false });
   doc.text(`: ${po.poNumber || "-"}`, 110, y + 58, { width: cardW - 120, lineBreak: false });
-  doc.text(`: ${supplier.phone || supplier.contact || "-"}`, 110, y + 74, { width: cardW - 120, lineBreak: false });
+  doc.text(`: ${partyContact}`, 110, y + 74, { width: cardW - 120, lineBreak: false });
 
   // Right Card: Payment & Approval Info
   const rightX = 302;
@@ -3189,12 +3202,12 @@ function streamSupplierInvoicePdf(res, {
 
   // Table of Items
   y = 248;
-  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10).text("Rincian Barang / Material PO", 36, y);
+  doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10).text(itemsSectionTitle, 36, y);
 
   y += 16;
   const tableX = 36;
   const colWidths = [26, 215, 60, 48, 85, 84]; // sum = 518
-  const tableHeaders = ["No", "Nama Barang / Deskripsi", "Qty", "Satuan", "Harga Satuan", "Total (Rp)"];
+  const tableHeaders = ["No", itemsTableHeader, "Qty", "Satuan", "Harga Satuan", "Total (Rp)"];
 
   doc.rect(tableX, y, 518, 20).fill("#2A2723");
   doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(8);
@@ -3235,11 +3248,11 @@ function streamSupplierInvoicePdf(res, {
 
   if (items.length === 0) {
     doc.rect(tableX, y, 518, 22).fillAndStroke("#FFFFFF", "#E5E7EB");
-    doc.fillColor("#9CA3AF").text("Detail item barang tidak tersedia.", tableX, y + 6, { width: 518, align: "center" });
+    doc.fillColor("#9CA3AF").text(isJasa ? "Detail item pekerjaan tercantum pada SPK / Kontrak Jasa resmi." : "Detail item barang tidak tersedia.", tableX, y + 6, { width: 518, align: "center" });
     y += 22;
   } else if (items.length > maxDisplayItems) {
     doc.rect(tableX, y, 518, 16).fillAndStroke("#F3F4F6", "#E5E7EB");
-    doc.fillColor("#6B7280").fontSize(7.5).text(`... dan ${items.length - maxDisplayItems} item lainnya tercantum pada Purchase Order resmi`, tableX, y + 4, { width: 518, align: "center" });
+    doc.fillColor("#6B7280").fontSize(7.5).text(`... dan ${items.length - maxDisplayItems} item lainnya tercantum pada dokumen ${isJasa ? "SPK Jasa" : "Purchase Order"} resmi`, tableX, y + 4, { width: 518, align: "center" });
     y += 16;
   }
 
@@ -3403,8 +3416,11 @@ router.get("/pembayaran-supplier/:id/invoice-pdf", async (req, res) => {
       pembayaran.noPembayaran || pembayaran.purchaseOrder?.poNumber || pembayaran.id
     ).replace(/[^a-zA-Z0-9_-]/g, "_");
 
+    const isJasaDoc = Boolean(pembayaran.jasa || pembayaran.purchaseOrder?.jasa || pembayaran.purchaseOrder?.isJasa || (pembayaran.purchaseOrder?.poNumber && pembayaran.purchaseOrder?.poNumber.startsWith("POJ")));
+    const filenamePrefix = isJasaDoc ? "Invoice_Jasa" : "Invoice_Supplier";
+
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="Invoice_Supplier_${noSafe}.pdf"`);
+    res.setHeader("Content-Disposition", `inline; filename="${filenamePrefix}_${noSafe}.pdf"`);
 
     const logoPath = path.resolve(__dirname, "../../../public/assets/dives.png");
     return streamSupplierInvoicePdf(res, {
